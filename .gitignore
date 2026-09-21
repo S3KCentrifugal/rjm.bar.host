@@ -1,0 +1,24 @@
+# Secrets — never commit. Templates live as *.example.
+.env
+.env.*
+!.env.sample
+k8s/**/secrets.yaml
+*.kubeconfig
+kubeconfig
+wg0.conf
+*.key
+
+# rclone / lobby credentials
+rclone.conf
+
+# Local engine and content (lives on the PVC, never in git)
+engine/
+spring-data/
+maps/
+games/
+
+# Runtime state
+var/
+*.log
+
+.DS_Store
