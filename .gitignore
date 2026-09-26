@@ -32,3 +32,6 @@ custom-ai/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Test output (tests/e2e/run.sh)
+e2e-artifacts/

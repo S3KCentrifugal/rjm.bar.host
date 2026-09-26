@@ -220,6 +220,12 @@ jobs:
         if: steps.exists.outputs.exists != 'true'
         run: scripts/smoke_test.sh rjm-host:ci
 
+      - name: Unit tests
+        if: steps.exists.outputs.exists != 'true'
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          tests/run_unit.sh rjm-host:ci
+
       - name: Push the source tag
         if: steps.exists.outputs.exists != 'true'
         run: |
@@ -338,6 +344,40 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Using $IMAGE:$TAG"
 
+      # 5b. lobby credentials. When the repository has this environment's
+      #     LOBBY_* secrets, they become the rjm-host-secrets Secret; changing
+      #     one in GitHub and redeploying updates it. Without them, a Secret
+      #     created by hand (docs/setup.md) is left exactly as it is. Updating a
+      #     Secret restarts nothing by itself; the render step below folds its
+      #     version into the SPADS hash, so SPADS restarts only through the
+      #     mid-game guard.
+      - name: Sync lobby credentials
+        env:
+          LOBBY_LOGIN: ${{ secrets[format('LOBBY_LOGIN_{0}', needs.set-env.outputs.environment == 'prod' && 'PROD' || 'TEST')] }}
+          LOBBY_PASSWORD: ${{ secrets[format('LOBBY_PASSWORD_{0}', needs.set-env.outputs.environment == 'prod' && 'PROD' || 'TEST')] }}
+          LOBBY_OWNER: ${{ secrets[format('LOBBY_OWNER_{0}', needs.set-env.outputs.environment == 'prod' && 'PROD' || 'TEST')] }}
+          LOBBY_ROOM_PASSWORD: ${{ secrets[format('LOBBY_ROOM_PASSWORD_{0}', needs.set-env.outputs.environment == 'prod' && 'PROD' || 'TEST')] }}
+        run: |
+          if [ -z "$LOBBY_LOGIN$LOBBY_PASSWORD$LOBBY_OWNER" ]; then
+            echo "No LOBBY_*_${ENVIRONMENT^^} secrets in the repository; leaving any existing rjm-host-secrets untouched."
+            exit 0
+          fi
+          for v in LOBBY_LOGIN LOBBY_PASSWORD LOBBY_OWNER; do
+            [ -n "${!v}" ] || { echo "::error::${v}_${ENVIRONMENT^^} is not set; set all of LOBBY_LOGIN, LOBBY_PASSWORD and LOBBY_OWNER for $ENVIRONMENT"; exit 1; }
+          done
+          # Values go through files, never command-line arguments.
+          d=$(mktemp -d); chmod 700 "$d"
+          printf '%s' "$LOBBY_LOGIN"    > "$d/SPADS_LOBBY_LOGIN"
+          printf '%s' "$LOBBY_PASSWORD" > "$d/SPADS_LOBBY_PASSWORD"
+          printf '%s' "$LOBBY_OWNER"    > "$d/SPADS_OWNER_LOBBY_LOGIN"
+          printf '%s' "${LOBBY_ROOM_PASSWORD:-*}" > "$d/SPADS_BATTLE_PASSWORD"
+          kubectl create secret generic rjm-host-secrets -n "$NAMESPACE" --from-file="$d" \
+            --dry-run=client -o yaml \
+            | kubectl label --local -f - -o yaml app.kubernetes.io/part-of=rjm-host app.kubernetes.io/component=secrets \
+            | kubectl apply -f -
+          rm -rf "$d"
+          echo "rjm-host-secrets synced from GitHub secrets (room: $([ -n "$LOBBY_ROOM_PASSWORD" ] && [ "$LOBBY_ROOM_PASSWORD" != '*' ] && echo private || echo public))"
+
       # 6. render once: tag, this run's AI override, SPADS replicas, and the
       #    SPADS template hash. What is checked below is exactly what is applied.
       - name: Render manifests
@@ -349,21 +389,25 @@ jobs:
           fi
           # Without lobby credentials SPADS cannot start: hold it at zero rather
           # than create a pod that crash-loops.
-          if kubectl get secret rjm-host-secrets -n "$NAMESPACE" > /dev/null 2>&1; then
+          SECRET_VERSION=$(kubectl get secret rjm-host-secrets -n "$NAMESPACE" -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null || true)
+          if [ -n "$SECRET_VERSION" ]; then
             SPADS=1
           else
             SPADS=0
-            echo "::warning::rjm-host-secrets is missing in $NAMESPACE, so SPADS is held at 0 replicas. Create it from k8s/base/secrets.yaml.example, then redeploy."
+            echo "::warning::rjm-host-secrets is missing in $NAMESPACE, so SPADS is held at 0 replicas. Set the LOBBY_*_${ENVIRONMENT^^} repository secrets (docs/setup.md), then redeploy."
           fi
           sed -i "s|replicas: 1 # SPADS_REPLICAS|replicas: $SPADS|" k8s/base/spads-deployment.yaml
           kubectl kustomize "k8s/overlays/$ENVIRONMENT/" > /tmp/rendered.yaml
           # Hash everything the SPADS Deployment is rendered from, after the
           # substitutions above: its manifest, its ConfigMap source, the base and
-          # overlay kustomizations (image tag, per-environment ports). Any change
-          # -- image, resources, probe, ports, config -- changes the hash, and the
-          # hash lives in the pod template, so SPADS restarts exactly when
-          # something about it changed, and the guard below can tell.
-          HASH=$(cat k8s/base/spads-deployment.yaml k8s/base/spads.env k8s/base/kustomization.yaml                      "k8s/overlays/$ENVIRONMENT"/*.yaml | sha256sum | cut -c1-16)
+          # overlay kustomizations (image tag, per-environment ports), and the
+          # credentials Secret's version. Any change -- image, resources, probe,
+          # ports, config, credentials -- changes the hash, and the hash lives in
+          # the pod template, so SPADS restarts exactly when something about it
+          # changed, and the guard below can tell.
+          HASH=$( { cat k8s/base/spads-deployment.yaml k8s/base/spads.env k8s/base/kustomization.yaml \
+                        "k8s/overlays/$ENVIRONMENT"/*.yaml; echo "secret=$SECRET_VERSION"; } \
+                  | sha256sum | cut -c1-16)
           sed -i "s|SPADS_CONFIG_HASH|h-$HASH|" /tmp/rendered.yaml
           grep -n "image: ghcr\|rjm-host/config-hash" /tmp/rendered.yaml
           echo "spads_replicas=$SPADS" >> "$GITHUB_OUTPUT"

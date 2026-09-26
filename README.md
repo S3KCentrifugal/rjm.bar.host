@@ -14,7 +14,8 @@ Both run BAR's **official** Linux engine release (`recoil_2026.07.04`, pinned in
 [`config/engine.pin`](config/engine.pin)), so what they host is exactly what
 players run. Custom AIs are installed at start, not baked in.
 
-Design: [`docs/autohost-design.md`](docs/autohost-design.md). Backend setup —
+Design: [`docs/autohost-design.md`](docs/autohost-design.md). Lobby operation:
+[`docs/lobby.md`](docs/lobby.md). Tests: [`docs/testing.md`](docs/testing.md). Backend setup —
 keys, tokens, cluster identity, router: [`docs/setup.md`](docs/setup.md). Agent
 and contributor rules: [`AGENTS.md`](AGENTS.md).
 
@@ -168,21 +169,34 @@ tunnels with the same private key and address knock each other off.
 
 ### The lobby host (SPADS)
 
-1. Create the lobby credentials once per namespace (never committed) from
-   [`k8s/base/secrets.yaml.example`](k8s/base/secrets.yaml.example):
-   the whitelisted autohost account, its password, **your** account as owner,
-   and the room password. Then redeploy; SPADS starts and joins the lobby.
-2. For players outside your network, forward **UDP 8452** (test; 8462 for
-   prod) on the router to `mcgill-data`. Without it the room is visible but nobody can join.
-3. In the room (or by private message to the autohost), as owner:
-   - `!addBot Bot1 0 SMRTBARb` — add a server-side bot (`SPADS_ALLOWED_AIS`
-     lists which AIs are allowed)
-   - `!force %Bot1 bonus 50` — +50% resource bonus; `!force %Bot1 team 1` — move it
-   - `!forceStart` — start (SPADS never auto-starts a room with bots in it)
+A co-op room on BAR's lobby server that runs itself: humans against a team of
+8 server-side SMRTBARb bots at +50%. It starts games automatically once
+players are ready, stays open between games, kicks spammers, and archives
+every game. Full guide: [`docs/lobby.md`](docs/lobby.md).
 
-Room settings — name, map, allowed AIs, AI releases — are in
-[`k8s/base/spads.env`](k8s/base/spads.env). Every game's replay, infolog and
-start script land under `spads/` on the output volume.
+1. **Credentials** (your second Chobby account): set the repository secrets
+   `LOBBY_LOGIN_TEST`, `LOBBY_PASSWORD_TEST`, `LOBBY_OWNER_TEST` (your main
+   account) and optionally `LOBBY_ROOM_PASSWORD_TEST`, then push to `test`.
+   The deploy writes them into the cluster. See
+   [`docs/setup.md`](docs/setup.md) §5.
+2. **Router**: forward **UDP 8452** (test; 8462 for prod) to `mcgill-data`.
+   Without it the room is visible but nobody outside can join.
+3. **Control it** from anywhere with cluster access:
+   ```bash
+   kubectl exec -n bar-test deploy/rjm-host-spads -c spads -- spadsctl status
+   kubectl exec -n bar-test deploy/rjm-host-spads -c spads -- spadsctl spads map Comet Catcher Remake 1.8
+   ```
+   Or as owner, by private message to the autohost: `!map …`, `!forceStart`,
+   `!stop`.
+
+Room settings are in [`k8s/base/spads.env`](k8s/base/spads.env).
+
+## Tests
+
+`scripts/smoke_test.sh`, `tests/run_unit.sh` and `tests/e2e/run.sh`. All
+offline. The end-to-end test runs real SPADS, a real engine and real
+SMRTBARb, with a real headless human client, against a fake lobby server. See
+[`docs/testing.md`](docs/testing.md).
 
 ## Layout
 
@@ -190,7 +204,8 @@ start script land under `spads/` on the output volume.
 | --- | --- |
 | `docker/runtime/Dockerfile` | engine release → runtime image (+ SPADS) |
 | `docker/runtime/entrypoint.sh` | `match`, `spads`, `install-ai`, `list-ais`, `fetch-content` |
-| `docker/spads/` | SPADS configuration templates and launcher |
+| `docker/spads/` | SPADS configuration, launcher, Autopilot plugin, `spadsctl`, per-game archiver, readiness probe |
+| `tests/` | unit tests, static manifest checks, the lobby end-to-end test |
 | `scripts/run_match.py` | writes the game script, drives the match over the Autohost Protocol, exits at game over |
 | `scripts/install_ai.py` | installs custom AIs into `AI/Skirmish` |
 | `scripts/upload_ai.sh` | copies AI folders onto the cluster's custom-AI volume |

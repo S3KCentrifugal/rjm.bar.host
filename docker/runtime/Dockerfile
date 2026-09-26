@@ -70,6 +70,8 @@ ARG SIMPLELOG_REF=9f403ee
 ARG SPRINGLOBBYPROTOCOL_REF=5f01e12
 ARG SPRINGLOBBYINTERFACE_REF=9566525
 ARG SPRINGAUTOHOSTINTERFACE_REF=da7f731
+# BAR's SPADS configuration repository, for its map start boxes only.
+ARG SPADS_CONFIG_BAR_REF=ca95fa1
 
 RUN apt-get update \
  && apt-get install --no-install-recommends --yes ca-certificates git \
@@ -98,7 +100,13 @@ RUN set -eux; \
        SpringLobbyInterface/SpringLobbyInterface.pm \
        SpringAutoHostInterface/SpringAutoHostInterface.pm \
        /opt/spads/; \
-    cp SPADS/etc/*.conf /opt/spads/etc-stock/
+    cp SPADS/etc/*.conf /opt/spads/etc-stock/; \
+    # Start boxes per map and team count, curated by BAR for its maps. SPADS
+    # refuses to start a choose-in-game room without boxes, and SPADS's own
+    # mapBoxes.conf knows no BAR map.
+    git clone -q https://github.com/beyond-all-reason/spads_config_bar spads_config_bar; \
+    git -C spads_config_bar checkout -q "${SPADS_CONFIG_BAR_REF}"; \
+    cp spads_config_bar/etc/mapBoxes.conf /opt/spads/etc-stock/mapBoxes.conf
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +144,9 @@ RUN set -eux; \
     for f in commands.conf levels.conf banLists.conf mapBoxes.conf mapLists.conf; do \
       [ -f "/opt/rjm-host/spads/etc/$f" ] || cp "/opt/spads/etc-stock/$f" /opt/rjm-host/spads/etc/; \
     done; \
-    chmod +x /opt/rjm-host/bin/* /opt/rjm-host/spads/*.sh
+    chmod +x /opt/rjm-host/bin/* /opt/rjm-host/spads/*.sh /opt/rjm-host/spads/spadsctl; \
+    ln -s /opt/rjm-host/spads/spadsctl /opt/rjm-host/bin/spadsctl; \
+    perl -I/opt/spads -c /opt/rjm-host/spads/plugins/Autopilot.pm
 
 # Fail the build, not a match, if the engine cannot load its stock AI.
 #

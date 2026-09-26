@@ -15,7 +15,7 @@ file in this working tree.
 | 2 | WireGuard peer for CI | deploy job → cluster network | 5 repo secrets `WG_*` |
 | 3 | Cluster deploy identity (kubeconfig) | deploy job → Kubernetes API | repo secret `KUBE_CONFIG_DATA` |
 | 4 | GHCR pull token | deploy job container; cluster image pulls | repo secret `GHCR_PULL_TOKEN` |
-| 5 | Lobby credentials | SPADS | Kubernetes Secret `rjm-host-secrets` |
+| 5 | Lobby credentials (the second Chobby account) | SPADS | repo secrets `LOBBY_*_TEST` / `LOBBY_*_PROD` → Kubernetes Secret `rjm-host-secrets` |
 | 6 | Router UDP forward | players joining lobby games | router |
 | 7 | Package access for other repositories | consumers of the image | GitHub package settings |
 | 8 | First deploy and verification | — | — |
@@ -23,6 +23,28 @@ file in this working tree.
 Commands are for a Linux or WSL shell unless marked PowerShell. `gh` must be
 logged in as `S3KCentrifugal`, and cluster-admin steps need an admin
 kubeconfig on a machine inside the network (or over your own VPN).
+
+## Checklist: what makes `test` and `prod` deploy
+
+A push to `test` deploys to namespace `bar-test`; a squash-merged pull request
+into `prod` deploys to `bar-prod`. Each deploy succeeds when all of this is
+true:
+
+| ✓ | Needed for | What | Section |
+| --- | --- | --- | --- |
+| ☐ | both | repo secrets `WG_PRIVATE_KEY`, `WG_CLIENT_ADDRESS`, `WG_SERVER_PUBLIC_KEY`, `WG_ENDPOINT`, `WG_ALLOWED_IPS` (this repo's own WireGuard peer) | §2 |
+| ☐ | both | repo secret `KUBE_CONFIG_DATA` (the `bar-deployer` kubeconfig, base64) | §3 |
+| ☐ | both | repo secret `GHCR_PULL_TOKEN` (classic PAT, `read:packages`) | §4 |
+| ☐ | both | `mcgill-data` has room for ~4 CPU / 16 GiB of requests | §8.2 |
+| ☐ | lobby on test | repo secrets `LOBBY_LOGIN_TEST`, `LOBBY_PASSWORD_TEST`, `LOBBY_OWNER_TEST` (+ optional `LOBBY_ROOM_PASSWORD_TEST`) | §5 |
+| ☐ | lobby on prod | the same with `_PROD`, using a **different** lobby account from test if both run | §5 |
+| ☐ | internet players | router forwards UDP 8452 (test) / 8462 (prod) to `mcgill-data` | §6 |
+| ☐ | prod | a `prod` branch exists (`git push origin test:prod` once), then only squash-merged PRs from `test` | §1 |
+
+Until the first three rows are done, every deploy still **builds, tests and
+publishes the image**, and skips the cluster step with a warning. Until the
+lobby rows are done, the deploy runs the simulation Job and holds SPADS at
+zero replicas.
 
 ---
 
@@ -334,48 +356,74 @@ pull secret in the namespace every time.
 
 ---
 
-## 5. Lobby credentials (SPADS)
+## 5. Lobby credentials — the Chobby account (SPADS)
 
-SPADS needs three names and two passwords. Until the Secret exists, the deploy
-holds SPADS at zero replicas; the simulation Job runs regardless.
+Your second Chobby account is what SPADS logs in as. **Its username and
+password go in GitHub repository secrets, one set per environment**, and the
+deploy job turns them into the Kubernetes Secret `rjm-host-secrets` in that
+environment's namespace every time it runs.
 
-| Key | Value |
-| --- | --- |
-| `SPADS_LOBBY_LOGIN` | the whitelisted secondary account SPADS logs in as |
-| `SPADS_LOBBY_PASSWORD` | its password |
-| `SPADS_OWNER_LOBBY_LOGIN` | **your main account**: SPADS gives it owner rights (`!addBot`, `!force`, `!forceStart`). Must not be empty. |
-| `SPADS_BATTLE_PASSWORD` | the room password; `*` makes the room public |
+| Repository secret | Value | Becomes |
+| --- | --- | --- |
+| `LOBBY_LOGIN_TEST` | the second account's username, exactly as in Chobby | `SPADS_LOBBY_LOGIN` |
+| `LOBBY_PASSWORD_TEST` | its password (plain text; SPADS hashes it for the lobby protocol) | `SPADS_LOBBY_PASSWORD` |
+| `LOBBY_OWNER_TEST` | **your main account's** username: SPADS gives it owner rights (level 140), so it can `!addBot`, `!force`, `!forceStart`, `!stop` by private message | `SPADS_OWNER_LOBBY_LOGIN` |
+| `LOBBY_ROOM_PASSWORD_TEST` | optional: a room password; unset or `*` means a public room | `SPADS_BATTLE_PASSWORD` |
+| `LOBBY_LOGIN_PROD`, `LOBBY_PASSWORD_PROD`, `LOBBY_OWNER_PROD`, `LOBBY_ROOM_PASSWORD_PROD` | the same, for prod | the same, in `bar-prod` |
 
-Create it directly, so the password never touches a file (the namespace must
-exist — it does after §3 option B, or after the first deploy):
+```bash
+R=S3KCentrifugal/rjm.bar.host
+gh secret set LOBBY_LOGIN_TEST    -R $R --body "<second account username>"
+gh secret set LOBBY_PASSWORD_TEST -R $R            # prompts; nothing in shell history
+gh secret set LOBBY_OWNER_TEST    -R $R --body "<your main account username>"
+gh secret set LOBBY_ROOM_PASSWORD_TEST -R $R --body "*"   # or a password for a private room
+```
+
+Rules the deploy job enforces:
+- **All or nothing.** If `LOGIN`, `PASSWORD` and `OWNER` are all set, the
+  Secret is created or updated. If any is missing while another is set, the
+  deploy fails, naming the missing one.
+- **None set → hands off.** If none is set for the environment, an existing
+  `rjm-host-secrets` created by hand (below) is left untouched. If there is
+  no Secret either, SPADS is held at zero replicas and the simulation Job
+  still runs.
+- **Changes apply between games.** Changing a secret and redeploying updates
+  the Kubernetes Secret, which changes the SPADS pod's config hash, which
+  restarts SPADS — but only through the mid-game guard.
+- **Owner must be a real lobby name.** SPADS itself refuses to start with an
+  empty or malformed owner: an empty owner line in `users.conf` would make
+  *every* user the owner.
+
+Test and prod need **different lobby accounts** if both run SPADS at once:
+an account can be logged in only once. That includes Chobby — don't log in
+to the second account in Chobby while SPADS is using it.
+
+### Alternative: create the Secret by hand
+
+For a cluster-only setup, or to keep the password out of GitHub entirely.
+The namespace must exist; it does after §3 option B, or after the first
+deploy.
 
 ```bash
 read -rsp "Lobby password: " LOBBY_PW; echo
-read -rsp "Room password: "  ROOM_PW;  echo
+read -rsp "Room password (* for public): " ROOM_PW; echo
 kubectl create secret generic rjm-host-secrets -n bar-test \
-  --from-literal=SPADS_LOBBY_LOGIN='<autohost account>' \
+  --from-literal=SPADS_LOBBY_LOGIN='<second account username>' \
   --from-literal=SPADS_LOBBY_PASSWORD="$LOBBY_PW" \
-  --from-literal=SPADS_OWNER_LOBBY_LOGIN='<your account>' \
-  --from-literal=SPADS_BATTLE_PASSWORD="$ROOM_PW"
+  --from-literal=SPADS_OWNER_LOBBY_LOGIN='<your main account username>' \
+  --from-literal=SPADS_BATTLE_PASSWORD="${ROOM_PW:-*}"
 unset LOBBY_PW ROOM_PW
 kubectl label secret rjm-host-secrets -n bar-test app.kubernetes.io/part-of=rjm-host
 ```
 
-The file route also works: copy `k8s/base/secrets.yaml.example` to
-`k8s/overlays/test/secrets.yaml` (gitignored), fill it in, `kubectl apply -f`
-it, and delete the file.
+Then redeploy. Leave the `LOBBY_*_TEST` repository secrets unset, or the next
+deploy will overwrite this Secret with them.
 
-Repeat with `-n bar-prod` for prod. Test and prod need **different lobby
-accounts** if both run SPADS at once: an account can be logged in only once.
-
-**Check:** after the next deploy, `kubectl logs deploy/rjm-host-spads -n bar-test -c spads`
-shows the lobby login, and `kubectl get pods -n bar-test` shows the SPADS pod
-`1/1 Ready` (ready means it holds its lobby connection). SPADS warns in its log
-at login if the account lacks the bot flag.
-
-**Rotate:** `kubectl delete secret rjm-host-secrets -n bar-test`, create it
-again, then `kubectl rollout restart deployment/rjm-host-spads -n bar-test` —
-not during a game.
+**Check:** after the deploy, `kubectl logs deploy/rjm-host-spads -n bar-test -c spads`
+shows `Logged on lobby server` and `Hosting game …`. `kubectl get pods -n bar-test`
+shows the SPADS pod `1/1 Ready`: ready means it holds its lobby connection. If
+the account lacks the bot flag, SPADS warns at login and keeps the room at 8
+players.
 
 ---
 
@@ -495,4 +543,4 @@ Used by the next match, and by SPADS after its next restart.
 | WireGuard peer | new key pair (§2.1), `wg set` the new public key, update `WG_PRIVATE_KEY` | `sudo wg set wg0 peer <public key> remove` on the gateway |
 | `bar-deployer` token | delete and re-create `bar-deployer-token`, rebuild kubeconfig, update `KUBE_CONFIG_DATA` | `kubectl delete secret bar-deployer-token -n bar-ci` |
 | GHCR pull token | new classic PAT, update `GHCR_PULL_TOKEN`, redeploy | delete the token in GitHub settings (running pods keep their pulled images) |
-| Lobby password | change it in the lobby, then §5 rotate | change it in the lobby |
+| Lobby password | change it in the lobby, update `LOBBY_PASSWORD_<ENV>`, redeploy (between games) | change it in the lobby |

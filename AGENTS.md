@@ -55,24 +55,29 @@ This project **operates no lobby infrastructure**: SPADS is a lobby *client*.
 
 ### Open questions
 
-- **Team games collapse** (design §11 risk 1): with two or more AI teams per
-  allyteam, BAR's `game_end.lua` wipes out allyteam 0 within seconds; a 1v1 is
-  unaffected. Cause located, not fixed. The cluster match defaults to 1v1 until
-  it is. Never "fix" it by editing the game archive (fact 3).
-- **SPADS against the real lobby is unverified**: login, bot flag, bots-only
-  start. The owner reports the account is whitelisted to host bot servers; SPADS
-  logs a warning at login if it lacks the bot flag.
+- **All-AI team simulations collapse** (design §11 risk 1): with two or more
+  AI teams per allyteam and only the spectator host, BAR's `game_end.lua` wipes
+  out allyteam 0 within seconds; a 1v1, and a lobby game with humans, are
+  unaffected. The cluster simulation defaults to 1v1. Never "fix" it by editing
+  the game archive (fact 3).
+- **SPADS against BAR's real lobby server is unverified**: TLS, login flags,
+  bot flag, and whether it accepts bots added by a spectating host. The rest of
+  the lobby flow is proven offline by `tests/e2e/run.sh`; run it after any
+  change to `docker/spads/` or `k8s/base/spads.env`.
 
 ## Repository map
 
 | Path | Content |
 | --- | --- |
 | `docs/autohost-design.md` | the design: engine choice, AI install, both modes, k8s, pipeline, risks |
-| `docs/setup.md` | backend setup: WireGuard peer, deploy identity, tokens, lobby Secret, router |
+| `docs/setup.md` | backend setup: WireGuard peer, deploy identity, tokens, lobby credentials, router |
+| `docs/lobby.md` | the automated lobby: lifecycle, `spadsctl` control socket, settings |
+| `docs/testing.md` | the test suites and what each proves |
 | `docs/mcp-server-design.md` | design (not built): an MCP server that runs simulations and lobbies in one namespace |
 | `docker/runtime/Dockerfile` | engine release (sha256-verified) + SPADS (pinned commits) -> runtime image |
 | `docker/runtime/entrypoint.sh` | `match`, `spads`, `install-ai`, `list-ais`, `fetch-content` |
-| `docker/spads/` | SPADS config (`etc/`), `run_spads.sh` (incl. `--check`), `archive_game.sh` (per-game logs) |
+| `docker/spads/` | SPADS config (`etc/`), `run_spads.sh` (incl. `--check`), `plugins/Autopilot.pm` (bot bonus, auto-start, control socket), `spadsctl`, `archive_game.sh`, `ready.sh` |
+| `tests/` | `run_unit.sh` (unit + static manifest checks), `e2e/run.sh` (offline lobby end-to-end) |
 | `scripts/run_match.py` | writes the GameSetup script, drives the match over the Autohost Protocol, exits at game over |
 | `scripts/install_ai.py` | installs custom AIs from folders, archives or GitHub releases; refuses Windows builds |
 | `scripts/smoke_test.sh` | the checks CI runs before any image is published |

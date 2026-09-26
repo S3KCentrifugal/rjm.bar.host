@@ -1,0 +1,93 @@
+# The lobby end-to-end test (tests/e2e/run.sh): real SPADS, real engine, 8
+# SMRTBARb bots and a real headless human client, against a fake lobby server.
+# No BAR servers and no cluster, but it needs BAR's game content (~2 GB), so it
+# runs on demand, weekly, and on pull requests that touch the lobby host --
+# not on every commit.
+name: e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      survive_seconds:
+        description: Game time the bot team must survive
+        type: number
+        default: 120
+  schedule:
+    - cron: "17 6 * * 1"
+  pull_request:
+    branches: [test, prod]
+    paths:
+      - docker/**
+      - scripts/install_ai.py
+      - tests/e2e/**
+      - k8s/base/spads.env
+      - config/engine.pin
+
+jobs:
+  lobby:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Engine pin
+        id: pin
+        run: |
+          set -a; . ./config/engine.pin; set +a
+          echo "engine_version=$ENGINE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "engine_sha256=$ENGINE_SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/runtime/Dockerfile
+          target: runtime
+          load: true
+          tags: rjm-host:e2e
+          cache-from: type=gha
+          build-args: |
+            ENGINE_VERSION=${{ steps.pin.outputs.engine_version }}
+            ENGINE_SHA256=${{ steps.pin.outputs.engine_sha256 }}
+
+      # Game content in a directory, cached weekly, loaded into the docker
+      # volume the test uses.
+      - name: Content cache key
+        id: key
+        run: echo "key=bar-content-e2e-$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Content cache
+        uses: actions/cache@v4
+        with:
+          path: content
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: bar-content-e2e-
+
+      - name: Load content into the test volume
+        run: |
+          mkdir -p content && chmod 777 content
+          docker volume create rjm-bar-data
+          docker run --rm -v "$PWD/content:/src" -v rjm-bar-data:/bar/data --user 0 --entrypoint sh rjm-host:e2e \
+            -c 'cp -a /src/. /bar/data/ 2>/dev/null; chown -R 10001:10001 /bar/data'
+
+      - name: End-to-end test
+        env:
+          E2E_SURVIVE_SECONDS: ${{ inputs.survive_seconds || 120 }}
+          E2E_ARTIFACTS: ${{ github.workspace }}/e2e-artifacts
+        run: tests/e2e/run.sh rjm-host:e2e
+
+      - name: Save content for the cache
+        if: always()
+        run: |
+          docker run --rm -v "$PWD/content:/dst" -v rjm-bar-data:/bar/data --user 0 --entrypoint sh rjm-host:e2e \
+            -c 'cp -a /bar/data/. /dst/; chmod -R a+rwX /dst'
+
+      - name: Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: e2e-artifacts/
+          if-no-files-found: warn

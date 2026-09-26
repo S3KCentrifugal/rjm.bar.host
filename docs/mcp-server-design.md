@@ -209,6 +209,13 @@ every result as invalid) rather than return meaningless win rates.
 
 ## 5. Lobbies
 
+**Built since this was written:** the lobby side already exists —
+SPADS with the Autopilot plugin runs a room with no operator, and exposes a
+control socket reached by `kubectl exec … spadsctl` ([`lobby.md`](lobby.md)).
+The MCP lobby tools should drive that socket (`status`, `spads <command>`)
+rather than send lobby chat commands, and use its `springState` for the
+"game in progress" check in §5.3.
+
 ### 5.1 `lobby_up`
 
 Creates a SPADS Deployment (`strategy: Recreate`, one replica, readiness via

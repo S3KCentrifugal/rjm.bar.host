@@ -1,7 +1,7 @@
 # Checks for pull requests -- feature branches into test, and test into prod:
-# lint, render every overlay, and build and smoke-test the image without
-# publishing it. Pushes to test and prod are built, smoke-tested, published and
-# deployed by deploy.yml.
+# lint, static manifest checks, build the image, smoke test, unit tests.
+# Nothing is published. Pushes to test and prod are built, tested, published
+# and deployed by deploy.yml; the full lobby end-to-end test is e2e.yml.
 name: ci
 
 on:
@@ -15,20 +15,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Shell scripts
-        run: shellcheck -S warning docker/runtime/entrypoint.sh docker/spads/*.sh scripts/*.sh
+        run: shellcheck -S warning docker/runtime/entrypoint.sh docker/spads/*.sh scripts/*.sh tests/*.sh tests/e2e/*.sh
 
       - name: Python
-        run: python3 -m py_compile scripts/*.py
+        run: python3 -m py_compile scripts/*.py docker/spads/spadsctl tests/unit/*.py tests/e2e/*.py tests/static/*.py
 
-      - name: Kustomize renders both overlays
+      - name: Static manifest checks
         run: |
-          for env in test prod; do
-            kubectl kustomize "k8s/overlays/$env" > "/tmp/$env.yaml"
-            echo "$env: $(grep -c '^kind:' "/tmp/$env.yaml") objects"
-            grep -q "namespace: bar-$env" "/tmp/$env.yaml"
-            # every PV must be pre-bound to this environment's claim
-            test "$(grep -c "namespace: bar-$env" "/tmp/$env.yaml")" -gt 3
-          done
+          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          python3 tests/static/check_manifests.py
 
   image:
     runs-on: ubuntu-latest
@@ -60,3 +55,8 @@ jobs:
 
       - name: Smoke test
         run: scripts/smoke_test.sh rjm-host:ci
+
+      - name: Unit tests
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          tests/run_unit.sh rjm-host:ci

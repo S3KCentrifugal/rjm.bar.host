@@ -623,44 +623,82 @@ runtime.
 
 ## 10. The lobby host (SPADS)
 
-**Built.** A private, optionally passworded room on BAR's lobby server, hosted
-by the owner's whitelisted secondary account, with SPADS running Skirmish AI
-bots in its own `spring-headless`.
+**Built and tested offline.** A co-op room on BAR's lobby server, public or
+passworded, hosted by the owner's whitelisted second account. Humans play
+against a team of server-side Skirmish AI bots, with no operator. How to run
+it: [`lobby.md`](lobby.md). How it is tested: [`testing.md`](testing.md).
 
 ### 10.1 How it is put together
 
 SPADS 0.13.55 is installed from pinned commits of `Yaribz/SPADS` and its five
 libraries, laid flat in `/opt/spads` exactly as its installer would — not with
 `spadsInstaller.pl`, which downloads packages over plain HTTP and needs the
-engine at install time. Configuration is `docker/spads/etc/` (four customised
-files; the other five are SPADS's stock ones), parametrised with SPADS's own
-`%ENV{..}%` / `%(ENV{..}|default)%` macros (`SpadsConf.pm:904-905`), so the
-ConfigMap `spads.env` and the Secret feed it directly. `run_spads.sh --check`
-loads it through `SpadsConf` without connecting anywhere; CI runs that.
+engine at install time. BAR's `spads_config_bar` (pinned) supplies only its
+curated `mapBoxes.conf`. Configuration is `docker/spads/etc/`, parametrised
+with SPADS's own `%ENV{..}%` / `%(ENV{..}|default)%` macros
+(`SpadsConf.pm:904-905`), so the ConfigMap `spads.env` and the Secret feed it
+directly. `run_spads.sh --check` loads it through `SpadsConf` without
+connecting anywhere; CI runs that.
 
 | Setting | Value | Why |
 | --- | --- | --- |
 | `springServerType` | `headless` | only headless can run bots in the autohost (`spads.pl:7698-7700`) |
-| `lobbyHost:lobbyPort`, `lobbyTls` | `server4.beyondallreason.info:8200`, `on` | BAR's current SPADS configs; STARTTLS on the same port |
-| `autoHostPort` | 8454, loopback | SPADS binds it to 127.0.0.1 (`SpringAutoHostInterface.pm:395-405`) |
-| hosting `port` | 8452 UDP | what players connect to |
+| `nbTeams` | `1` | "humans vs bots": balance puts every human on one team and every bot on team 1 (`spads.pl:4439-4452`) |
+| `autoAddBotNb`, `localBots` | 8, 8 × SMRTBARb | the bot team is kept at this size automatically (`spads.pl:6683`) |
+| `autoBalance` | **`advanced`** | `on` balances only a full room (`spads.pl:6758`), so a room with fewer than 8 humans was never balanced and `start` refused ("not enough teams") — found by the e2e test |
+| start boxes | BAR's `mapBoxes.conf` + Autopilot hook | SPADS refuses a choose-in-game start without boxes, and looks boxes up by `nbTeams` (1 here); Autopilot's `setMapStartBoxes` supplies the map's 2-team boxes, or a default split — found by the e2e test |
+| `autoStart` | off | SPADS never auto-starts a room with bots; Autopilot does |
+| `lobbyHost:lobbyPort`, `lobbyTls` | `server4.beyondallreason.info:8200`, `on` | BAR's current SPADS configs; STARTTLS on the same port (off only in the offline test) |
+| `autoHostPort` | 8454 (prod 8464), loopback | SPADS binds it to 127.0.0.1 (`SpringAutoHostInterface.pm:395-405`) |
+| hosting `port` | 8452 (prod 8462) UDP | what players connect to |
 | `modName` | `rapid://byar:test` | resolved from the content volume; must be the tag `fetch-content` downloads |
-| `allowedLocalAIs` | `SMRTBARb;BARb` | `!addBot` accepts only these; the engine picks the highest installed version |
-| `autoBalance`, `autoStart`, `autoLock` | off | manual control by the owner |
-| `varDir`, `logDir` | `/bar/out/spads/{var,log}` | everything on the output volume |
+| `allowedLocalAIs` | `SMRTBARb;BARb` | the AIs the autohost may run; the engine picks the highest installed version |
+| `varDir`, `logDir` | `$BARHOST_OUT_DIR/spads/{var,log}` | everything on the output volume |
 | `endGameCommand` | `archive_game.sh` | keeps each game's infolog and start script |
-| owner | `SPADS_OWNER_LOBBY_LOGIN`, level 140 | can `!addBot`, `!force`, `!start` by private message |
+| owner | `SPADS_OWNER_LOBBY_LOGIN`, level 140 | can run any command by private message |
 
-Adding bots: `!addBot <name> <side> <AI>` (e.g. `!addBot Bot1 0 SMRTBARb`), or
-`!addBot <name>` for a name in `SPADS_LOCAL_BOTS`; `!force %Bot1 bonus 50` for a
-+50% handicap; `!force %Bot1 team N`. `autoStart` never starts with bots
-present, so start with `!start` or `!forceStart`. SPADS preset syntax uses `|`
-for alternatives, so an AI's version cannot be pinned in configuration.
+**The Autopilot plugin** (`docker/spads/plugins/Autopilot.pm`) does what
+configuration cannot:
+- holds every bot at `AUTOPILOT_BOT_BONUS`;
+- starts the game after a countdown once enough humans are ready;
+- force-starts a stalled pre-game (a player who never places);
+- supplies start boxes in humans-vs-bots mode;
+- **guards the room against takeover** ([`lobby.md`](lobby.md) §3). It
+  refuses boss votes, votes against the owner, and votes on room settings
+  before they start (`onVoteRequest`). It cancels any that start anyway
+  (`onVoteStart` → `!endVote`), removes untrusted bosses, and kicks repeat
+  offenders. It also gates every command run by an untrusted user
+  (`preSpadsCommand`). SPADS executes a "vote" at once, with neither vote hook,
+  when nobody else is eligible to vote; the e2e test caught a lone troll
+  spec'ing the owner that way. Stock SPADS lets any player call a boss vote (`[boss]
+  battle::|100:0`); the vendored `commands.conf` makes `!boss` owner-only and
+  unvotable;
+- serves a **Unix-socket control channel** (`spadsctl`). It is a socket file
+  rather than a loopback port, because the pod shares the node's network.
 
-**Verified locally (2026-09-26):** SPADS starts, loads unitsync `2026.07.04`,
-indexes the game and maps in 23 s, runs in headless mode, binds the autohost
-port to loopback, and reaches the lobby-connect step. **Not yet verified:** the
-login to BAR's server and hosting a bot game, which need the real account.
+It runs SPADS commands with the autohost's authority by calling SPADS's
+`executeCommand`, and captures the replies by temporarily wrapping
+`sayBattle`, which is how SPADS answers a battle-sourced command.
+
+**Credentials** come from the per-environment repository secrets
+`LOBBY_{LOGIN,PASSWORD,OWNER,ROOM_PASSWORD}_{TEST,PROD}`, which the deploy job
+writes into the `rjm-host-secrets` Secret. The Secret's version is part of the
+SPADS config hash, so a credential change restarts SPADS — between games only.
+
+**Verified offline (2026-09-26, `tests/e2e/run.sh`):** real SPADS, real engine
+and real SMRTBARb against a fake lobby server:
+- login, room creation, 8 bots at +50%;
+- owner commands by private message, flood kick;
+- auto-balance and auto-start;
+- a real headless human client joining over UDP;
+- pre-game force-start;
+- the bot team surviving the game window;
+- `!stop` with the room staying open, and a second game;
+- the control socket.
+
+**Not yet verified:** BAR's real Teiserver (TLS, login flags, whether it
+accepts bots from a spectating host), Chobby itself, and internet players
+through the router.
 
 ### 10.2 What it costs
 
@@ -691,43 +729,43 @@ login to BAR's server and hosting a bot game, which need the real account.
 
 Ordered by how much they could invalidate the work.
 
-**1. Team games collapse: allyteam 0 is wiped out within ~5 seconds.**
-*Open; cause located, not fixed.* Reproduced 2026-09-26 on the official
-release. It happens whenever an allyteam holds two or more AI teams, and never
-in a 1v1:
+**1. All-AI team games collapse: allyteam 0 is wiped out within seconds.**
+*Open for simulations; does not affect lobby games.* Reproduced 2026-09-26 on
+the official release. It happens whenever an allyteam holds two or more AI
+teams and the only player is the spectator host, and never in a 1v1:
 
 | Run | Result |
 | --- | --- |
-| 1v1 SMRTBARb | full game, 18,455 frames, game over by elimination |
-| 2v2 SMRTBARb, 4v4 SMRTBARb, 4v4 stock BARb | allyteam 0 dead by frame 113–193 |
-| 4v4 with `draft_mode` removed, or `coop` removed, or blocked layout | no change |
+| 1v1 SMRTBARb (simulation) | full game, 18,455 frames, game over by elimination |
+| 2v2 SMRTBARb, 4v4 SMRTBARb, 4v4 stock BARb (simulation) | allyteam 0 dead by frame 113–193 |
+| 4v4 with `draft_mode` removed, or `coop` removed, or blocked layout (simulation) | no change |
+| **1 human vs 8 SMRTBARb, SPADS lobby game (e2e)** | **no team defeated**; the game ran on until stopped |
 
 The cause is in BAR's `luarules/gadgets/game_end.lua`:
-
 - `playerQuitIsDead` is true for every game except a 1v1 (`:76`, cleared at
-  `:263`), which is why only team games fail.
+  `:263`).
 - In a team game an allyteam is wiped out when none of its teams is
   "controlled" (`:128`). For an engine AI, "controlled" copies whether the
-  player hosting it is `active` (`:212`), and here that host is a spectator.
-- The check runs only for the allyteam of the player being evaluated
-  (`:214-217`). The only player is the spectator host, and it sits on team 0,
-  which is why only allyteam 0 dies.
+  player hosting it is `active` (`:212`).
+- The check runs only for the allyteam of a player being evaluated
+  (`:214-217`).
 
-The fix is not in the AI. The likely levers are the host player's standing (not
-a spectator, or on its own allyteam) or an upstream change to `game_end.lua`.
-The game archive must not be modified here (AGENTS fact 3). Until it is
-resolved, the cluster's default match is a 1v1 (`match.env`), so each deploy's
-match is a real game. It probably does not affect SPADS lobby games, where
-human players are the active hosts of their own teams, but that is unverified.
+In a simulation the only player is the spectator host on team 0, so allyteam 0
+dies. In a lobby game, the humans are active players in their own allyteam,
+and the AI allyteam survives — the e2e test proves it.
+
+For simulations the likely levers are the host player's standing or an
+upstream fix to `game_end.lua`; the game archive must not be modified here
+(AGENTS fact 3). Until then the cluster's default simulation is a 1v1.
 
 **2. Team statistics are missing from replays.** `demo_stats.py` finds no team
 statistics even in a 1v1 that reached game over by elimination, and reports
 `teams 1` for a two-team game — its demo parsing likely predates this engine's
 format. The runner's `result.json` (winners, frames, exit reason) is unaffected.
 
-**3. SPADS against the real lobby is unverified** (§10.1): login, TLS
-certificate acceptance, `rapid://byar:test` resolution at battle open, and a
-bots-only `!forceStart`.
+**3. SPADS against the real lobby is unverified** (§10.1): Teiserver's TLS,
+login flags and bot flag, and whether it accepts bots added by a spectating
+host. Everything else in the lobby flow is covered by the offline e2e test.
 
 **4. Router UDP forward** for internet players is outside this repository (§10.2).
 
