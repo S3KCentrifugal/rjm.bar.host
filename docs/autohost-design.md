@@ -39,14 +39,14 @@ and `spads_config_bar@ca95fa1`.
 
 **In scope.** One image that other repositories can pull to run a BAR
 simulation or host a lobby room, with any custom Skirmish AI; its deployment to
-`mcgill-data` in namespace `rjm-host-<env>`; and the pipelines that build,
+`mcgill-data` in namespace `bar-<env>`; and the pipelines that build,
 publish, smoke-test and deploy it.
 
 **Out of scope, permanently.** Modifying the BAR game archive, which changes its
 checksum and breaks compatibility with stock clients. Operating lobby
 infrastructure: SPADS is a *client* of BAR's lobby server.
 
-**Project name.** `rjm-host`. Namespaces `rjm-host-test`, `rjm-host-prod`.
+**Project name.** `rjm-host`. Namespaces `bar-test`, `bar-prod`.
 Image `ghcr.io/s3kcentrifugal/rjm-host` (private).
 
 ---
@@ -553,15 +553,15 @@ Three workflows in `.github/workflows/`:
 
 | Workflow | Trigger | Does |
 | --- | --- | --- |
-| `ci.yml` | pull request, push to `main` | shellcheck, Python compile, render both overlays, build the image, smoke test — publishes nothing |
+| `ci.yml` | pull requests into `test` or `prod` | shellcheck, Python compile, render both overlays, build the image, smoke test — publishes nothing |
 | `deploy.yml` | push to `test`/`prod`, `workflow_dispatch`, `repository_dispatch: ai-updated` | `set-env → build → deploy`: publish the image, deploy, run a match |
 | `simulate.yml` | `workflow_call` (reusable), `workflow_dispatch` | run one simulation on a GitHub runner with the image, upload `/bar/out` as an artifact |
 
 **`set-env`** resolves the environment and the commit to deploy. A push deploys
 its branch; a `workflow_dispatch` must be run *from* the `test` or `prod` branch
-it deploys; a `repository_dispatch` (which GitHub always runs on the default
-branch) checks out and deploys the **`test` branch**, so an AI release never
-puts unreviewed `main` on the cluster. It lowercases the owner for GHCR, reads
+it deploys; a `repository_dispatch` (which GitHub runs on the default branch,
+`test`) checks out `test` explicitly, so changing the default branch can never
+make an AI release deploy an unreviewed branch. It lowercases the owner for GHCR, reads
 `config/engine.pin`, validates any AI override (passed through the environment,
 limited to characters inert in the `sed` that uses it), and decides whether a
 build is needed: on a push, from everything pushed (`before..sha`, not just the
@@ -569,12 +569,15 @@ last commit) touching `docker/`, `scripts/` or the pin, or a `[force-build]`
 commit; always on a manual run; never on an AI dispatch, which reruns the match
 on the image test already runs.
 
-**`build`**: `<sha>` tags are **written once and never re-pushed**. If this
-commit already has an image — a test → prod fast-forward, or a rerun — it is
-retagged, so prod runs the exact bytes test ran. Otherwise it builds into the
-runner's daemon with the GHA layer cache, runs `scripts/smoke_test.sh`, and only
-then pushes `:<sha>`. Moving tags (`:<env>`; from prod also `:recoil-<engine>`
-and `:latest`) are then pointed at it with `buildx imagetools create`.
+**`build`**: images are keyed by the commit's **source tree**
+(`:tree-<hash>`). Prod is updated by squash-merging `test`, which creates a new
+commit hash but, when test's tip is merged whole, the same tree — so prod finds
+`:tree-<hash>` already published and retags the exact image test ran instead of
+rebuilding it. Otherwise the build job builds into the runner's daemon with the
+GHA layer cache, runs `scripts/smoke_test.sh`, and only then pushes
+`:tree-<hash>`. It then points `:<sha>` (only if new: commit tags are never
+repointed), `:<env>`, and from prod `:recoil-<engine>` and `:latest` at that
+image with `buildx imagetools create`.
 
 **`deploy`** runs in `mcgill-deployer` with `--privileged` for WireGuard, and is
 **skipped with a warning** while the cluster secrets are missing, so the image
@@ -605,8 +608,8 @@ runtime.
 
 | Standard | Here | Why |
 | --- | --- | --- |
-| Image per environment (`<project>-<component>-<env>`) | one image, `rjm-host`, tagged `<sha>`/`<env>` | it is a reusable artifact consumed by other repositories; a commit's image is built once and promoted by retagging, never rebuilt per environment (convention-deployment §6) |
-| Namespace `mcgill-<service>-<env>` | `rjm-host-<env>` | requested name; matches the Kustomize skill's `<project>-<env>` |
+| Image per environment (`<project>-<component>-<env>`) | one image, `rjm-host`, tagged `<sha>`/`<env>` | it is a reusable artifact consumed by other repositories; an image is built once per source tree and promoted by retagging, never rebuilt per environment (convention-deployment §6) |
+| Namespace `mcgill-<service>-<env>` | `bar-<env>` | requested by the owner: the namespace names the game it hosts; resource names keep the `rjm-host-` prefix |
 | Namespace in `base/` | in each overlay | avoids relying on the namespace transformer renaming a Namespace object |
 | Deployment + RollingUpdate | a Job for matches; SPADS uses `Recreate` | a match is a batch; a hostNetwork surge pod would collide on the game port |
 | Liveness + readiness probes | Job: none; SPADS: readiness only | a batch has nothing to probe; a liveness restart would end a lobby game |

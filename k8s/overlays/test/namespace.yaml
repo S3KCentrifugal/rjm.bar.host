@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: rjm-host-test
+  name: bar-test
   labels:
     app.kubernetes.io/name: rjm-host
     app.kubernetes.io/component: namespace

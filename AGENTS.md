@@ -9,7 +9,7 @@ override this file.
 
 A **reusable Beyond All Reason headless host image**,
 `ghcr.io/s3kcentrifugal/rjm-host` (private), plus its deployment to the private
-k3s cluster in namespace `rjm-host-<env>`. One image, two modes:
+k3s cluster in namespace `bar-<env>`. One image, two modes:
 
 - **`match`** — an unattended AI-vs-AI simulation played to game over, leaving
   a replay, logs and `result.json`. Runs as a Kubernetes Job, under plain
@@ -68,6 +68,8 @@ This project **operates no lobby infrastructure**: SPADS is a lobby *client*.
 | Path | Content |
 | --- | --- |
 | `docs/autohost-design.md` | the design: engine choice, AI install, both modes, k8s, pipeline, risks |
+| `docs/setup.md` | backend setup: WireGuard peer, deploy identity, tokens, lobby Secret, router |
+| `docs/mcp-server-design.md` | design (not built): an MCP server that runs simulations and lobbies in one namespace |
 | `docker/runtime/Dockerfile` | engine release (sha256-verified) + SPADS (pinned commits) -> runtime image |
 | `docker/runtime/entrypoint.sh` | `match`, `spads`, `install-ai`, `list-ais`, `fetch-content` |
 | `docker/spads/` | SPADS config (`etc/`), `run_spads.sh` (incl. `--check`), `archive_game.sh` (per-game logs) |
@@ -230,6 +232,9 @@ Use the narrowest authoritative source:
 - Read `docs/autohost-design.md` before writing code. If reality contradicts it,
   fix the design in the same change - do not let them drift.
 - Keep the two read-only trees pristine; inspection commands only.
+- `test` is the default branch; every push to it deploys to `bar-test`. Never
+  push or merge to `prod`: the owner squash-merges pull requests from `test` by
+  hand.
 - Do not commit automatically. Commit only when asked, and only the change
   asked for.
 - Never commit a secret. Check `.gitignore` covers any new credential file

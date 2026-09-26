@@ -6,7 +6,7 @@
 #
 #   jobs:
 #     sim:
-#       uses: S3KCentrifugal/rjm.bar.host/.github/workflows/simulate.yml@main
+#       uses: S3KCentrifugal/rjm.bar.host/.github/workflows/simulate.yml@test
 #       with:
 #         ai_archives: github:S3KCentrifugal/CircuitAI@v1.961-test
 #         ai_shortname: SMRTBARb

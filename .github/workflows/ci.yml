@@ -1,12 +1,12 @@
-# Checks for pull requests and main: lint, render every overlay, and build and
-# smoke-test the image without publishing it. Publishing and deploying happen in
-# deploy.yml, from the test and prod branches.
+# Checks for pull requests -- feature branches into test, and test into prod:
+# lint, render every overlay, and build and smoke-test the image without
+# publishing it. Pushes to test and prod are built, smoke-tested, published and
+# deployed by deploy.yml.
 name: ci
 
 on:
   pull_request:
-  push:
-    branches: [main]
+    branches: [test, prod]
 
 jobs:
   lint:
@@ -25,9 +25,9 @@ jobs:
           for env in test prod; do
             kubectl kustomize "k8s/overlays/$env" > "/tmp/$env.yaml"
             echo "$env: $(grep -c '^kind:' "/tmp/$env.yaml") objects"
-            grep -q "namespace: rjm-host-$env" "/tmp/$env.yaml"
+            grep -q "namespace: bar-$env" "/tmp/$env.yaml"
             # every PV must be pre-bound to this environment's claim
-            test "$(grep -c "namespace: rjm-host-$env" "/tmp/$env.yaml")" -gt 3
+            test "$(grep -c "namespace: bar-$env" "/tmp/$env.yaml")" -gt 3
           done
 
   image:

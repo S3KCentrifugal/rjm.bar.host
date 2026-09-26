@@ -14,8 +14,9 @@ Both run BAR's **official** Linux engine release (`recoil_2026.07.04`, pinned in
 [`config/engine.pin`](config/engine.pin)), so what they host is exactly what
 players run. Custom AIs are installed at start, not baked in.
 
-Design: [`docs/autohost-design.md`](docs/autohost-design.md). Agent and
-contributor rules: [`AGENTS.md`](AGENTS.md).
+Design: [`docs/autohost-design.md`](docs/autohost-design.md). Backend setup —
+keys, tokens, cluster identity, router: [`docs/setup.md`](docs/setup.md). Agent
+and contributor rules: [`AGENTS.md`](AGENTS.md).
 
 ## Container layout
 
@@ -93,7 +94,7 @@ uploads the whole output directory as an artifact:
 ```yaml
 jobs:
   sim:
-    uses: S3KCentrifugal/rjm.bar.host/.github/workflows/simulate.yml@main
+    uses: S3KCentrifugal/rjm.bar.host/.github/workflows/simulate.yml@test
     permissions: { contents: read, packages: read }
     with:
       ai_archives: github:S3KCentrifugal/CircuitAI@v1.961-test
@@ -105,14 +106,22 @@ A calling repository must also be allowed to use this private repository's
 workflows (Settings → Actions → General → Access: "Accessible from repositories
 owned by the user"; already set).
 
-Image tags: `<commit sha>` (written once, never re-pushed), `test` and `prod`
-(what each environment runs), and from prod `recoil-<engine version>` and
-`latest`. Promoting a commit from test to prod retags its tested image rather
-than rebuilding it.
+Image tags: `<commit sha>` and `tree-<source tree hash>` (each written once,
+never re-pushed), `test` and `prod` (what each environment runs), and from prod
+`recoil-<engine version>` and `latest`. A squash merge from test to prod has a
+new commit hash but the same source tree, so prod reuses the exact image test
+ran instead of rebuilding it.
+
+## Branches
+
+`test` is the default branch: every push to it builds, publishes and deploys to
+`bar-test`. `prod` changes only when you squash-merge a pull request from
+`test`; nothing merges to it automatically. Pull requests into either branch
+run the `ci` checks.
 
 ## Cluster deployment
 
-Namespace `rjm-host-<env>` on `mcgill-data`, deployed by
+Namespace `bar-<env>` on `mcgill-data`, deployed by
 [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) on push to the
 `test` or `prod` branch:
 
@@ -132,6 +141,8 @@ refuses to restart SPADS while a lobby game is in progress (dispatch with
 `interrupt_lobby` to override).
 
 ### Cluster secrets
+
+Full provisioning steps for every key and token: [`docs/setup.md`](docs/setup.md).
 
 The image publishes without them; the deploy job is skipped (with a warning)
 until they are set on this repository. They are the same values the

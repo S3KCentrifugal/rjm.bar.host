@@ -12,9 +12,13 @@
 #                         test, from the test branch, with the image already
 #                         deployed there and the AI named in the payload
 #
-# Image tags: <sha> is written once and never re-pushed. Promoting a commit that
-# already has an image (test -> prod fast-forward) retags that image instead of
-# rebuilding it, so prod runs exactly the bytes test ran.
+# Branches: `test` is the default branch and deploys on every push. `prod` is
+# updated only by a squash-merged pull request from test, by hand.
+#
+# Image tags: an image is keyed by the commit's *tree* (tree-<hash>): identical
+# source, identical image. A squash merge to prod has a new commit hash but the
+# same tree as the tested test commit, so prod retags the image test ran rather
+# than rebuilding it. <sha> and tree-<hash> tags are written once, never re-pushed.
 name: deploy
 
 on:
@@ -51,6 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.env.outputs.ref }}
+      tree: ${{ steps.env.outputs.tree }}
       environment: ${{ steps.env.outputs.environment }}
       namespace: ${{ steps.env.outputs.namespace }}
       image: ${{ steps.env.outputs.image }}
@@ -60,8 +65,9 @@ jobs:
       build_needed: ${{ steps.changed.outputs.build_needed }}
       can_deploy: ${{ steps.secrets.outputs.can_deploy }}
     steps:
-      # A repository_dispatch always runs on the default branch; deploy the
-      # test branch instead, never unreviewed main.
+      # A repository_dispatch runs on the default branch, which is test; check
+      # it out explicitly anyway so a change of default can never deploy an
+      # unreviewed branch.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'repository_dispatch' && 'test' || github.sha }}
@@ -82,8 +88,9 @@ jobs:
           OWNER="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
           {
             echo "ref=$(git rev-parse HEAD)"
+            echo "tree=$(git rev-parse 'HEAD^{tree}')"
             echo "environment=$ENVIRONMENT"
-            echo "namespace=rjm-host-$ENVIRONMENT"
+            echo "namespace=bar-$ENVIRONMENT"
             echo "image=ghcr.io/$OWNER/$IMAGE_NAME"
           } >> "$GITHUB_OUTPUT"
           echo "deploying $(git rev-parse --short HEAD) to $ENVIRONMENT"
@@ -162,6 +169,7 @@ jobs:
     env:
       IMAGE: ${{ needs.set-env.outputs.image }}
       SHA: ${{ needs.set-env.outputs.ref }}
+      TREE: tree-${{ needs.set-env.outputs.tree }}
       ENVIRONMENT: ${{ needs.set-env.outputs.environment }}
       ENGINE_VERSION: ${{ needs.set-env.outputs.engine_version }}
     steps:
@@ -178,14 +186,15 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # <sha> is immutable: if this commit already has an image (a test -> prod
-      # promotion, or a rerun), reuse it rather than rebuild and overwrite it.
-      - name: Does this commit already have an image?
+      # Images are keyed by source tree. If this tree already has an image -- a
+      # squash-merge of tested test code into prod, or a rerun -- reuse it
+      # rather than rebuild it.
+      - name: Does this source already have an image?
         id: exists
         run: |
-          if docker buildx imagetools inspect "$IMAGE:$SHA" > /dev/null 2>&1; then
+          if docker buildx imagetools inspect "$IMAGE:$TREE" > /dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "$IMAGE:$SHA exists; it will be retagged, not rebuilt"
+            echo "$IMAGE:$TREE exists; it will be retagged, not rebuilt"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
@@ -211,25 +220,29 @@ jobs:
         if: steps.exists.outputs.exists != 'true'
         run: scripts/smoke_test.sh rjm-host:ci
 
-      - name: Push the commit tag
+      - name: Push the source tag
         if: steps.exists.outputs.exists != 'true'
         run: |
-          docker tag rjm-host:ci "$IMAGE:$SHA"
-          docker push "$IMAGE:$SHA"
+          docker tag rjm-host:ci "$IMAGE:$TREE"
+          docker push "$IMAGE:$TREE"
 
-      # Moving tags point at the commit's image: <env> always; on prod also
-      # recoil-<engine> and latest.
-      - name: Point the moving tags at this commit
+      # Every other tag points at the source's image: this commit's <sha>
+      # (unless it already exists), <env>, and on prod recoil-<engine>, latest.
+      - name: Tag this commit's image
         run: |
           TAGS="$ENVIRONMENT"
+          # <sha> is written once: never repoint an existing commit tag.
+          if ! docker buildx imagetools inspect "$IMAGE:$SHA" > /dev/null 2>&1; then
+            TAGS="$SHA $TAGS"
+          fi
           [ "$ENVIRONMENT" = "prod" ] && TAGS="$TAGS recoil-$ENGINE_VERSION latest"
           ARGS=""
           for t in $TAGS; do ARGS="$ARGS -t $IMAGE:$t"; done
           # shellcheck disable=SC2086
-          docker buildx imagetools create $ARGS "$IMAGE:$SHA"
+          docker buildx imagetools create $ARGS "$IMAGE:$TREE"
           {
             echo "### Published"
-            echo "- \`$IMAGE:$SHA\`$([ "${{ steps.exists.outputs.exists }}" = true ] && echo ' (existing image, retagged)')"
+            echo "- \`$IMAGE:$TREE\`$([ "${{ steps.exists.outputs.exists }}" = true ] && echo ' (existing image for this source, reused)')"
             for t in $TAGS; do echo "- \`$IMAGE:$t\`"; done
           } >> "$GITHUB_STEP_SUMMARY"
 

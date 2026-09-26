@@ -17,7 +17,7 @@ env="${1:?usage: upload_ai.sh <test|prod> <AI folder>...}"
 shift
 [ "$#" -gt 0 ] || { echo "usage: upload_ai.sh <test|prod> <AI folder>..." >&2; exit 2; }
 case "$env" in test|prod) ;; *) echo "environment must be test or prod" >&2; exit 2 ;; esac
-ns="rjm-host-$env"
+ns="bar-$env"
 pod="rjm-host-ai-upload"
 
 for dir in "$@"; do

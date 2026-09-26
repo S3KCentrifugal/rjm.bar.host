@@ -14,7 +14,7 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: data2
   claimRef:
-    namespace: rjm-host-test
+    namespace: bar-test
     name: rjm-host-data-pvc
   local:
     path: /mnt/data2/k8s-volumes/rjm-host/test/data
@@ -42,7 +42,7 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: data2
   claimRef:
-    namespace: rjm-host-test
+    namespace: bar-test
     name: rjm-host-out-pvc
   local:
     path: /mnt/data2/k8s-volumes/rjm-host/test/out
@@ -70,7 +70,7 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: data2
   claimRef:
-    namespace: rjm-host-test
+    namespace: bar-test
     name: rjm-host-ai-pvc
   local:
     path: /mnt/data2/k8s-volumes/rjm-host/test/ai
