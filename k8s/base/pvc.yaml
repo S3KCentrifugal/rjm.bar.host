@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: barhost-spring-data-pvc
+  labels:
+    app.kubernetes.io/name: barhost-spring-data
+    app.kubernetes.io/part-of: barhost
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: data2
+  resources:
+    requests:
+      # Pinned game (rapid pool) plus a curated test map set. This is a
+      # deliberately small fraction of the ~22GB a full map mirror would need:
+      # an AI benchmark wants a fixed, comparable map set, not every map.
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: barhost-runs-pvc
+  labels:
+    app.kubernetes.io/name: barhost-runs
+    app.kubernetes.io/part-of: barhost
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: data2
+  resources:
+    requests:
+      # Replays and infologs, one directory per run. A single 8-AI match demo
+      # is tens of MB; prune this on a schedule or it will fill.
+      storage: 20Gi

@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: barhost
+  labels:
+    app.kubernetes.io/name: barhost
+    app.kubernetes.io/part-of: barhost
+# No Role or RoleBinding: the match runner talks to the engine over loopback
+# UDP and writes to two volumes. It has no reason to reach the Kubernetes API,
+# so it is given no permissions beyond existing.
+automountServiceAccountToken: false

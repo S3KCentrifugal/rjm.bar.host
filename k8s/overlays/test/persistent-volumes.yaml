@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: barhost-spring-data-pv-test
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: data2
+  claimRef:
+    namespace: barhost-test
+    name: barhost-spring-data-pvc
+  local:
+    path: /mnt/data2/k8s-volumes/barhost/test/spring-data
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [mcgill-data]
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: barhost-runs-pv-test
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: data2
+  claimRef:
+    namespace: barhost-test
+    name: barhost-runs-pvc
+  local:
+    path: /mnt/data2/k8s-volumes/barhost/test/runs
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [mcgill-data]

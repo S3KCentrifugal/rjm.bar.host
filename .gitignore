@@ -22,3 +22,12 @@ var/
 *.log
 
 .DS_Store
+
+# CI build working directories (see .github/workflows/deploy.yml)
+engine-src/
+ai-src/
+.ccache/
+
+# Python bytecode
+__pycache__/
+*.pyc

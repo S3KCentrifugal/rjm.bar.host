@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - rbac.yaml
+  - pvc.yaml
+  - job.yaml
+
+configMapGenerator:
+  - name: barhost-match-config
+    envs:
+      - match.env
+
+# The ConfigMap is referenced by name from the Job's envFrom, and a Job's pod
+# template is immutable once created, so a rolling hash suffix would strand the
+# Job against a ConfigMap that no longer exists.
+generatorOptions:
+  disableNameSuffixHash: true
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: barhost
+      app.kubernetes.io/managed-by: kustomize

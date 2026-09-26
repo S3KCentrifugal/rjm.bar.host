@@ -1,0 +1,33 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: barhost-test
+
+resources:
+  - namespace.yaml
+  - ../../base/
+  - persistent-volumes.yaml
+
+images:
+  - name: ghcr.io/S3KCentrifugal/barhost-match
+    newName: ghcr.io/S3KCentrifugal/barhost-match-test
+    newTag: IMAGE_TAG
+
+patches:
+  # Bind each claim to this environment's PV explicitly. storageClassName data2
+  # is WaitForFirstConsumer with no provisioner, so without both this and the
+  # PV's claimRef a claim can bind across environments.
+  - target:
+      kind: PersistentVolumeClaim
+      name: barhost-spring-data-pvc
+    patch: |-
+      - op: add
+        path: /spec/volumeName
+        value: barhost-spring-data-pv-test
+  - target:
+      kind: PersistentVolumeClaim
+      name: barhost-runs-pvc
+    patch: |-
+      - op: add
+        path: /spec/volumeName
+        value: barhost-runs-pv-test

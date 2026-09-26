@@ -1,0 +1,16 @@
+# The build context is the repository root so the Dockerfile can reach both
+# scripts/run_match.py and the engine/ tree the build step produces. Everything
+# else must be kept out, or the context upload includes a full engine checkout.
+.git
+.github
+docs
+k8s
+
+# Build inputs and caches, which are large and already consumed by the time the
+# image is built.
+engine-src
+ai-src
+.ccache
+
+*.md
+!README.md

@@ -1,0 +1,24 @@
+# The RecoilEngine commit that the engine and the AI are both built from.
+#
+# This single value is what keeps libSkirmishAI.so and libAIInterface.so
+# ABI-compatible (CircuitAI README:25). Changing it is an engine upgrade and
+# must be a reviewed diff, never an incidental drift -- a mismatch produces an
+# AI that is dead at match start with no useful error.
+#
+# Verified against this tree: rts/builds/dedicated/CMakeLists.txt compiles zero
+# ExternalAI sources, so only the headless build can host a Skirmish AI.
+ENGINE_REPO=beyond-all-reason/RecoilEngine
+ENGINE_REF=92efda5e60fb6df54a8f17a87e4f4cdb4aa2de31
+
+# The AI under test. Overridable per run via workflow_dispatch.
+AI_REPO=S3KCentrifugal/CircuitAI
+AI_REF=smrt
+
+# Directory name under AI/Skirmish/. Decides the CMake target name and the
+# installed path, and must match `shortName` in the AI's data/AIInfo.lua.
+AI_DIR_NAME=BARb
+
+# The AI's version string. Comes from the AI's VERSION file and is the literal
+# word "stable" for this fork, not a number. The image build asserts that
+# exactly this shortName/version pair is loadable before it will publish.
+AI_VERSION=stable
