@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# rjm-host: a reusable Beyond All Reason headless host image.
+# rjm-bar-host: a reusable Beyond All Reason headless host image.
 #
 #   engine ─┐
 #   spads  ─┴─▶ runtime
@@ -134,19 +134,19 @@ RUN apt-get update \
 COPY --from=engine /bar/engine/ /bar/engine/
 COPY --from=spads /opt/spads/ /opt/spads/
 
-COPY docker/runtime/entrypoint.sh /opt/rjm-host/bin/entrypoint.sh
-COPY scripts/run_match.py scripts/install_ai.py scripts/demo_stats.py /opt/rjm-host/bin/
-COPY docker/spads/ /opt/rjm-host/spads/
+COPY docker/runtime/entrypoint.sh /opt/rjm-bar-host/bin/entrypoint.sh
+COPY scripts/run_match.py scripts/install_ai.py scripts/demo_stats.py /opt/rjm-bar-host/bin/
+COPY docker/spads/ /opt/rjm-bar-host/spads/
 
 # SPADS refuses to start without all nine configuration files. The ones this
 # image does not customise are SPADS's own, from the pinned release.
 RUN set -eux; \
     for f in commands.conf levels.conf banLists.conf mapBoxes.conf mapLists.conf; do \
-      [ -f "/opt/rjm-host/spads/etc/$f" ] || cp "/opt/spads/etc-stock/$f" /opt/rjm-host/spads/etc/; \
+      [ -f "/opt/rjm-bar-host/spads/etc/$f" ] || cp "/opt/spads/etc-stock/$f" /opt/rjm-bar-host/spads/etc/; \
     done; \
-    chmod +x /opt/rjm-host/bin/* /opt/rjm-host/spads/*.sh /opt/rjm-host/spads/spadsctl; \
-    ln -s /opt/rjm-host/spads/spadsctl /opt/rjm-host/bin/spadsctl; \
-    perl -I/opt/spads -c /opt/rjm-host/spads/plugins/Autopilot.pm
+    chmod +x /opt/rjm-bar-host/bin/* /opt/rjm-bar-host/spads/*.sh /opt/rjm-bar-host/spads/spadsctl; \
+    ln -s /opt/rjm-bar-host/spads/spadsctl /opt/rjm-bar-host/bin/spadsctl; \
+    perl -I/opt/spads -c /opt/rjm-bar-host/spads/plugins/Autopilot.pm
 
 # Fail the build, not a match, if the engine cannot load its stock AI.
 #
@@ -178,14 +178,14 @@ ENV BAR_ENGINE_VERSION=${ENGINE_VERSION} \
     BARHOST_OUT_DIR=/bar/out \
     BARHOST_CUSTOM_AI_DIR=/bar/custom-ai \
     HOME=/home/barhost \
-    PATH=/opt/rjm-host/bin:$PATH
+    PATH=/opt/rjm-bar-host/bin:$PATH
 
-LABEL org.opencontainers.image.title="rjm-host" \
+LABEL org.opencontainers.image.title="rjm-bar-host" \
       org.opencontainers.image.description="Beyond All Reason headless host: AI simulations and SPADS lobby hosting with custom Skirmish AIs" \
       org.opencontainers.image.source="https://github.com/S3KCentrifugal/rjm.bar.host" \
       io.github.s3kcentrifugal.recoil-version="${ENGINE_VERSION}"
 
 VOLUME ["/bar/data", "/bar/out"]
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/opt/rjm-host/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/rjm-bar-host/bin/entrypoint.sh"]
 CMD ["match"]

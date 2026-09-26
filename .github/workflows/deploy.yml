@@ -1,4 +1,4 @@
-# Build the reusable rjm-host image, publish it to GHCR, and deploy it to the
+# Build the reusable rjm-bar-host image, publish it to GHCR, and deploy it to the
 # k3s cluster: set-env -> build -> deploy (configure-k8s-pipeline skill).
 #
 # The image is published whether or not the cluster deploy can happen, because
@@ -48,7 +48,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE_NAME: rjm-host
+  IMAGE_NAME: rjm-bar-host
 
 jobs:
   set-env:
@@ -209,7 +209,7 @@ jobs:
           file: docker/runtime/Dockerfile
           target: runtime
           load: true
-          tags: rjm-host:ci
+          tags: rjm-bar-host:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
@@ -218,18 +218,18 @@ jobs:
 
       - name: Smoke test
         if: steps.exists.outputs.exists != 'true'
-        run: scripts/smoke_test.sh rjm-host:ci
+        run: scripts/smoke_test.sh rjm-bar-host:ci
 
       - name: Unit tests
         if: steps.exists.outputs.exists != 'true'
         run: |
           python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
-          tests/run_unit.sh rjm-host:ci
+          tests/run_unit.sh rjm-bar-host:ci
 
       - name: Push the source tag
         if: steps.exists.outputs.exists != 'true'
         run: |
-          docker tag rjm-host:ci "$IMAGE:$TREE"
+          docker tag rjm-bar-host:ci "$IMAGE:$TREE"
           docker push "$IMAGE:$TREE"
 
       # Every other tag points at the source's image: this commit's <sha>
@@ -337,15 +337,15 @@ jobs:
           else
             # Nothing built: reuse what is deployed, so a config-only change
             # never silently pulls a moving tag.
-            TAG=$(kubectl get job rjm-host-match -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | sed 's/.*://')
-            [ -n "$TAG" ] || TAG=$(kubectl get deployment rjm-host-spads -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | sed 's/.*://')
+            TAG=$(kubectl get job rjm-bar-host-match -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | sed 's/.*://')
+            [ -n "$TAG" ] || TAG=$(kubectl get deployment rjm-bar-host-spads -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | sed 's/.*://')
             [ -n "$TAG" ] || { echo "::error::nothing deployed to reuse; run this workflow manually with force_build"; exit 1; }
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Using $IMAGE:$TAG"
 
       # 5b. lobby credentials. When the repository has this environment's
-      #     LOBBY_* secrets, they become the rjm-host-secrets Secret; changing
+      #     LOBBY_* secrets, they become the rjm-bar-host-secrets Secret; changing
       #     one in GitHub and redeploying updates it. Without them, a Secret
       #     created by hand (docs/setup.md) is left exactly as it is. Updating a
       #     Secret restarts nothing by itself; the render step below folds its
@@ -359,7 +359,7 @@ jobs:
           LOBBY_ROOM_PASSWORD: ${{ secrets[format('LOBBY_ROOM_PASSWORD_{0}', needs.set-env.outputs.environment == 'prod' && 'PROD' || 'TEST')] }}
         run: |
           if [ -z "$LOBBY_LOGIN$LOBBY_PASSWORD$LOBBY_OWNER" ]; then
-            echo "No LOBBY_*_${ENVIRONMENT^^} secrets in the repository; leaving any existing rjm-host-secrets untouched."
+            echo "No LOBBY_*_${ENVIRONMENT^^} secrets in the repository; leaving any existing rjm-bar-host-secrets untouched."
             exit 0
           fi
           for v in LOBBY_LOGIN LOBBY_PASSWORD LOBBY_OWNER; do
@@ -371,12 +371,12 @@ jobs:
           printf '%s' "$LOBBY_PASSWORD" > "$d/SPADS_LOBBY_PASSWORD"
           printf '%s' "$LOBBY_OWNER"    > "$d/SPADS_OWNER_LOBBY_LOGIN"
           printf '%s' "${LOBBY_ROOM_PASSWORD:-*}" > "$d/SPADS_BATTLE_PASSWORD"
-          kubectl create secret generic rjm-host-secrets -n "$NAMESPACE" --from-file="$d" \
+          kubectl create secret generic rjm-bar-host-secrets -n "$NAMESPACE" --from-file="$d" \
             --dry-run=client -o yaml \
-            | kubectl label --local -f - -o yaml app.kubernetes.io/part-of=rjm-host app.kubernetes.io/component=secrets \
+            | kubectl label --local -f - -o yaml app.kubernetes.io/part-of=rjm-bar-host app.kubernetes.io/component=secrets \
             | kubectl apply -f -
           rm -rf "$d"
-          echo "rjm-host-secrets synced from GitHub secrets (room: $([ -n "$LOBBY_ROOM_PASSWORD" ] && [ "$LOBBY_ROOM_PASSWORD" != '*' ] && echo private || echo public))"
+          echo "rjm-bar-host-secrets synced from GitHub secrets (room: $([ -n "$LOBBY_ROOM_PASSWORD" ] && [ "$LOBBY_ROOM_PASSWORD" != '*' ] && echo private || echo public))"
 
       # 6. render once: tag, this run's AI override, SPADS replicas, and the
       #    SPADS template hash. What is checked below is exactly what is applied.
@@ -389,12 +389,12 @@ jobs:
           fi
           # Without lobby credentials SPADS cannot start: hold it at zero rather
           # than create a pod that crash-loops.
-          SECRET_VERSION=$(kubectl get secret rjm-host-secrets -n "$NAMESPACE" -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null || true)
+          SECRET_VERSION=$(kubectl get secret rjm-bar-host-secrets -n "$NAMESPACE" -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null || true)
           if [ -n "$SECRET_VERSION" ]; then
             SPADS=1
           else
             SPADS=0
-            echo "::warning::rjm-host-secrets is missing in $NAMESPACE, so SPADS is held at 0 replicas. Set the LOBBY_*_${ENVIRONMENT^^} repository secrets (docs/setup.md), then redeploy."
+            echo "::warning::rjm-bar-host-secrets is missing in $NAMESPACE, so SPADS is held at 0 replicas. Set the LOBBY_*_${ENVIRONMENT^^} repository secrets (docs/setup.md), then redeploy."
           fi
           sed -i "s|replicas: 1 # SPADS_REPLICAS|replicas: $SPADS|" k8s/base/spads-deployment.yaml
           kubectl kustomize "k8s/overlays/$ENVIRONMENT/" > /tmp/rendered.yaml
@@ -409,16 +409,16 @@ jobs:
                         "k8s/overlays/$ENVIRONMENT"/*.yaml; echo "secret=$SECRET_VERSION"; } \
                   | sha256sum | cut -c1-16)
           sed -i "s|SPADS_CONFIG_HASH|h-$HASH|" /tmp/rendered.yaml
-          grep -n "image: ghcr\|rjm-host/config-hash" /tmp/rendered.yaml
+          grep -n "image: ghcr\|rjm-bar-host/config-hash" /tmp/rendered.yaml
           echo "spads_replicas=$SPADS" >> "$GITHUB_OUTPUT"
           echo "spads_hash=h-$HASH" >> "$GITHUB_OUTPUT"
 
       # 7. guards, before anything is changed: never interrupt a running game
       - name: Refuse to disturb a running match
         run: |
-          ACTIVE=$(kubectl get job rjm-host-match -n "$NAMESPACE" -o jsonpath='{.status.active}' 2>/dev/null || true)
+          ACTIVE=$(kubectl get job rjm-bar-host-match -n "$NAMESPACE" -o jsonpath='{.status.active}' 2>/dev/null || true)
           if [ -n "$ACTIVE" ] && [ "$ACTIVE" != "0" ]; then
-            echo "::error::A match is still running in $NAMESPACE. Wait for it, or delete it deliberately: kubectl delete job rjm-host-match -n $NAMESPACE"
+            echo "::error::A match is still running in $NAMESPACE. Wait for it, or delete it deliberately: kubectl delete job rjm-bar-host-match -n $NAMESPACE"
             exit 1
           fi
           echo "No match in flight."
@@ -429,9 +429,9 @@ jobs:
       - name: Refuse to restart SPADS mid-game
         if: github.event.inputs.interrupt_lobby != 'true'
         run: |
-          POD=$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/name=rjm-host-spads -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          POD=$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/name=rjm-bar-host-spads -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
           [ -n "$POD" ] || { echo "SPADS has no pod; nothing to interrupt."; exit 0; }
-          LIVE=$(kubectl get deployment rjm-host-spads -n "$NAMESPACE" -o jsonpath='{.spec.template.metadata.annotations.rjm-host/config-hash}')
+          LIVE=$(kubectl get deployment rjm-bar-host-spads -n "$NAMESPACE" -o jsonpath='{.spec.template.metadata.annotations.rjm-bar-host/config-hash}')
           if [ "$LIVE" = "${{ steps.render.outputs.spads_hash }}" ] && [ "${{ steps.render.outputs.spads_replicas }}" = "1" ]; then
             echo "SPADS is unchanged; applying will not restart it."; exit 0
           fi
@@ -449,15 +449,15 @@ jobs:
       # 8. host directories for the local PVs, owned by the image's uid
       - name: Ensure host directories
         run: |
-          kubectl delete pod rjm-host-mkdir -n "$NAMESPACE" --ignore-not-found --wait=true
+          kubectl delete pod rjm-bar-host-mkdir -n "$NAMESPACE" --ignore-not-found --wait=true
           cat <<EOF | kubectl apply -n "$NAMESPACE" -f -
           apiVersion: v1
           kind: Pod
           metadata:
-            name: rjm-host-mkdir
+            name: rjm-bar-host-mkdir
             labels:
-              app.kubernetes.io/name: rjm-host-mkdir
-              app.kubernetes.io/part-of: rjm-host
+              app.kubernetes.io/name: rjm-bar-host-mkdir
+              app.kubernetes.io/part-of: rjm-bar-host
           spec:
             restartPolicy: Never
             nodeSelector:
@@ -472,7 +472,7 @@ jobs:
                   - -c
                   - |
                     set -eux
-                    base=/mnt/data2/k8s-volumes/rjm-host/$ENVIRONMENT
+                    base=/mnt/data2/k8s-volumes/rjm-bar-host/$ENVIRONMENT
                     mkdir -p "\$base/data" "\$base/out" "\$base/ai"
                     chown -R 10001:10001 "\$base"
                     df -h /mnt/data2
@@ -490,19 +490,19 @@ jobs:
           EOF
           PHASE=""
           for _ in $(seq 60); do
-            PHASE=$(kubectl get pod rjm-host-mkdir -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            PHASE=$(kubectl get pod rjm-bar-host-mkdir -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || true)
             case "$PHASE" in Succeeded|Failed) break ;; esac
             sleep 2
           done
-          kubectl logs rjm-host-mkdir -n "$NAMESPACE" || true
-          kubectl delete pod rjm-host-mkdir -n "$NAMESPACE" --ignore-not-found
+          kubectl logs rjm-bar-host-mkdir -n "$NAMESPACE" || true
+          kubectl delete pod rjm-bar-host-mkdir -n "$NAMESPACE" --ignore-not-found
           [ "$PHASE" = "Succeeded" ] || { echo "::error::host directory setup failed (phase=$PHASE)"; exit 1; }
 
       # 9. clean up Released PVs so their claims can rebind
       - name: Release stale PVs
         run: |
           for p in data out ai; do
-            pv="rjm-host-$p-pv-$ENVIRONMENT"
+            pv="rjm-bar-host-$p-pv-$ENVIRONMENT"
             PHASE=$(kubectl get pv "$pv" -o jsonpath='{.status.phase}' 2>/dev/null || true)
             if [ "$PHASE" = "Released" ]; then
               echo "deleting Released PV $pv (Retain keeps the data on disk)"
@@ -512,7 +512,7 @@ jobs:
 
       # 10. a Job's pod template is immutable: replace it rather than patch it
       - name: Remove the previous match Job
-        run: kubectl delete job rjm-host-match -n "$NAMESPACE" --ignore-not-found --wait=true
+        run: kubectl delete job rjm-bar-host-match -n "$NAMESPACE" --ignore-not-found --wait=true
 
       # 11. apply
       - name: Apply manifests
@@ -522,10 +522,10 @@ jobs:
         id: spads
         run: |
           if [ "${{ steps.render.outputs.spads_replicas }}" = "1" ]; then
-            kubectl rollout status deployment/rjm-host-spads -n "$NAMESPACE" --timeout=900s
+            kubectl rollout status deployment/rjm-bar-host-spads -n "$NAMESPACE" --timeout=900s
             echo "running=true" >> "$GITHUB_OUTPUT"
           else
-            echo "running=false (no rjm-host-secrets)" >> "$GITHUB_OUTPUT"
+            echo "running=false (no rjm-bar-host-secrets)" >> "$GITHUB_OUTPUT"
           fi
 
       # 12. wait for the match, then report
@@ -538,10 +538,10 @@ jobs:
           END=$(( $(date +%s) + TIMEOUT ))
           STATUS=timeout
           while [ "$(date +%s)" -lt "$END" ]; do
-            if [ "$(kubectl get job rjm-host-match -n "$NAMESPACE" -o jsonpath='{.status.succeeded}' 2>/dev/null)" = "1" ]; then
+            if [ "$(kubectl get job rjm-bar-host-match -n "$NAMESPACE" -o jsonpath='{.status.succeeded}' 2>/dev/null)" = "1" ]; then
               STATUS=succeeded; break
             fi
-            if [ -n "$(kubectl get job rjm-host-match -n "$NAMESPACE" -o jsonpath='{.status.failed}' 2>/dev/null)" ]; then
+            if [ -n "$(kubectl get job rjm-bar-host-match -n "$NAMESPACE" -o jsonpath='{.status.failed}' 2>/dev/null)" ]; then
               STATUS=failed; break
             fi
             sleep 20
@@ -552,19 +552,19 @@ jobs:
       - name: Match log
         if: always() && steps.wait.outcome != 'skipped'
         run: |
-          kubectl logs -n "$NAMESPACE" job/rjm-host-match -c match --tail=200 2>/dev/null | grep -v '^\[Progress\]' || true
-          POD=$(kubectl get pod -n "$NAMESPACE" -l job-name=rjm-host-match -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          kubectl logs -n "$NAMESPACE" job/rjm-bar-host-match -c match --tail=200 2>/dev/null | grep -v '^\[Progress\]' || true
+          POD=$(kubectl get pod -n "$NAMESPACE" -l job-name=rjm-bar-host-match -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
           {
             echo "### Match on $NAMESPACE"
             echo "- status: ${{ steps.wait.outputs.status }}"
-            echo "- output: \`/mnt/data2/k8s-volumes/rjm-host/$ENVIRONMENT/out/matches/$POD\` on mcgill-data"
+            echo "- output: \`/mnt/data2/k8s-volumes/rjm-bar-host/$ENVIRONMENT/out/matches/$POD\` on mcgill-data"
             echo "- SPADS running: ${{ steps.spads.outputs.running }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail if the match did not succeed
         if: always() && steps.wait.outcome == 'success' && steps.wait.outputs.status != 'succeeded'
         run: |
-          kubectl describe job rjm-host-match -n "$NAMESPACE" || true
+          kubectl describe job rjm-bar-host-match -n "$NAMESPACE" || true
           echo "::error::match did not complete: ${{ steps.wait.outputs.status }}"
           exit 1
 

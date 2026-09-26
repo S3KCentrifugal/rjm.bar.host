@@ -1,4 +1,4 @@
-# Reusable: run one BAR AI simulation on a GitHub runner with the rjm-host
+# Reusable: run one BAR AI simulation on a GitHub runner with the rjm-bar-host
 # image, and upload everything it produced (replay, infolog, engine console,
 # result.json, AI logs) as a workflow artifact. No cluster involved.
 #
@@ -22,9 +22,9 @@ on:
   workflow_call:
     inputs:
       image:
-        description: rjm-host image to run
+        description: rjm-bar-host image to run
         type: string
-        default: ghcr.io/s3kcentrifugal/rjm-host:test
+        default: ghcr.io/s3kcentrifugal/rjm-bar-host:test
       ai_archives:
         description: BARHOST_AI_ARCHIVES -- custom AIs to install (see scripts/install_ai.py)
         type: string
@@ -69,7 +69,7 @@ on:
     inputs:
       image:
         type: string
-        default: ghcr.io/s3kcentrifugal/rjm-host:test
+        default: ghcr.io/s3kcentrifugal/rjm-bar-host:test
       ai_archives:
         type: string
         default: github:S3KCentrifugal/CircuitAI@newest

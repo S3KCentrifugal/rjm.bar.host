@@ -3,11 +3,11 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: rjm-host-data-pvc
+  name: rjm-bar-host-data-pvc
   labels:
-    app.kubernetes.io/name: rjm-host
+    app.kubernetes.io/name: rjm-bar-host
     app.kubernetes.io/component: content
-    app.kubernetes.io/part-of: rjm-host
+    app.kubernetes.io/part-of: rjm-bar-host
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: data2
@@ -20,11 +20,11 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: rjm-host-out-pvc
+  name: rjm-bar-host-out-pvc
   labels:
-    app.kubernetes.io/name: rjm-host
+    app.kubernetes.io/name: rjm-bar-host
     app.kubernetes.io/component: output
-    app.kubernetes.io/part-of: rjm-host
+    app.kubernetes.io/part-of: rjm-bar-host
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: data2
@@ -38,11 +38,11 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: rjm-host-ai-pvc
+  name: rjm-bar-host-ai-pvc
   labels:
-    app.kubernetes.io/name: rjm-host
+    app.kubernetes.io/name: rjm-bar-host
     app.kubernetes.io/component: custom-ai
-    app.kubernetes.io/part-of: rjm-host
+    app.kubernetes.io/part-of: rjm-bar-host
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: data2

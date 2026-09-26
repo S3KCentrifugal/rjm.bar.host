@@ -11,7 +11,7 @@ resources:
 # One reusable image for every environment (design section 9): the tag, not
 # the name, says which build runs here. CI replaces IMAGE_TAG with the commit.
 images:
-  - name: ghcr.io/s3kcentrifugal/rjm-host
+  - name: ghcr.io/s3kcentrifugal/rjm-bar-host
     newTag: IMAGE_TAG
 
 patches:
@@ -20,22 +20,22 @@ patches:
   # across environments.
   - target:
       kind: PersistentVolumeClaim
-      name: rjm-host-data-pvc
+      name: rjm-bar-host-data-pvc
     patch: |-
       - op: add
         path: /spec/volumeName
-        value: rjm-host-data-pv-test
+        value: rjm-bar-host-data-pv-test
   - target:
       kind: PersistentVolumeClaim
-      name: rjm-host-out-pvc
+      name: rjm-bar-host-out-pvc
     patch: |-
       - op: add
         path: /spec/volumeName
-        value: rjm-host-out-pv-test
+        value: rjm-bar-host-out-pv-test
   - target:
       kind: PersistentVolumeClaim
-      name: rjm-host-ai-pvc
+      name: rjm-bar-host-ai-pvc
     patch: |-
       - op: add
         path: /spec/volumeName
-        value: rjm-host-ai-pv-test
+        value: rjm-bar-host-ai-pv-test

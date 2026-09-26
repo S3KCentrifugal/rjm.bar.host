@@ -9,10 +9,10 @@ resources:
   - spads-deployment.yaml
 
 configMapGenerator:
-  - name: rjm-host-match-config
+  - name: rjm-bar-host-match-config
     envs:
       - match.env
-  - name: rjm-host-spads-config
+  - name: rjm-bar-host-spads-config
     envs:
       - spads.env
 
@@ -26,5 +26,5 @@ generatorOptions:
 labels:
   - includeSelectors: false
     pairs:
-      app.kubernetes.io/part-of: rjm-host
+      app.kubernetes.io/part-of: rjm-bar-host
       app.kubernetes.io/managed-by: kustomize

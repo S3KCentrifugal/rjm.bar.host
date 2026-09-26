@@ -11,7 +11,7 @@ import time
 import unittest
 from pathlib import Path
 
-SPADS = Path("/opt/rjm-host/spads")
+SPADS = Path("/opt/rjm-bar-host/spads")
 CREDS = {"SPADS_LOBBY_LOGIN": "AutoHost", "SPADS_LOBBY_PASSWORD": "pw", "SPADS_OWNER_LOBBY_LOGIN": "Owner"}
 
 

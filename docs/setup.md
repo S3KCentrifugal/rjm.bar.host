@@ -15,7 +15,7 @@ file in this working tree.
 | 2 | WireGuard peer for CI | deploy job → cluster network | 5 repo secrets `WG_*` |
 | 3 | Cluster deploy identity (kubeconfig) | deploy job → Kubernetes API | repo secret `KUBE_CONFIG_DATA` |
 | 4 | GHCR pull token | deploy job container; cluster image pulls | repo secret `GHCR_PULL_TOKEN` |
-| 5 | Lobby credentials (the second Chobby account) | SPADS | repo secrets `LOBBY_*_TEST` / `LOBBY_*_PROD` → Kubernetes Secret `rjm-host-secrets` |
+| 5 | Lobby credentials (the second Chobby account) | SPADS | repo secrets `LOBBY_*_TEST` / `LOBBY_*_PROD` → Kubernetes Secret `rjm-bar-host-secrets` |
 | 6 | Router UDP forward | players joining lobby games | router |
 | 7 | Package access for other repositories | consumers of the image | GitHub package settings |
 | 8 | First deploy and verification | — | — |
@@ -243,12 +243,12 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     resourceNames:
-      - rjm-host-data-pv-test
-      - rjm-host-out-pv-test
-      - rjm-host-ai-pv-test
-      - rjm-host-data-pv-prod
-      - rjm-host-out-pv-prod
-      - rjm-host-ai-pv-prod
+      - rjm-bar-host-data-pv-test
+      - rjm-bar-host-out-pv-test
+      - rjm-bar-host-ai-pv-test
+      - rjm-bar-host-data-pv-prod
+      - rjm-bar-host-out-pv-prod
+      - rjm-bar-host-ai-pv-prod
     verbs: ["patch", "update", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -329,7 +329,7 @@ One classic personal access token serves two purposes:
 - the deploy job's container, `ghcr.io/mcgill-software/mcgill-deployer`, is a
   private package in another account;
 - the cluster pulls this repository's private image,
-  `ghcr.io/s3kcentrifugal/rjm-host`, with the pull secret the deploy job
+  `ghcr.io/s3kcentrifugal/rjm-bar-host`, with the pull secret the deploy job
   creates from it (`mcgill-k8s-pull-2026` in each namespace).
 
 It must be **classic** (fine-grained tokens do not cover GHCR packages) and
@@ -349,7 +349,7 @@ that created the pull secret has ended — `GITHUB_TOKEN` would expire).
 
 **Check:** `echo <token> | docker login ghcr.io -u S3KCentrifugal --password-stdin`,
 then `docker pull ghcr.io/mcgill-software/mcgill-deployer:latest` and
-`docker pull ghcr.io/s3kcentrifugal/rjm-host:test` both succeed.
+`docker pull ghcr.io/s3kcentrifugal/rjm-bar-host:test` both succeed.
 
 When it expires, set a new value and rerun the deploy: the job recreates the
 pull secret in the namespace every time.
@@ -360,7 +360,7 @@ pull secret in the namespace every time.
 
 Your second Chobby account is what SPADS logs in as. **Its username and
 password go in GitHub repository secrets, one set per environment**, and the
-deploy job turns them into the Kubernetes Secret `rjm-host-secrets` in that
+deploy job turns them into the Kubernetes Secret `rjm-bar-host-secrets` in that
 environment's namespace every time it runs.
 
 | Repository secret | Value | Becomes |
@@ -384,7 +384,7 @@ Rules the deploy job enforces:
   Secret is created or updated. If any is missing while another is set, the
   deploy fails, naming the missing one.
 - **None set → hands off.** If none is set for the environment, an existing
-  `rjm-host-secrets` created by hand (below) is left untouched. If there is
+  `rjm-bar-host-secrets` created by hand (below) is left untouched. If there is
   no Secret either, SPADS is held at zero replicas and the simulation Job
   still runs.
 - **Changes apply between games.** Changing a secret and redeploying updates
@@ -407,19 +407,19 @@ deploy.
 ```bash
 read -rsp "Lobby password: " LOBBY_PW; echo
 read -rsp "Room password (* for public): " ROOM_PW; echo
-kubectl create secret generic rjm-host-secrets -n bar-test \
+kubectl create secret generic rjm-bar-host-secrets -n bar-test \
   --from-literal=SPADS_LOBBY_LOGIN='<second account username>' \
   --from-literal=SPADS_LOBBY_PASSWORD="$LOBBY_PW" \
   --from-literal=SPADS_OWNER_LOBBY_LOGIN='<your main account username>' \
   --from-literal=SPADS_BATTLE_PASSWORD="${ROOM_PW:-*}"
 unset LOBBY_PW ROOM_PW
-kubectl label secret rjm-host-secrets -n bar-test app.kubernetes.io/part-of=rjm-host
+kubectl label secret rjm-bar-host-secrets -n bar-test app.kubernetes.io/part-of=rjm-bar-host
 ```
 
 Then redeploy. Leave the `LOBBY_*_TEST` repository secrets unset, or the next
 deploy will overwrite this Secret with them.
 
-**Check:** after the deploy, `kubectl logs deploy/rjm-host-spads -n bar-test -c spads`
+**Check:** after the deploy, `kubectl logs deploy/rjm-bar-host-spads -n bar-test -c spads`
 shows `Logged on lobby server` and `Hosting game …`. `kubectl get pods -n bar-test`
 shows the SPADS pod `1/1 Ready`: ready means it holds its lobby connection. If
 the account lacks the bot flag, SPADS warns at login and keeps the room at 8
@@ -459,7 +459,7 @@ checks are unreliable; a real join is the proof).
 The image is private. For another of your repositories to pull it in its
 workflows:
 
-1. GitHub → your profile → **Packages** → `rjm-host` → **Package settings**.
+1. GitHub → your profile → **Packages** → `rjm-bar-host` → **Package settings**.
 2. **Manage Actions access** → **Add repository** → pick it → role **Read**.
 3. In that repository's workflow: `permissions: { packages: read }`, log in to
    `ghcr.io` with its own `GITHUB_TOKEN`, then `docker run` the image, or call
@@ -481,8 +481,8 @@ The deploy job creates these itself (§3, pod security note). By hand, on
 `mcgill-data`:
 
 ```bash
-sudo mkdir -p /mnt/data2/k8s-volumes/rjm-host/{test,prod}/{data,out,ai}
-sudo chown -R 10001:10001 /mnt/data2/k8s-volumes/rjm-host
+sudo mkdir -p /mnt/data2/k8s-volumes/rjm-bar-host/{test,prod}/{data,out,ai}
+sudo chown -R 10001:10001 /mnt/data2/k8s-volumes/rjm-bar-host
 ```
 
 ### 8.2 Capacity
@@ -512,16 +512,16 @@ Or push any commit to `test`.
 
 ```bash
 kubectl get all,pvc -n bar-test
-kubectl get pv | grep rjm-host
-kubectl logs job/rjm-host-match -n bar-test -c match --tail=30
+kubectl get pv | grep rjm-bar-host
+kubectl logs job/rjm-bar-host-match -n bar-test -c match --tail=30
 ```
 
 Expect:
 
 - the Job `Complete`;
-- three PVCs `Bound` to `rjm-host-*-pv-test`;
+- three PVCs `Bound` to `rjm-bar-host-*-pv-test`;
 - the log ending `finished: game over`;
-- on the node, `/mnt/data2/k8s-volumes/rjm-host/test/out/matches/<pod>/`
+- on the node, `/mnt/data2/k8s-volumes/rjm-bar-host/test/out/matches/<pod>/`
   holding `result.json`, `infolog.txt` and `demos-server/*.sdfz`.
 
 ### 8.5 Load a custom AI folder (optional)

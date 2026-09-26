@@ -3,7 +3,7 @@
 A reusable **Beyond All Reason headless host** container, and its deployment to
 the private k3s cluster.
 
-One image, `ghcr.io/s3kcentrifugal/rjm-host`, does two jobs:
+One image, `ghcr.io/s3kcentrifugal/rjm-bar-host`, does two jobs:
 
 | Mode | What it does | Where it runs |
 | --- | --- | --- |
@@ -72,7 +72,7 @@ docker run --rm \
   -e BARHOST_AI_ARCHIVES=github:S3KCentrifugal/CircuitAI@newest \
   -e BARHOST_AI_SHORTNAME=SMRTBARb -e BARHOST_AI_COUNT=2 \
   -e "BARHOST_MAP=All That Glitters v2.2.3" \
-  ghcr.io/s3kcentrifugal/rjm-host:test match
+  ghcr.io/s3kcentrifugal/rjm-bar-host:test match
 ```
 
 The first run downloads the game (~3.5 GB) into the `bar-data` volume. Every
@@ -84,7 +84,7 @@ shell command.
 
 The package is **private**. For another repository to pull it:
 
-1. GitHub → your profile → Packages → `rjm-host` → Package settings →
+1. GitHub → your profile → Packages → `rjm-bar-host` → Package settings →
    **Manage Actions access** → add the repository (role: Read).
 2. In that repository's workflow, log in to `ghcr.io` with its own
    `GITHUB_TOKEN` (`permissions: packages: read`), then `docker run` as above.
@@ -128,9 +128,9 @@ Namespace `bar-<env>` on `mcgill-data`, deployed by
 
 | Object | Purpose |
 | --- | --- |
-| Job `rjm-host-match` | one simulation per deploy; the deploy waits for it and fails if it fails |
-| Deployment `rjm-host-spads` | the lobby autohost; held at 0 replicas until `rjm-host-secrets` exists |
-| PVCs `rjm-host-{data,out,ai}-pvc` | content, output, custom AIs, under `/mnt/data2/k8s-volumes/rjm-host/<env>/` |
+| Job `rjm-bar-host-match` | one simulation per deploy; the deploy waits for it and fails if it fails |
+| Deployment `rjm-bar-host-spads` | the lobby autohost; held at 0 replicas until `rjm-bar-host-secrets` exists |
+| PVCs `rjm-bar-host-{data,out,ai}-pvc` | content, output, custom AIs, under `/mnt/data2/k8s-volumes/rjm-bar-host/<env>/` |
 
 **Loading a custom AI folder onto the cluster**: `scripts/upload_ai.sh test
 path/to/AI/Skirmish/SMRTBARb` copies it onto the custom-AI volume (Linux build
@@ -160,7 +160,7 @@ gh secret set GHCR_PULL_TOKEN      -R S3KCentrifugal/rjm.bar.host   # PAT: read:
 ```
 
 `GHCR_PULL_TOKEN` must be able to read **both** `ghcr.io/mcgill-software/mcgill-deployer`
-(the deploy job's container) and this account's private `rjm-host` package (the
+(the deploy job's container) and this account's private `rjm-bar-host` package (the
 cluster's pull secret) — a classic PAT with `read:packages` from an account that
 can see both.
 
@@ -183,8 +183,8 @@ every game. Full guide: [`docs/lobby.md`](docs/lobby.md).
    Without it the room is visible but nobody outside can join.
 3. **Control it** from anywhere with cluster access:
    ```bash
-   kubectl exec -n bar-test deploy/rjm-host-spads -c spads -- spadsctl status
-   kubectl exec -n bar-test deploy/rjm-host-spads -c spads -- spadsctl spads map Comet Catcher Remake 1.8
+   kubectl exec -n bar-test deploy/rjm-bar-host-spads -c spads -- spadsctl status
+   kubectl exec -n bar-test deploy/rjm-bar-host-spads -c spads -- spadsctl spads map Comet Catcher Remake 1.8
    ```
    Or as owner, by private message to the autohost: `!map …`, `!forceStart`,
    `!stop`.

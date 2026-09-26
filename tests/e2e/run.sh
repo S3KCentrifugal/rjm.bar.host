@@ -2,7 +2,7 @@
 # Offline end-to-end test of the lobby host: real SPADS + real engine + 8 AI,
 # against a fake lobby server. No BAR servers, no cluster.
 #
-#   tests/e2e/run.sh [image]          default image: rjm-host:dev
+#   tests/e2e/run.sh [image]          default image: rjm-bar-host:dev
 #
 # Environment:
 #   E2E_DATA_VOLUME   docker volume with BAR content (default rjm-bar-data);
@@ -22,7 +22,7 @@
 set -euo pipefail
 export MSYS_NO_PATHCONV=1   # Git Bash on Windows: do not rewrite container paths
 
-IMAGE="${1:-rjm-host:dev}"
+IMAGE="${1:-rjm-bar-host:dev}"
 HERE="$(cd "$(dirname "$0")" && { pwd -W 2> /dev/null || pwd; })"   # pwd -W: a Windows path for docker.exe under Git Bash
 DATA="${E2E_DATA_VOLUME:-rjm-bar-data}"
 AI="${E2E_AI:-SMRTBARb}"
@@ -79,7 +79,7 @@ docker create --name "$SPADS" --network "$NET" \
 	-e SPADS_LOBBY_HOST="$DRIVER" -e SPADS_LOBBY_TLS=off \
 	-e SPADS_LOBBY_LOGIN=AutoHost -e SPADS_LOBBY_PASSWORD=e2e-secret \
 	-e SPADS_OWNER_LOBBY_LOGIN=Owner -e SPADS_BATTLE_PASSWORD='*' \
-	-e SPADS_BATTLE_NAME="rjm-host e2e room" -e "SPADS_MAP=$MAP1" \
+	-e SPADS_BATTLE_NAME="rjm-bar-host e2e room" -e "SPADS_MAP=$MAP1" \
 	-e SPADS_GAME=rapid://byar:test \
 	-e "SPADS_ALLOWED_AIS=$AI" \
 	-e "SPADS_LOCAL_BOTS=${AI}1 0 $AI;${AI}2 1 $AI;${AI}3 0 $AI;${AI}4 1 $AI;${AI}5 0 $AI;${AI}6 1 $AI;${AI}7 0 $AI;${AI}8 1 $AI" \

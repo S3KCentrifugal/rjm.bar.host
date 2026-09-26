@@ -8,7 +8,7 @@ override this file.
 ## Project
 
 A **reusable Beyond All Reason headless host image**,
-`ghcr.io/s3kcentrifugal/rjm-host` (private), plus its deployment to the private
+`ghcr.io/s3kcentrifugal/rjm-bar-host` (private), plus its deployment to the private
 k3s cluster in namespace `bar-<env>`. One image, two modes:
 
 - **`match`** — an unattended AI-vs-AI simulation played to game over, leaving

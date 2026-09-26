@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, os.environ.get("RJM_BIN", "/opt/rjm-host/bin"))
+sys.path.insert(0, os.environ.get("RJM_BIN", "/opt/rjm-bar-host/bin"))
 import run_match  # noqa: E402
 
 

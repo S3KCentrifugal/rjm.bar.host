@@ -1,4 +1,4 @@
-# The Recoil engine release the rjm-host image is built from.
+# The Recoil engine release the rjm-bar-host image is built from.
 #
 # This is BAR's *official* Linux build, downloaded and checksum-verified, not a
 # source build: a lobby host must run the same engine as the players who join

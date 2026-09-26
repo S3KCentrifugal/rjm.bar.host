@@ -18,7 +18,7 @@ shift
 [ "$#" -gt 0 ] || { echo "usage: upload_ai.sh <test|prod> <AI folder>..." >&2; exit 2; }
 case "$env" in test|prod) ;; *) echo "environment must be test or prod" >&2; exit 2 ;; esac
 ns="bar-$env"
-pod="rjm-host-ai-upload"
+pod="rjm-bar-host-ai-upload"
 
 for dir in "$@"; do
 	[ -d "$dir" ] || { echo "not a folder: $dir" >&2; exit 1; }
@@ -45,7 +45,7 @@ metadata:
   name: $pod
   labels:
     app.kubernetes.io/name: $pod
-    app.kubernetes.io/part-of: rjm-host
+    app.kubernetes.io/part-of: rjm-bar-host
 spec:
   restartPolicy: Never
   securityContext:
@@ -70,7 +70,7 @@ spec:
   volumes:
     - name: custom-ai
       persistentVolumeClaim:
-        claimName: rjm-host-ai-pvc
+        claimName: rjm-bar-host-ai-pvc
 EOF
 kubectl wait --for=condition=Ready "pod/$pod" -n "$ns" --timeout=120s > /dev/null
 

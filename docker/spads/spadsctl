@@ -12,7 +12,7 @@
     spadsctl say <text>                say something in the room
 
 From outside the pod:
-    kubectl exec -n bar-test deploy/rjm-host-spads -c spads -- spadsctl status
+    kubectl exec -n bar-test deploy/rjm-bar-host-spads -c spads -- spadsctl status
 
 Prints the plugin's one-line JSON answer (pretty-printed) and exits non-zero if
 the command was refused.

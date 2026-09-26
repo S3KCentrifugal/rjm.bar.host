@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke-test an rjm-host image before it is published.
+# Smoke-test an rjm-bar-host image before it is published.
 #
 #   scripts/smoke_test.sh <image>
 #
@@ -20,7 +20,7 @@ pass() { echo "ok - $*"; }
 
 # Named volumes rather than bind mounts: they behave the same on a Linux runner
 # and under Docker Desktop, where host temp paths do not map cleanly.
-vol="rjm-host-smoke-$$"
+vol="rjm-bar-host-smoke-$$"
 trap 'docker volume rm -f "$vol-mounted" "$vol-windows" > /dev/null 2>&1 || true' EXIT
 
 # 1. stock AI
@@ -56,7 +56,7 @@ pass "Windows-only AI refused with an explanation"
 
 # 5. SPADS
 out="$(docker run --rm -e SPADS_LOBBY_LOGIN=smoke -e SPADS_LOBBY_PASSWORD=smoke -e SPADS_OWNER_LOBBY_LOGIN=smoke \
-	--entrypoint /opt/rjm-host/spads/run_spads.sh "$IMAGE" --check 2>&1)" \
+	--entrypoint /opt/rjm-bar-host/spads/run_spads.sh "$IMAGE" --check 2>&1)" \
 	|| { echo "$out"; fail "SPADS configuration check failed"; }
 pass "SPADS installed and configuration renders"
 

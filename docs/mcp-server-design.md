@@ -5,7 +5,7 @@ simulations and lobby hosts up and down on the k3s cluster, many side by side,
 with its power confined to **one namespace**.
 
 Status: design, 2026-09-26. Nothing here is built. It builds on the
-`rjm-host` image and its environment contract ([`autohost-design.md`](autohost-design.md)).
+`rjm-bar-host` image and its environment contract ([`autohost-design.md`](autohost-design.md)).
 
 ---
 
@@ -58,8 +58,8 @@ tool call could run a pod that prints the lobby passwords. So the namespace gets
 a **ValidatingAdmissionPolicy** (CEL, built into Kubernetes ≥ 1.30 — check the
 cluster's k3s version first) that rejects any pod in `rjm-sims` unless:
 
-- every container image is `ghcr.io/s3kcentrifugal/rjm-host@sha256:…` or
-  `…/rjm-host:<tag>` from an allowlist;
+- every container image is `ghcr.io/s3kcentrifugal/rjm-bar-host@sha256:…` or
+  `…/rjm-bar-host:<tag>` from an allowlist;
 - `command` is unset and `args[0]` is one of `match`, `spads`, `fetch-content`
   — the image's entrypoint otherwise runs *any* command (`exec "$@"`);
 - no `hostNetwork`, `hostPID`, `hostIPC`, `privileged`, added capabilities or
@@ -144,7 +144,7 @@ throws away layer 2.4 and makes every call a free-form shell command.
 
 ### 4.1 One run: `sim_run`
 
-Creates a Job from a fixed template: the `rjm-host` image, `args: ["match"]`,
+Creates a Job from a fixed template: the `rjm-bar-host` image, `args: ["match"]`,
 the `BARHOST_*` variables from the tool arguments, the content volume
 read-only, the output volume, `backoffLimit: 0`, `activeDeadlineSeconds` from
 the timeout, `ttlSecondsAfterFinished: 86400`. Returns an id like `s-20260926-a1b2`.
@@ -227,7 +227,7 @@ the UDP port players connect to.
 ### 5.2 `hostPort`, not `hostNetwork`, and a port pool
 
 Several lobbies on one node each need their own public UDP port. Two changes
-from the current `rjm-host-spads` Deployment:
+from the current `rjm-bar-host-spads` Deployment:
 
 - **`hostPort` instead of `hostNetwork`.** The pod keeps its own network
   namespace: NetworkPolicy applies, it cannot see or reach the node's
@@ -241,7 +241,7 @@ from the current `rjm-host-spads` Deployment:
   range. The server assigns the lowest free port (known from the existing
   Deployments' labels) and passes it as `SPADS_GAME_PORT`.
 
-The existing `rjm-host-spads` in `bar-<env>` would benefit from the same
+The existing `rjm-bar-host-spads` in `bar-<env>` would benefit from the same
 change.
 
 ### 5.3 `lobby_down` never ends a game by accident
@@ -251,7 +251,7 @@ fixed `exec` into the lobby pod looking for a `spring-headless` process. If a
 game is running it refuses, unless `force=true`. The tool is annotated
 `destructiveHint`, so the client asks before calling it. `pods/exec` is the
 most powerful verb in the Role; the admission policy (§2.2) is what keeps it
-from mattering, since every pod it could exec into is an `rjm-host` pod.
+from mattering, since every pod it could exec into is an `rjm-bar-host` pod.
 
 ### 5.4 One lobby account per concurrent lobby
 
@@ -296,7 +296,7 @@ lists, reads or deletes objects carrying that label.
 | Choice | Decision | Why |
 | --- | --- | --- |
 | Language | Python, official MCP SDK (`FastMCP`, Streamable HTTP) + `kubernetes` client | matches the repository's tooling; the SDK does transport and schemas |
-| Location | `mcp/` in this repository | it is bound to the `rjm-host` image's env contract; changing one without the other must be one reviewed diff |
+| Location | `mcp/` in this repository | it is bound to the `rjm-bar-host` image's env contract; changing one without the other must be one reviewed diff |
 | Image | `ghcr.io/s3kcentrifugal/rjm-sims-mcp` | a second component in the existing `set-env → build → deploy` pipeline |
 | Namespace | `rjm-sims` (one, as asked) | the Role, admission policy, quota and workloads all live there |
 | Storage | new PVs under `/mnt/data2/k8s-volumes/rjm-sims/{data,out,ai}` | separate from `bar-<env>`, so a batch cannot fill the host's volumes |

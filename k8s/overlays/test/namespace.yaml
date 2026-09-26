@@ -3,7 +3,7 @@ kind: Namespace
 metadata:
   name: bar-test
   labels:
-    app.kubernetes.io/name: rjm-host
+    app.kubernetes.io/name: rjm-bar-host
     app.kubernetes.io/component: namespace
-    app.kubernetes.io/part-of: rjm-host
+    app.kubernetes.io/part-of: rjm-bar-host
     environment: test

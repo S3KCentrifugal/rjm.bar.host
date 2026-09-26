@@ -63,7 +63,7 @@ OWNER = os.environ.get("E2E_OWNER", "Owner")
 AI = os.environ.get("E2E_AI", "SMRTBARb")
 BOTS = int(os.environ.get("E2E_BOTS", "8"))
 BONUS = int(os.environ.get("E2E_BONUS", "50"))
-TITLE = os.environ.get("E2E_TITLE", "rjm-host e2e room")
+TITLE = os.environ.get("E2E_TITLE", "rjm-bar-host e2e room")
 MAP = os.environ.get("E2E_MAP", "All That Glitters v2.2.3")
 ENGINE_VERSION = os.environ.get("BAR_ENGINE_VERSION", "2026.07.04")
 SURVIVE_SECONDS = int(os.environ.get("E2E_SURVIVE_SECONDS", "120"))
@@ -234,7 +234,7 @@ class FakeLobby:
             self.compat = set(w[7].split())
         self.login_ok = True
         self.send("ACCEPTED", user)
-        self.send("MOTD", "rjm-host offline e2e lobby")
+        self.send("MOTD", "rjm-bar-host offline e2e lobby")
         for name, u in self.users.items():
             self.send("ADDUSER", name, "XX", u["id"], "e2e")
         for name, u in self.users.items():

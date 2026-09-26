@@ -13,7 +13,7 @@ background is in [`autohost-design.md`](autohost-design.md) §10.
 
 | Part | Where | Role |
 | --- | --- | --- |
-| SPADS | pod `rjm-host-spads`, container `spads` | logs in as the autohost account, owns the room, runs every command and vote |
+| SPADS | pod `rjm-bar-host-spads`, container `spads` | logs in as the autohost account, owns the room, runs every command and vote |
 | Autopilot plugin | inside SPADS | bot bonus, auto-start, pre-game force start, control socket |
 | `spring-headless` | same container, one per game | game server + a spectator client that runs **all the bots** |
 | `spadsctl` | same container | command-line client for the control socket |
@@ -95,7 +95,7 @@ node. Reach it with `kubectl exec`:
 
 ```bash
 NS=bar-test
-ctl() { kubectl exec -n "$NS" deploy/rjm-host-spads -c spads -- spadsctl "$@"; }
+ctl() { kubectl exec -n "$NS" deploy/rjm-bar-host-spads -c spads -- spadsctl "$@"; }
 
 ctl status                                   # room, players, bots, game state (JSON)
 ctl spads map Comet Catcher Remake 1.8       # any SPADS command, with the autohost's authority
@@ -113,7 +113,7 @@ ctl say "Server restarting in 10 minutes"
 ```json
 {
   "ok": true, "battleOpen": true, "springPid": 0, "springState": 0,
-  "battle": {"title": "rjm-host test room", "map": "All That Glitters v2.2.3", "maxPlayers": 16, "passworded": 0},
+  "battle": {"title": "rjm-bar-host test room", "map": "All That Glitters v2.2.3", "maxPlayers": 16, "passworded": 0},
   "users": [{"name": "Human1", "player": 1, "ready": 1, "sync": 1, "team": 0}],
   "bots":  [{"name": "SMRTBARb1", "ai": "SMRTBARb", "owner": "<autohost>", "team": 1, "bonus": 50}],
   "autopilot": {"botBonus": 50, "minHumans": 1, "startDelay": 20, "countdownRemaining": null,
@@ -140,7 +140,7 @@ only.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `SPADS_BATTLE_NAME` | `rjm-host test room` | room title |
+| `SPADS_BATTLE_NAME` | `rjm-bar-host test room` | room title |
 | `SPADS_MAP` | All That Glitters v2.2.3 | map at start; players can vote others from `BARHOST_MAPS` |
 | `BARHOST_MAPS` | 2 maps | maps downloaded into the content volume — the only maps the room can use |
 | `SPADS_GAME` / `BARHOST_GAMETYPE` | `byar:test` | game version; pin `byar:git:<sha>` for a stable public room |
@@ -177,8 +177,8 @@ the room preset (humans-vs-bots, balance, votes, flood limits) in
 | per game: infolog, start script, result, replay link | `spads/games/<time>-<gameId>/` |
 | replays | `spads/var/demos*/` |
 
-On the node: `/mnt/data2/k8s-volumes/rjm-host/<env>/out/`. From anywhere:
-`kubectl logs -n bar-test deploy/rjm-host-spads -c spads`.
+On the node: `/mnt/data2/k8s-volumes/rjm-bar-host/<env>/out/`. From anywhere:
+`kubectl logs -n bar-test deploy/rjm-bar-host-spads -c spads`.
 
 ## 7. How it is tested
 

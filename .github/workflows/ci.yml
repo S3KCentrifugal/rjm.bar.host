@@ -46,7 +46,7 @@ jobs:
           file: docker/runtime/Dockerfile
           target: runtime
           load: true
-          tags: rjm-host:ci
+          tags: rjm-bar-host:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
@@ -54,9 +54,9 @@ jobs:
             ENGINE_SHA256=${{ steps.pin.outputs.engine_sha256 }}
 
       - name: Smoke test
-        run: scripts/smoke_test.sh rjm-host:ci
+        run: scripts/smoke_test.sh rjm-bar-host:ci
 
       - name: Unit tests
         run: |
           python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
-          tests/run_unit.sh rjm-host:ci
+          tests/run_unit.sh rjm-bar-host:ci

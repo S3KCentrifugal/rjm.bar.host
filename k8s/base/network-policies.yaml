@@ -9,11 +9,11 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: rjm-host-default-deny-ingress
+  name: rjm-bar-host-default-deny-ingress
   labels:
-    app.kubernetes.io/name: rjm-host
+    app.kubernetes.io/name: rjm-bar-host
     app.kubernetes.io/component: network-policy
-    app.kubernetes.io/part-of: rjm-host
+    app.kubernetes.io/part-of: rjm-bar-host
 spec:
   podSelector: {}
   policyTypes: [Ingress]

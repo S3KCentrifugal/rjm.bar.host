@@ -1,4 +1,4 @@
-# Autopilot: runs an rjm-host SPADS room without a human operator.
+# Autopilot: runs an rjm-bar-host SPADS room without a human operator.
 #
 #   * Bot bonus      keeps every autohost bot at AUTOPILOT_BOT_BONUS (%) income
 #                    bonus (SPADS's localBots setting has no bonus field).

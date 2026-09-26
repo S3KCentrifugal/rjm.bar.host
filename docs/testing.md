@@ -10,7 +10,7 @@ from GitHub.
 | Unit + static | `tests/run_unit.sh <image>` | the image, `kubectl`, PyYAML | ~1 min | every build (`ci`, `deploy`) |
 | Lobby end-to-end | `tests/e2e/run.sh <image>` | the image, ~2 GB content volume | ~10 min | `e2e` workflow: weekly, on demand, on PRs touching the lobby host |
 
-Build the image first: `docker build -f docker/runtime/Dockerfile -t rjm-host:dev .`
+Build the image first: `docker build -f docker/runtime/Dockerfile -t rjm-bar-host:dev .`
 
 ## Smoke test — `scripts/smoke_test.sh`
 

@@ -113,7 +113,7 @@ class CommandsConf(unittest.TestCase):
     """The first layer: !boss is owner-only and cannot be voted at all."""
 
     def test_boss_is_owner_only_and_unvotable(self):
-        text = Path("/opt/rjm-host/spads/etc/commands.conf").read_text()
+        text = Path("/opt/rjm-bar-host/spads/etc/commands.conf").read_text()
         section = text.split("[boss]", 1)[1].split("\n[", 1)[0]
         rules = [l for l in section.splitlines() if l and not l.startswith("#")]
         self.assertEqual(rules, ["::|130:"])

@@ -51,7 +51,7 @@ jobs:
           file: docker/runtime/Dockerfile
           target: runtime
           load: true
-          tags: rjm-host:e2e
+          tags: rjm-bar-host:e2e
           cache-from: type=gha
           build-args: |
             ENGINE_VERSION=${{ steps.pin.outputs.engine_version }}
@@ -74,7 +74,7 @@ jobs:
         run: |
           mkdir -p content && chmod 777 content
           docker volume create rjm-bar-data
-          docker run --rm -v "$PWD/content:/src" -v rjm-bar-data:/bar/data --user 0 --entrypoint sh rjm-host:e2e \
+          docker run --rm -v "$PWD/content:/src" -v rjm-bar-data:/bar/data --user 0 --entrypoint sh rjm-bar-host:e2e \
             -c 'cp -a /src/. /bar/data/ 2>/dev/null; chown -R 10001:10001 /bar/data'
 
       - name: Runner resources
@@ -93,12 +93,12 @@ jobs:
           # (docs/testing.md) or here with `full` on a bigger runner.
           E2E_HUMAN_ENGINE: ${{ inputs.full && '1' || '0' }}
           E2E_ARTIFACTS: ${{ github.workspace }}/e2e-artifacts
-        run: tests/e2e/run.sh rjm-host:e2e
+        run: tests/e2e/run.sh rjm-bar-host:e2e
 
       - name: Save content for the cache
         if: always()
         run: |
-          docker run --rm -v "$PWD/content:/dst" -v rjm-bar-data:/bar/data --user 0 --entrypoint sh rjm-host:e2e \
+          docker run --rm -v "$PWD/content:/dst" -v rjm-bar-data:/bar/data --user 0 --entrypoint sh rjm-bar-host:e2e \
             -c 'cp -a /bar/data/. /dst/; chmod -R a+rwX /dst'
 
       - name: Artifacts

@@ -37,7 +37,7 @@ our %bosses;
 sub executeCommand { 1 }
 $ENV{SPADS_OWNER_LOBBY_LOGIN} //= 'Owner';
 $ENV{AUTOPILOT_SOCKET} = "/tmp/autopilot-harness-$$.sock";
-require($ENV{AUTOPILOT_PM} // '/opt/rjm-host/spads/plugins/Autopilot.pm');
+require($ENV{AUTOPILOT_PM} // '/opt/rjm-bar-host/spads/plugins/Autopilot.pm');
 my $p = Autopilot->new;
 
 while (my $line = <STDIN>) {

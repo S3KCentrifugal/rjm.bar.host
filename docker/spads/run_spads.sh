@@ -5,7 +5,7 @@
 #   run_spads.sh           validate, then exec SPADS
 #   run_spads.sh --check   validate the configuration and exit (CI smoke test)
 #
-# Configuration is the files in /opt/rjm-host/spads/etc, parametrised by
+# Configuration is the files in /opt/rjm-bar-host/spads/etc, parametrised by
 # environment variables that SPADS itself substitutes (%ENV{..}% and
 # %(ENV{..}|default)%, SpadsConf.pm). Credentials come from the environment
 # only -- never from the image.
@@ -21,7 +21,7 @@
 set -euo pipefail
 
 SPADS_HOME=/opt/spads
-ETC=/opt/rjm-host/spads/etc
+ETC=/opt/rjm-bar-host/spads/etc
 OUT="${BARHOST_OUT_DIR:-/bar/out}/spads"
 
 log() { echo "[run_spads] $*" >&2; }

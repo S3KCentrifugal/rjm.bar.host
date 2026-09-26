@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, os.environ.get("RJM_BIN", "/opt/rjm-host/bin"))
+sys.path.insert(0, os.environ.get("RJM_BIN", "/opt/rjm-bar-host/bin"))
 import install_ai  # noqa: E402
 
 

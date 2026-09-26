@@ -4,11 +4,11 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: rjm-host-match
+  name: rjm-bar-host-match
   labels:
-    app.kubernetes.io/name: rjm-host-match
+    app.kubernetes.io/name: rjm-bar-host-match
     app.kubernetes.io/component: match-runner
-    app.kubernetes.io/part-of: rjm-host
+    app.kubernetes.io/part-of: rjm-bar-host
 spec:
   # One attempt. A failed match is a result worth looking at, and a retry would
   # bury the infolog that explains it under a second run.
@@ -19,12 +19,12 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: rjm-host-match
+        app.kubernetes.io/name: rjm-bar-host-match
         app.kubernetes.io/component: match-runner
-        app.kubernetes.io/part-of: rjm-host
+        app.kubernetes.io/part-of: rjm-bar-host
     spec:
       restartPolicy: Never
-      serviceAccountName: rjm-host
+      serviceAccountName: rjm-bar-host
       imagePullSecrets:
         - name: mcgill-k8s-pull-2026
       securityContext:
@@ -38,11 +38,11 @@ spec:
         # Game and maps into the content volume. Idempotent: rapid skips what
         # the pool already has, so a warm volume costs seconds.
         - name: fetch-content
-          image: ghcr.io/s3kcentrifugal/rjm-host:latest
+          image: ghcr.io/s3kcentrifugal/rjm-bar-host:latest
           args: ["fetch-content"]
           envFrom:
             - configMapRef:
-                name: rjm-host-match-config
+                name: rjm-bar-host-match-config
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -55,11 +55,11 @@ spec:
               mountPath: /bar/data
       containers:
         - name: match
-          image: ghcr.io/s3kcentrifugal/rjm-host:latest
+          image: ghcr.io/s3kcentrifugal/rjm-bar-host:latest
           args: ["match"]
           envFrom:
             - configMapRef:
-                name: rjm-host-match-config
+                name: rjm-bar-host-match-config
           env:
             # Content was fetched by the init container.
             - name: BARHOST_FETCH_CONTENT
@@ -94,10 +94,10 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: rjm-host-data-pvc
+            claimName: rjm-bar-host-data-pvc
         - name: out
           persistentVolumeClaim:
-            claimName: rjm-host-out-pvc
+            claimName: rjm-bar-host-out-pvc
         - name: custom-ai
           persistentVolumeClaim:
-            claimName: rjm-host-ai-pvc
+            claimName: rjm-bar-host-ai-pvc

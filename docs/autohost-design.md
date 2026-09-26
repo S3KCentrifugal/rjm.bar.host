@@ -46,8 +46,8 @@ publish, smoke-test and deploy it.
 checksum and breaks compatibility with stock clients. Operating lobby
 infrastructure: SPADS is a *client* of BAR's lobby server.
 
-**Project name.** `rjm-host`. Namespaces `bar-test`, `bar-prod`.
-Image `ghcr.io/s3kcentrifugal/rjm-host` (private).
+**Project name.** `rjm-bar-host`. Namespaces `bar-test`, `bar-prod`.
+Image `ghcr.io/s3kcentrifugal/rjm-bar-host` (private).
 
 ---
 
@@ -260,7 +260,7 @@ start positions (`game_initial_spawn.lua:478-479`) and places them itself.
 
 ## 5. Container design
 
-One image, `ghcr.io/s3kcentrifugal/rjm-host`, from a three-stage build:
+One image, `ghcr.io/s3kcentrifugal/rjm-bar-host`, from a three-stage build:
 
 ```text
 engine (official release, sha256-verified) ─┐
@@ -274,7 +274,7 @@ spads  (Yaribz repos at pinned commits)     ─┴─▶ runtime (debian:stable-
 | `/bar/data` | `data\` | game and maps (volume) |
 | `/bar/custom-ai` | — | custom AI folders (optional volume) |
 | `/bar/out` | — | everything produced (volume) |
-| `/opt/spads`, `/opt/rjm-host/spads/etc` | — | SPADS and its configuration |
+| `/opt/spads`, `/opt/rjm-bar-host/spads/etc` | — | SPADS and its configuration |
 
 Runtime packages: `python3` (runner, installer), `perl` with `FFI::Platypus`,
 `IO::Socket::SSL` and `DBD::SQLite` (SPADS: unitsync over FFI, lobby TLS,
@@ -353,14 +353,14 @@ k8s/
 
 ### 7.1 Workloads
 
-**`rjm-host-match`, a Job.** One simulation per deploy; `backoffLimit: 0` (a
+**`rjm-bar-host-match`, a Job.** One simulation per deploy; `backoffLimit: 0` (a
 failed match is a result to read, and a retry would bury its infolog);
 `ttlSecondsAfterFinished: 86400`. A Job's pod template is immutable, so the
 pipeline deletes and recreates it — and refuses to while one is running.
 
-**`rjm-host-spads`, a Deployment** of one replica, `strategy: Recreate`,
+**`rjm-bar-host-spads`, a Deployment** of one replica, `strategy: Recreate`,
 `hostNetwork: true` ([§10](#10-the-lobby-host-spads)). Held at zero replicas by
-the pipeline until the `rjm-host-secrets` Secret exists. A readiness probe
+the pipeline until the `rjm-bar-host-secrets` Secret exists. A readiness probe
 (`docker/spads/ready.sh`) marks it ready when *its own* SPADS process holds an
 established TCP connection to the lobby — matched by socket inode, because under
 `hostNetwork` `/proc/net/tcp` lists every socket on the node, including the
@@ -374,14 +374,14 @@ starts with content in place.
 ### 7.2 Storage
 
 Three volumes on `storageClassName: data2`, host path
-`/mnt/data2/k8s-volumes/rjm-host/<env>/<purpose>`, `mcgill-data` affinity,
+`/mnt/data2/k8s-volumes/rjm-bar-host/<env>/<purpose>`, `mcgill-data` affinity,
 `Retain`, every PV carrying `claimRef`:
 
 | PVC | Mount | Purpose | Size |
 | --- | --- | --- | --- |
-| `rjm-host-data-pvc` | `/bar/data` | rapid pool + maps | 40Gi |
-| `rjm-host-out-pvc` | `/bar/out` | every log and replay | 50Gi |
-| `rjm-host-ai-pvc` | `/bar/custom-ai` (read-only) | custom AI folders | 5Gi |
+| `rjm-bar-host-data-pvc` | `/bar/data` | rapid pool + maps | 40Gi |
+| `rjm-bar-host-out-pvc` | `/bar/out` | every log and replay | 50Gi |
+| `rjm-bar-host-ai-pvc` | `/bar/custom-ai` (read-only) | custom AI folders | 5Gi |
 
 Both workloads mount all three; they run on the one node, so `ReadWriteOnce`
 does not keep them apart. The pipeline creates the host directories and
@@ -391,11 +391,11 @@ does not keep them apart. The pipeline creates the host directories and
 <folder>...` — both workloads mount the volume read-only, so it starts a
 short-lived pod that mounts it read-write, rejects a folder without
 `libSkirmishAI.so`, copies, and deletes the pod. Alternatively place it under
-`/mnt/data2/k8s-volumes/rjm-host/<env>/ai/` on the node.
+`/mnt/data2/k8s-volumes/rjm-bar-host/<env>/ai/` on the node.
 
 ### 7.3 Output: what is captured
 
-Everything lands on `rjm-host-out-pvc`:
+Everything lands on `rjm-bar-host-out-pvc`:
 
 | Path | Written by |
 | --- | --- |
@@ -541,7 +541,7 @@ limit at or above 8 cores' worth of slack, or accept the throttling.
 
 Non-root (uid 10001), `allowPrivilegeEscalation: false`, all capabilities
 dropped, `RuntimeDefault` seccomp, no service-account token. The lobby
-credentials live only in the `rjm-host-secrets` Secret, applied by hand and
+credentials live only in the `rjm-bar-host-secrets` Secret, applied by hand and
 never committed; SPADS refuses to start with an empty owner login, because
 `users.conf` would then grant owner rights to every user.
 
@@ -608,8 +608,8 @@ runtime.
 
 | Standard | Here | Why |
 | --- | --- | --- |
-| Image per environment (`<project>-<component>-<env>`) | one image, `rjm-host`, tagged `<sha>`/`<env>` | it is a reusable artifact consumed by other repositories; an image is built once per source tree and promoted by retagging, never rebuilt per environment (convention-deployment §6) |
-| Namespace `mcgill-<service>-<env>` | `bar-<env>` | requested by the owner: the namespace names the game it hosts; resource names keep the `rjm-host-` prefix |
+| Image per environment (`<project>-<component>-<env>`) | one image, `rjm-bar-host`, tagged `<sha>`/`<env>` | it is a reusable artifact consumed by other repositories; an image is built once per source tree and promoted by retagging, never rebuilt per environment (convention-deployment §6) |
+| Namespace `mcgill-<service>-<env>` | `bar-<env>` | requested by the owner: the namespace names the game it hosts; resources, volumes and the image are `rjm-bar-host*` (the owner's initials plus what it is) |
 | Namespace in `base/` | in each overlay | avoids relying on the namespace transformer renaming a Namespace object |
 | Deployment + RollingUpdate | a Job for matches; SPADS uses `Recreate` | a match is a batch; a hostNetwork surge pod would collide on the game port |
 | Liveness + readiness probes | Job: none; SPADS: readiness only | a batch has nothing to probe; a liveness restart would end a lobby game |
@@ -682,7 +682,7 @@ It runs SPADS commands with the autohost's authority by calling SPADS's
 
 **Credentials** come from the per-environment repository secrets
 `LOBBY_{LOGIN,PASSWORD,OWNER,ROOM_PASSWORD}_{TEST,PROD}`, which the deploy job
-writes into the `rjm-host-secrets` Secret. The Secret's version is part of the
+writes into the `rjm-bar-host-secrets` Secret. The Secret's version is part of the
 SPADS config hash, so a credential change restarts SPADS — between games only.
 
 **Verified offline (2026-09-26, `tests/e2e/run.sh`):** real SPADS, real engine

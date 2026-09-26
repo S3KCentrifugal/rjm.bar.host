@@ -3,11 +3,11 @@
 #   1. unit tests, run inside the image (the code under test is the installed copy)
 #   2. static checks of the Kustomize output, run here (needs kubectl + python3-yaml)
 #
-#   tests/run_unit.sh [image]        default image: rjm-host:dev
+#   tests/run_unit.sh [image]        default image: rjm-bar-host:dev
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
 
-IMAGE="${1:-rjm-host:dev}"
+IMAGE="${1:-rjm-bar-host:dev}"
 HERE="$(cd "$(dirname "$0")" && { pwd -W 2> /dev/null || pwd; })"   # pwd -W: a Windows path for docker.exe under Git Bash
 C="rjm-unit-$$"
 trap 'docker rm -f "$C" > /dev/null 2>&1 || true' EXIT

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# rjm-host container entrypoint.
+# rjm-bar-host container entrypoint.
 #
 #   match           install AIs, fetch content, run one AI-vs-AI simulation (default)
 #   spads           install AIs, fetch content, run a SPADS lobby autohost
@@ -18,7 +18,7 @@ DATA_DIR="${BARHOST_DATA_DIR:-/bar/data}"
 OUT_DIR="${BARHOST_OUT_DIR:-/bar/out}"
 ENGINE="$ENGINE_DIR/spring-headless"
 PRD="$ENGINE_DIR/pr-downloader"
-BIN=/opt/rjm-host/bin
+BIN=/opt/rjm-bar-host/bin
 
 # pr-downloader settings, copied from BAR's own launcher config (the installed
 # launcher's resources set exactly these three). The built-in defaults point at
@@ -102,7 +102,7 @@ cmd_match() {
 
 cmd_spads() {
 	prepare
-	exec "/opt/rjm-host/spads/run_spads.sh"
+	exec "/opt/rjm-bar-host/spads/run_spads.sh"
 }
 
 case "${1:-match}" in
