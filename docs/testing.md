@@ -94,10 +94,19 @@ Then, against the live room, through the control socket:
 - the socket is owner-only (no group or other access) and owned by the container user;
 - both games' logs were archived and a replay recorded.
 
-**In CI** (`e2e` workflow) the same scenario runs with `E2E_BOTS=2` and
-`E2E_PREGAME_ALLOWANCE=300`. A GitHub runner (~16 GB) could not hold two full
-engines plus eight AIs while loading: the host engine was OOM-killed with
-signal 9. Locally the default is the full 8 bots.
+**Two profiles.**
+- **Full** (default locally): everything above, including Human1's real
+  headless game client and the bot-team survival check. It runs two BAR
+  engines at once and needs ~16 GB.
+- **Lobby** (`E2E_HUMAN_ENGINE=0`, what CI runs): no second game client. The
+  host engine still launches with all 8 bots and is stopped from pre-game.
+  Every lobby, guard, balance, start/stop, persistence and control-socket
+  check runs; only the game-play and survival steps are skipped.
+
+The GitHub runner for a private repository is 2 vCPUs / 7 GB. Two engines
+exhausted it: the host engine was OOM-killed (signal 9), then the runner was
+lost. The `e2e` workflow can run the full profile (`full` input) on a larger
+runner.
 
 Options: `E2E_AI=BARb E2E_AI_ARCHIVES=` for the stock AI (no GitHub
 download), `E2E_SURVIVE_SECONDS`, `E2E_KEEP=1` to leave the containers up,

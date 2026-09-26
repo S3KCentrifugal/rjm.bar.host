@@ -69,6 +69,9 @@ ENGINE_VERSION = os.environ.get("BAR_ENGINE_VERSION", "2026.07.04")
 SURVIVE_SECONDS = int(os.environ.get("E2E_SURVIVE_SECONDS", "120"))
 # Loading plus the pre-game force-start (AUTOPILOT_PREGAME_FORCE in run.sh) before play.
 PREGAME_ALLOWANCE = int(os.environ.get("E2E_PREGAME_ALLOWANCE", "75"))
+# 0 = lobby profile: no Human1 game client, so one engine instead of two. For
+# CI runners too small for two BAR engines; the survival check is skipped.
+HUMAN_ENGINE = os.environ.get("E2E_HUMAN_ENGINE", "1") != "0"
 OUT_DIR = Path(os.environ.get("E2E_OUT", "/bar/out/e2e"))
 SERVE_UNTIL_FILE = Path(os.environ.get("E2E_SERVE_UNTIL", "/bar/out/e2e/stop"))
 
@@ -541,6 +544,25 @@ async def scenario(lobby: FakeLobby) -> dict:
             if len(teams) != 1 or human_team in teams:
                 raise StepFailed(f"bots on teams {sorted(teams)}, human on team {human_team}")
             print(f"  ok   bots on team {teams.pop()}, {HUMAN} on team {human_team}", flush=True)
+
+        if not HUMAN_ENGINE:
+            # Lobby profile (CI): no second engine, so no play -- the host sits
+            # in pre-game (Autopilot never forces while a player is loading).
+            step(f"game {run}: SPADS's engine is up (lobby profile: no {HUMAN} game client)")
+            await asyncio.sleep(20)
+            if not lobby.founder_ingame:
+                raise StepFailed("the host engine exited before the owner stopped it")
+            print("  ok   host engine still running after 20s", flush=True)
+            step(f"game {run}: the owner's !stop ends it and the room stays open")
+            lobby.user_say_private(OWNER, "!stop")
+            await lobby.wait_for("autohost back in the lobby", lambda: not lobby.founder_ingame, 120)
+            await asyncio.sleep(5)
+            if lobby.closed:
+                raise StepFailed("the room was closed after the game")
+            if len(lobby.bots) < BOTS:
+                raise StepFailed(f"only {len(lobby.bots)} bots left in the room after the game")
+            print(f"  ok   room open, {len(lobby.bots)} bots still in it", flush=True)
+            continue
 
         step(f"game {run}: {HUMAN}'s engine connects and the game runs")
         engine = HumanEngine(lobby.peer_ip, lobby.battle["port"], run)

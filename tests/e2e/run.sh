@@ -97,6 +97,7 @@ docker create --name "$DRIVER" --network "$NET" \
 	-e "E2E_AI=$AI" -e "E2E_BOTS=$BOTS" -e E2E_BONUS=50 -e "E2E_MAP=$MAP1" \
 	-e "E2E_SURVIVE_SECONDS=${E2E_SURVIVE_SECONDS:-120}" \
 	-e "E2E_PREGAME_ALLOWANCE=${E2E_PREGAME_ALLOWANCE:-75}" \
+	-e "E2E_HUMAN_ENGINE=${E2E_HUMAN_ENGINE:-1}" \
 	--entrypoint python3 "$IMAGE" /tmp/lobby_e2e.py --serve > /dev/null
 docker cp "$HERE/lobby_e2e.py" "$DRIVER:/tmp/lobby_e2e.py"
 docker cp "$(win_path "$ARTIFACTS/e2e-springsettings.cfg")" "$DRIVER:/tmp/e2e-springsettings.cfg"

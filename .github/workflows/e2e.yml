@@ -1,5 +1,6 @@
-# The lobby end-to-end test (tests/e2e/run.sh): real SPADS, real engine, 8
-# SMRTBARb bots and a real headless human client, against a fake lobby server.
+# The lobby end-to-end test (tests/e2e/run.sh): real SPADS, real engine and 8
+# SMRTBARb bots against a fake lobby server. CI runs the lobby profile (no
+# second game client); the full profile needs a bigger runner.
 # No BAR servers and no cluster, but it needs BAR's game content (~2 GB), so it
 # runs on demand, weekly, and on pull requests that touch the lobby host --
 # not on every commit.
@@ -9,9 +10,13 @@ on:
   workflow_dispatch:
     inputs:
       survive_seconds:
-        description: Game time the bot team must survive
+        description: Game time the bot team must survive (full profile)
         type: number
         default: 120
+      full:
+        description: Full profile, with a real headless game client (needs a runner with ~16 GB; fails on the 7 GB private-repo default)
+        type: boolean
+        default: false
   schedule:
     - cron: "17 6 * * 1"
   pull_request:
@@ -81,10 +86,12 @@ jobs:
           # Two engines and eight AIs loading on a small runner: allow for slow loading
           # before the survival window starts.
           E2E_PREGAME_ALLOWANCE: 300
-          # A runner has ~16 GB; two engines plus eight AIs loading at once got the
-          # host engine OOM-killed (signal 9). Two bots exercise the same flow; the
-          # full 8-bot run is the local default (docs/testing.md).
-          E2E_BOTS: 2
+          # The default runner for a private repository is 2 vCPUs / 7 GB: it
+          # cannot hold two BAR engines (the runner was OOM-killed, then lost).
+          # So CI runs the lobby profile -- SPADS, the host engine and all 8
+          # bots, but no second game client. The full profile runs locally
+          # (docs/testing.md) or here with `full` on a bigger runner.
+          E2E_HUMAN_ENGINE: ${{ inputs.full && '1' || '0' }}
           E2E_ARTIFACTS: ${{ github.workspace }}/e2e-artifacts
         run: tests/e2e/run.sh rjm-host:e2e
 
