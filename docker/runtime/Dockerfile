@@ -1,208 +1,181 @@
 # syntax=docker/dockerfile:1.7
 #
-# Multi-stage build for the headless BAR match runner.
+# rjm-host: a reusable Beyond All Reason headless host image.
 #
-#   engine-build -> ai-build -> runtime
-#                            \-> export   (extract the install tree locally)
+#   engine ─┐
+#   spads  ─┴─▶ runtime
 #
-# The staging is not cosmetic. It exists so a change to the AI -- the thing that
-# changes several times a day -- recompiles only the AI, while the engine's
-# object files stay in a cached layer. The engine is by far the larger half.
+# One image, two jobs, chosen by the first argument (see entrypoint.sh):
 #
-# Why engine and AI are built in one tree at all: s3k-CircuitAI/CMakeLists.txt:12
-# pulls ${CMAKE_SOURCE_DIR}/rts/ sources, so the AI is a subdirectory of an
-# engine checkout rather than a standalone project; and CircuitAI's README:25
-# records that a libSkirmishAI.so built against a different engine than the
-# libAIInterface.so beside it yields an AI that is dead at match start. Building
-# both from one configuration makes that pairing structural.
+#   match   an unattended AI-vs-AI simulation that runs to game over and exits
+#   spads   a SPADS autohost on BAR's lobby server that hosts AI bots itself
+#   list-ais / install-ai / fetch-content / <any command>   tooling
 #
-# Sources arrive as named build contexts, so neither repository has to be copied
-# into the main context:
+# The engine is BAR's *official* Linux release, not a source build. A lobby host
+# must run the same engine build as the players who join it, and a simulation
+# result only means something against what people actually play. The version is
+# a build argument, pinned in config/engine.pin; bumping it is one reviewed diff.
 #
-#   docker buildx build \
-#     --build-context engine-src=./engine-src \
-#     --build-context ai-src=./ai-src \
-#     -f docker/runtime/Dockerfile .
+# Custom Skirmish AIs are *not* baked in. They are installed at container start
+# into $BAR_ENGINE_DIR/AI/Skirmish -- where a Windows install keeps them,
+# data\engine\recoil_<version>\AI\Skirmish -- from a mounted folder, an archive
+# or a GitHub release. See scripts/install_ai.py.
 
-# Pinned by digest from RecoilEngine docker-build-v2/images_versions.sh.
-# Ubuntu 18.04 + gcc-13, mostly static deps, deliberately old glibc
-# (images/all-linux/Dockerfile:1-3). Bump deliberately: moving the engine
-# silently invalidates the AI interface pairing.
-ARG BUILD_IMAGE=ghcr.io/beyond-all-reason/recoil-build-amd64-linux@sha256:31b3667ba0d37620b4ad9b45d1840c8d3e95317f2b233044d2e17697ce8fe61d
 ARG RUNTIME_BASE=debian:stable-slim
 
 
 # ---------------------------------------------------------------------------
-# Stage 1: the engine, with the AI interface and C++ wrapper, but no Skirmish AI.
-# Cached on the engine source alone, so it survives every AI-only change.
+# Stage 1: fetch and verify the official engine release.
 # ---------------------------------------------------------------------------
-FROM ${BUILD_IMAGE} AS engine-build
+FROM ${RUNTIME_BASE} AS engine
 
-WORKDIR /build
-COPY --from=engine-src . /build/src
+ARG ENGINE_VERSION=2026.07.04
+# sha256 of recoil_<version>_amd64-linux.7z. An unverified engine is the one
+# thing this image must never ship.
+ARG ENGINE_SHA256=9824c2c38124e4b90a9b5f7c4e7200c3ea6503c0bd4bff0e0ff46212ec29dcab
 
-# Drop the vendored Skirmish AI submodules (BARb, CircuitAI, CppTestAI). AIs are
-# discovered by globbing */CMakeLists.txt -- rts/build/cmake/Util.cmake:169,
-# despite the name get_list_of_submodules -- so removing the directories leaves
-# this stage with no Skirmish AI. The trailing slash keeps AI/Skirmish/CMakeLists.txt.
+RUN apt-get update \
+ && apt-get install --no-install-recommends --yes ca-certificates curl 7zip \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    asset="recoil_${ENGINE_VERSION}_amd64-linux.7z"; \
+    curl -fsSL --retry 5 --retry-all-errors -o "/tmp/${asset}" \
+      "https://github.com/beyond-all-reason/RecoilEngine/releases/download/${ENGINE_VERSION}/${asset}"; \
+    echo "${ENGINE_SHA256}  /tmp/${asset}" | sha256sum -c -; \
+    mkdir -p "/bar/engine/recoil_${ENGINE_VERSION}"; \
+    7z x -bd -o"/bar/engine/recoil_${ENGINE_VERSION}" "/tmp/${asset}" > /dev/null; \
+    rm "/tmp/${asset}"; \
+    # The release ships the graphical client too; a host never runs it.
+    rm -f "/bar/engine/recoil_${ENGINE_VERSION}/spring"; \
+    test -x "/bar/engine/recoil_${ENGINE_VERSION}/spring-headless"; \
+    test -f "/bar/engine/recoil_${ENGINE_VERSION}/libunitsync.so"; \
+    test -f "/bar/engine/recoil_${ENGINE_VERSION}/AI/Interfaces/C/0.1/libAIInterface.so"
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: SPADS, from pinned commits.
 #
-# AI_EXCLUDE_REGEX is deliberately NOT used for this: it is also matched against
-# the C interface and the C++ wrapper (AI/Interfaces/C/CMakeLists.txt:26,81 and
-# AI/Wrappers/Cpp/CMakeLists.txt:22), both of which CircuitAI links against, so
-# a broad pattern would quietly remove its own dependencies.
-#
-# BUILD_spring-legacy / -dedicated default ON (rts/builds/CMakeLists.txt:76,
-# 105-107). Legacy is the full graphical engine and the largest target here;
-# dedicated compiles zero ExternalAI sources and cannot host a Skirmish AI at
-# all. Neither is wanted.
-RUN --mount=type=cache,target=/build/cache,sharing=locked \
-    set -eux; \
-    rm -rf /build/src/AI/Skirmish/*/; \
-    cmake --fresh -S /build/src -B /build/out \
-      -DCMAKE_INSTALL_PREFIX:PATH=/build/out/install \
-      -DAI_TYPES=NATIVE \
-      -DBUILD_spring-legacy=OFF \
-      -DBUILD_spring-dedicated=OFF \
-      -DUSERDOCS_PLAIN=ON \
-      -DCMAKE_BUILD_TYPE=RELWITHDEBINFO \
-      -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O3 -g -DNDEBUG" \
-      -DCMAKE_C_FLAGS_RELWITHDEBINFO="-O3 -g -DNDEBUG" \
-      -G Ninja; \
-    cmake --build /build/out
+# Not spadsInstaller.pl: it fetches packages over plain HTTP from
+# planetspads.free.fr and needs the engine at install time. SPADS is plain Perl,
+# so a release is just its files, laid flat in one directory exactly as the
+# installer lays them (docker/spads/README.md).
+# ---------------------------------------------------------------------------
+FROM ${RUNTIME_BASE} AS spads
+
+# SPADS 0.13.55 and the Yaribz libraries it loads.
+ARG SPADS_REF=4bbb2b86280a7ce4b6ffd21f718191b1d3ced53a
+ARG SIMPLEEVENT_REF=767848e
+ARG SIMPLELOG_REF=9f403ee
+ARG SPRINGLOBBYPROTOCOL_REF=5f01e12
+ARG SPRINGLOBBYINTERFACE_REF=9566525
+ARG SPRINGAUTOHOSTINTERFACE_REF=da7f731
+
+RUN apt-get update \
+ && apt-get install --no-install-recommends --yes ca-certificates git \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    mkdir -p /src /opt/spads/etc-stock; \
+    cd /src; \
+    for pair in \
+        "SPADS=${SPADS_REF}" \
+        "SimpleEvent=${SIMPLEEVENT_REF}" \
+        "SimpleLog=${SIMPLELOG_REF}" \
+        "SpringLobbyProtocol=${SPRINGLOBBYPROTOCOL_REF}" \
+        "SpringLobbyInterface=${SPRINGLOBBYINTERFACE_REF}" \
+        "SpringAutoHostInterface=${SPRINGAUTOHOSTINTERFACE_REF}"; do \
+      repo="${pair%%=*}"; ref="${pair#*=}"; \
+      git clone -q "https://github.com/Yaribz/${repo}" "${repo}"; \
+      git -C "${repo}" checkout -q "${ref}"; \
+    done; \
+    cp SPADS/src/spads.pl SPADS/src/SpadsConf.pm SPADS/src/SpadsUpdater.pm \
+       SPADS/src/SpadsPluginApi.pm SPADS/src/PerlUnitSync.pm \
+       SPADS/src/getDefaultModOptions.pl SPADS/src/sequentialSpadsUnitsyncProcess.pl \
+       SPADS/var/help.dat SPADS/var/helpSettings.dat SPADS/var/springLobbyCertificates.dat \
+       SimpleEvent/SimpleEvent.pm SimpleLog/SimpleLog.pm \
+       SpringLobbyProtocol/SpringLobbyProtocol.pm \
+       SpringLobbyInterface/SpringLobbyInterface.pm \
+       SpringAutoHostInterface/SpringAutoHostInterface.pm \
+       /opt/spads/; \
+    cp SPADS/etc/*.conf /opt/spads/etc-stock/
 
 
 # ---------------------------------------------------------------------------
-# Stage 2: add the Skirmish AI and build it against that exact engine.
-#
-# Reconfigures in place rather than from scratch: /build/out already holds the
-# engine's object files from the cached layer above, so Ninja compiles only the
-# newly-discovered AI target. `cmake --fresh` here would throw that away.
-# ---------------------------------------------------------------------------
-FROM engine-build AS ai-build
-
-# Directory name under AI/Skirmish/. Becomes the CMake target name and the
-# installed path, and must match `shortName` in the AI's data/AIInfo.lua.
-ARG AI_DIR_NAME=BARb
-
-COPY --from=ai-src . /build/src/AI/Skirmish/${AI_DIR_NAME}/
-
-RUN --mount=type=cache,target=/build/cache,sharing=locked \
-    set -eux; \
-    AI_VERSION="$(head -n1 /build/src/AI/Skirmish/${AI_DIR_NAME}/VERSION)"; \
-    echo "building ${AI_DIR_NAME} version ${AI_VERSION}"; \
-    cmake -S /build/src -B /build/out \
-      -DCMAKE_INSTALL_PREFIX:PATH=/build/out/install \
-      -DAI_TYPES=NATIVE \
-      -DBUILD_spring-legacy=OFF \
-      -DBUILD_spring-dedicated=OFF \
-      -DUSERDOCS_PLAIN=ON \
-      -DCMAKE_BUILD_TYPE=RELWITHDEBINFO \
-      -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O3 -g -DNDEBUG" \
-      -DCMAKE_C_FLAGS_RELWITHDEBINFO="-O3 -g -DNDEBUG" \
-      -G Ninja; \
-    cmake --build /build/out; \
-    cmake --install /build/out; \
-    rm -rf /build/out/install/lib /build/out/install/include /build/out/install/share; \
-    test -x /build/out/install/spring-headless; \
-    test -f "/build/out/install/AI/Interfaces/C/0.1/libAIInterface.so"; \
-    test -f "/build/out/install/AI/Skirmish/${AI_DIR_NAME}/${AI_VERSION}/libSkirmishAI.so"; \
-    echo "${AI_VERSION}" > /build/out/install/.ai-version
-
-
-# ---------------------------------------------------------------------------
-# Stage 3: extraction target for local use.
-#   docker buildx build --target export --output type=local,dest=./engine ...
-# ---------------------------------------------------------------------------
-FROM scratch AS export
-COPY --from=ai-build /build/out/install/ /
-
-
-# ---------------------------------------------------------------------------
-# Stage 4: the runtime image.
-#
-# glibc: the build stage is Ubuntu 18.04 on purpose and links most deps
-# statically, so Debian stable's newer glibc runs those binaries. The reverse
-# would not hold.
+# Stage 3: the runtime image.
 # ---------------------------------------------------------------------------
 FROM ${RUNTIME_BASE} AS runtime
 
-ARG ENGINE_DIR=/opt/engine
-ARG AI_DIR_NAME=BARb
-ARG AI_VERSION=stable
-# Set to 0 to skip the AI-loads smoke test below (not recommended).
-ARG VERIFY_AI=1
+ARG ENGINE_VERSION=2026.07.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Runtime libraries only, no toolchain. p7zip is not needed -- the engine links
-# its own 7zip. curl/ca-certificates are for pr-downloader's rapid fetches.
+# The engine binaries are static apart from libc (checked with ldd), so the
+# only runtime packages are for the tooling:
+#   python3                                run_match.py, install_ai.py, demo_stats.py
+#   perl, FFI::Platypus, IO::Socket::SSL   SPADS (unitsync via FFI; lobby TLS)
+#   DBD::SQLite                            SPADS preferences storage
+#   tini                                   PID 1: reaps children, forwards signals
 RUN apt-get update \
  && apt-get install --no-install-recommends --yes \
-      ca-certificates \
-      libcurl4 \
-      libstdc++6 \
-      libfreetype6 \
-      libfontconfig1 \
-      zlib1g \
+      ca-certificates tini \
       python3 \
+      perl libffi-platypus-perl libio-socket-ssl-perl libdbd-sqlite3-perl \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ai-build /build/out/install/ ${ENGINE_DIR}/
+COPY --from=engine /bar/engine/ /bar/engine/
+COPY --from=spads /opt/spads/ /opt/spads/
 
-COPY docker/runtime/entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY scripts/run_match.py /usr/local/bin/run_match.py
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/run_match.py \
- && chmod +x ${ENGINE_DIR}/spring-headless \
- && if [ -f ${ENGINE_DIR}/pr-downloader ]; then chmod +x ${ENGINE_DIR}/pr-downloader; fi
+COPY docker/runtime/entrypoint.sh /opt/rjm-host/bin/entrypoint.sh
+COPY scripts/run_match.py scripts/install_ai.py scripts/demo_stats.py /opt/rjm-host/bin/
+COPY docker/spads/ /opt/rjm-host/spads/
 
-# Fail the build, not a match, if the AI cannot be loaded.
+# SPADS refuses to start without all nine configuration files. The ones this
+# image does not customise are SPADS's own, from the pinned release.
+RUN set -eux; \
+    for f in commands.conf levels.conf banLists.conf mapBoxes.conf mapLists.conf; do \
+      [ -f "/opt/rjm-host/spads/etc/$f" ] || cp "/opt/spads/etc-stock/$f" /opt/rjm-host/spads/etc/; \
+    done; \
+    chmod +x /opt/rjm-host/bin/* /opt/rjm-host/spads/*.sh
+
+# Fail the build, not a match, if the engine cannot load its stock AI.
 #
-# --list-skirmish-ais (SpringApp.cpp:138) makes the engine enumerate what it can
-# actually load, so a missing runtime library or a mismatched interface surfaces
-# here in seconds instead of five minutes into a game.
-#
-# AILibraryManager::OutputSkirmishAIInfo (AILibraryManager.cpp:450-466) prints
-#   # [Name]  [Version]  [Interface-name]  [Interface-version]
-#   # BARb    stable     C                 0.1
-# (format confirmed against a real engine release), so this asserts the exact AI
-# and version are present rather than merely that something was listed. It also
-# rejects the duplicate-AI warning the same function emits (:474), which is what
-# two copies of one AI would look like.
-RUN if [ "${VERIFY_AI}" = "1" ]; then \
-      set -eux; \
-      ldd ${ENGINE_DIR}/spring-headless; \
-      mkdir -p /tmp/verify; \
-      HOME=/tmp/verify ${ENGINE_DIR}/spring-headless \
-        --isolation --isolation-dir ${ENGINE_DIR} \
-        --write-dir /tmp/verify \
-        --list-skirmish-ais > /tmp/verify/ais.txt 2>&1 || \
-        { echo "--- engine output ---"; cat /tmp/verify/ais.txt; \
-          echo "FAIL: the engine could not enumerate skirmish AIs"; exit 1; }; \
-      cat /tmp/verify/ais.txt; \
-      if grep -q "Duplicate Skirmish AI Info" /tmp/verify/ais.txt; then \
-        echo "FAIL: duplicate Skirmish AI -- two copies of one AI are installed"; exit 1; \
-      fi; \
-      grep -Eq "^#[[:space:]]+${AI_DIR_NAME}[[:space:]]+${AI_VERSION}[[:space:]]" /tmp/verify/ais.txt || \
-        { echo "FAIL: ${AI_DIR_NAME} ${AI_VERSION} was not listed -- the AI did not load"; exit 1; }; \
-      rm -rf /tmp/verify; \
-    fi
+# --list-skirmish-ais makes the engine enumerate what it can actually load. Its
+# rows read "# <shortName> <version> <interface> <interfaceVersion>"
+# (AILibraryManager.cpp OutputSkirmishAIInfo), so this asserts that BARb stable
+# loaded, not merely that something was printed.
+RUN set -eux; \
+    mkdir -p /tmp/verify; \
+    HOME=/tmp/verify "/bar/engine/recoil_${ENGINE_VERSION}/spring-headless" \
+      --isolation --isolation-dir "/bar/engine/recoil_${ENGINE_VERSION}" \
+      --write-dir /tmp/verify --list-skirmish-ais > /tmp/verify/ais.txt 2>&1 \
+      || { cat /tmp/verify/ais.txt; exit 1; }; \
+    cat /tmp/verify/ais.txt; \
+    grep -Eq '^#[[:space:]]+BARb[[:space:]]+stable[[:space:]]' /tmp/verify/ais.txt; \
+    rm -rf /tmp/verify
 
-# Non-root. Nothing here needs privilege: both ports used (53200, 53210) are
-# unprivileged and bound to loopback.
-RUN useradd --system --create-home --uid 10001 barhost \
- && mkdir -p /spring-data /out \
- && chown -R barhost:barhost /spring-data /out
+# Non-root. uid/gid 10001 owns every writable path, including the engine's AI
+# tree so custom AIs can be installed into it at start. No privileged ports.
+RUN useradd --system --create-home --uid 10001 --user-group barhost \
+ && mkdir -p /bar/data /bar/out /bar/custom-ai \
+ && chown -R barhost:barhost /bar
+
 USER barhost
 
-ENV BARHOST_ENGINE=${ENGINE_DIR}/spring-headless \
-    BARHOST_ENGINE_DIR=${ENGINE_DIR} \
-    BARHOST_DATA_DIR=/spring-data \
-    BARHOST_WRITE_DIR=/out \
-    BARHOST_AI_SHORTNAME=${AI_DIR_NAME} \
-    BARHOST_AI_VERSION=${AI_VERSION} \
-    HOME=/home/barhost
+ENV BAR_ENGINE_VERSION=${ENGINE_VERSION} \
+    BAR_ENGINE_DIR=/bar/engine/recoil_${ENGINE_VERSION} \
+    BARHOST_DATA_DIR=/bar/data \
+    BARHOST_OUT_DIR=/bar/out \
+    BARHOST_CUSTOM_AI_DIR=/bar/custom-ai \
+    HOME=/home/barhost \
+    PATH=/opt/rjm-host/bin:$PATH
 
-VOLUME ["/spring-data", "/out"]
+LABEL org.opencontainers.image.title="rjm-host" \
+      org.opencontainers.image.description="Beyond All Reason headless host: AI simulations and SPADS lobby hosting with custom Skirmish AIs" \
+      org.opencontainers.image.source="https://github.com/S3KCentrifugal/rjm.bar.host" \
+      io.github.s3kcentrifugal.recoil-version="${ENGINE_VERSION}"
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+VOLUME ["/bar/data", "/bar/out"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/rjm-host/bin/entrypoint.sh"]
 CMD ["match"]

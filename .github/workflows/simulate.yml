@@ -1,0 +1,170 @@
+# Reusable: run one BAR AI simulation on a GitHub runner with the rjm-host
+# image, and upload everything it produced (replay, infolog, engine console,
+# result.json, AI logs) as a workflow artifact. No cluster involved.
+#
+# From another repository:
+#
+#   jobs:
+#     sim:
+#       uses: S3KCentrifugal/rjm.bar.host/.github/workflows/simulate.yml@main
+#       with:
+#         ai_archives: github:S3KCentrifugal/CircuitAI@v1.961-test
+#         ai_shortname: SMRTBARb
+#         ai_count: 2
+#       secrets: inherit
+#
+# The image is a private package: the calling repository must be granted read
+# access to it (package settings -> Manage Actions access), after which its own
+# GITHUB_TOKEN can pull it. See README "Using the image from another repository".
+name: simulate
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: rjm-host image to run
+        type: string
+        default: ghcr.io/s3kcentrifugal/rjm-host:test
+      ai_archives:
+        description: BARHOST_AI_ARCHIVES -- custom AIs to install (see scripts/install_ai.py)
+        type: string
+        default: ""
+      ai_artifact:
+        description: Name of an artifact from the calling run holding AI folders (<Name>/<version>/...) to mount as custom AIs
+        type: string
+        default: ""
+      ai_shortname:
+        type: string
+        default: BARb
+      ai_version:
+        type: string
+        default: stable
+      ai_count:
+        type: number
+        default: 2
+      ally_teams:
+        type: number
+        default: 2
+      map:
+        type: string
+        default: All That Glitters v2.2.3
+      gametype:
+        type: string
+        default: byar:test
+      speed:
+        type: number
+        default: 40
+      timeout_seconds:
+        type: number
+        default: 3000
+      extra_env:
+        description: Extra KEY=VALUE lines passed to the container (BARHOST_MODOPTIONS, BARHOST_AI_OPTIONS, ...)
+        type: string
+        default: ""
+    outputs:
+      result:
+        description: The match's result.json
+        value: ${{ jobs.simulate.outputs.result }}
+  workflow_dispatch:
+    inputs:
+      image:
+        type: string
+        default: ghcr.io/s3kcentrifugal/rjm-host:test
+      ai_archives:
+        type: string
+        default: github:S3KCentrifugal/CircuitAI@newest
+      ai_shortname:
+        type: string
+        default: SMRTBARb
+      ai_count:
+        type: number
+        default: 2
+      map:
+        type: string
+        default: All That Glitters v2.2.3
+
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    env:
+      IMAGE: ${{ inputs.image }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Custom AI artifact
+        if: inputs.ai_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.ai_artifact }}
+          path: custom-ai
+
+      # The game is ~3.5 GB; cache the rapid pool per game tag so repeated
+      # simulations do not re-download it. A moving tag (byar:test) still
+      # updates incrementally on top of the cached pool.
+      - name: Content cache
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: bar-content-${{ inputs.gametype }}-${{ inputs.map }}-${{ github.run_id }}
+          restore-keys: |
+            bar-content-${{ inputs.gametype }}-${{ inputs.map }}-
+            bar-content-${{ inputs.gametype }}-
+
+      - name: Run the simulation
+        env:
+          AI_ARCHIVES: ${{ inputs.ai_archives }}
+          AI_SHORTNAME: ${{ inputs.ai_shortname }}
+          AI_VERSION: ${{ inputs.ai_version || 'stable' }}
+          AI_COUNT: ${{ inputs.ai_count }}
+          ALLY_TEAMS: ${{ inputs.ally_teams || 2 }}
+          MAP: ${{ inputs.map }}
+          GAMETYPE: ${{ inputs.gametype || 'byar:test' }}
+          SPEED: ${{ inputs.speed || 40 }}
+          TIMEOUT: ${{ inputs.timeout_seconds || 3000 }}
+          EXTRA_ENV: ${{ inputs.extra_env }}
+        run: |
+          mkdir -p data out custom-ai
+          chmod -R a+rwX data out custom-ai
+          printf '%s\n' "$EXTRA_ENV" | grep -E '^[A-Z_][A-Z0-9_]*=' > extra.env || true
+          docker run --rm \
+            -v "$PWD/data:/bar/data" -v "$PWD/out:/bar/out" -v "$PWD/custom-ai:/bar/custom-ai:ro" \
+            -e BARHOST_RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}" \
+            -e BARHOST_AI_ARCHIVES="$AI_ARCHIVES" \
+            -e BARHOST_AI_SHORTNAME="$AI_SHORTNAME" -e BARHOST_AI_VERSION="$AI_VERSION" \
+            -e BARHOST_AI_COUNT="$AI_COUNT" -e BARHOST_ALLYTEAMS="$ALLY_TEAMS" \
+            -e BARHOST_MAP="$MAP" -e BARHOST_GAMETYPE="$GAMETYPE" \
+            -e BARHOST_SPEED="$SPEED" -e BARHOST_TIMEOUT_SECONDS="$TIMEOUT" \
+            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+            --env-file extra.env \
+            "$IMAGE" match 2>&1 | grep --line-buffered -v '^\[Progress\]'
+          exit "${PIPESTATUS[0]}"
+
+      - name: Result
+        id: result
+        if: always()
+        run: |
+          f=$(ls out/matches/*/result.json 2>/dev/null | head -1)
+          if [ -n "$f" ]; then
+            cat "$f"
+            { echo "result<<EOF"; cat "$f"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+            { echo '### Simulation result'; echo '```json'; cat "$f"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload logs and replay
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bar-simulation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/
+          if-no-files-found: warn

@@ -10,6 +10,7 @@ wg0.conf
 
 # rclone / lobby credentials
 rclone.conf
+spads.secrets
 
 # Local engine and content (lives on the PVC, never in git)
 engine/
@@ -23,10 +24,10 @@ var/
 
 .DS_Store
 
-# CI build working directories (see .github/workflows/deploy.yml)
-engine-src/
-ai-src/
-.ccache/
+# Local test runs (docker run -v ./out:/bar/out ...)
+out/
+data/
+custom-ai/
 
 # Python bytecode
 __pycache__/

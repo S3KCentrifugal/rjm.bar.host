@@ -1,0 +1,103 @@
+# One unattended AI-vs-AI simulation, run to game over. The deploy pipeline
+# replaces this Job on every deploy (a Job's pod template is immutable) but
+# refuses to while one is still running.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rjm-host-match
+  labels:
+    app.kubernetes.io/name: rjm-host-match
+    app.kubernetes.io/component: match-runner
+    app.kubernetes.io/part-of: rjm-host
+spec:
+  # One attempt. A failed match is a result worth looking at, and a retry would
+  # bury the infolog that explains it under a second run.
+  backoffLimit: 0
+  # Keep the finished pod a day for `kubectl logs`; everything that matters is
+  # on the output volume regardless.
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rjm-host-match
+        app.kubernetes.io/component: match-runner
+        app.kubernetes.io/part-of: rjm-host
+    spec:
+      restartPolicy: Never
+      serviceAccountName: rjm-host
+      imagePullSecrets:
+        - name: mcgill-k8s-pull-2026
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Game and maps into the content volume. Idempotent: rapid skips what
+        # the pool already has, so a warm volume costs seconds.
+        - name: fetch-content
+          image: ghcr.io/s3kcentrifugal/rjm-host:latest
+          args: ["fetch-content"]
+          envFrom:
+            - configMapRef:
+                name: rjm-host-match-config
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: "200m", memory: "256Mi" }
+            limits: { cpu: "2000m", memory: "1Gi" }
+          volumeMounts:
+            - name: data
+              mountPath: /bar/data
+      containers:
+        - name: match
+          image: ghcr.io/s3kcentrifugal/rjm-host:latest
+          args: ["match"]
+          envFrom:
+            - configMapRef:
+                name: rjm-host-match-config
+          env:
+            # Content was fetched by the init container.
+            - name: BARHOST_FETCH_CONTENT
+              value: "0"
+            # Each run writes into /bar/out/matches/<pod name>, so the volume
+            # keeps a comparable history instead of the last result only.
+            - name: BARHOST_RUN_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # Measured, not guessed -- design section 7.4 and scripts/measure_match.py.
+          # 8 BARb on All That Glitters held ~2.8 cores and peaked at 6.0 GiB on
+          # a desktop. CPU barely moves with AI count because AI updates run
+          # serially on the sim thread; memory grows with match length and is
+          # what kills a pod, hence the wide request/limit gap. Burstable on
+          # purpose: the node also carries the cluster's databases.
+          resources:
+            requests: { cpu: "2000m", memory: "8Gi" }
+            limits: { cpu: "6000m", memory: "16Gi" }
+          volumeMounts:
+            - name: data
+              mountPath: /bar/data
+            - name: out
+              mountPath: /bar/out
+            - name: custom-ai
+              mountPath: /bar/custom-ai
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rjm-host-data-pvc
+        - name: out
+          persistentVolumeClaim:
+            claimName: rjm-host-out-pvc
+        - name: custom-ai
+          persistentVolumeClaim:
+            claimName: rjm-host-ai-pvc

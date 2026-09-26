@@ -7,22 +7,27 @@ override this file.
 
 ## Project
 
-A **containerised Beyond All Reason headless host**, deployed to the private
-k3s cluster. It has two phases, and they are not the same product:
+A **reusable Beyond All Reason headless host image**,
+`ghcr.io/s3kcentrifugal/rjm-host` (private), plus its deployment to the private
+k3s cluster in namespace `rjm-host-<env>`. One image, two modes:
 
-- **Phase 1, the match harness (built).** A Kubernetes `Job` that plays one
-  AI-vs-AI match to completion and reports the result. It exists to make AI
-  development fast: change the AI, CI builds it, plays a match, hands back a
-  replay. No lobby, no SPADS, no players, no exposed ports.
-- **Phase 2, the public lobby autohost (designed, not built).** SPADS as a
-  client of BAR's lobby server so humans can play. Deferred because nearly all
-  of this project's cost and risk lives there.
+- **`match`** — an unattended AI-vs-AI simulation played to game over, leaving
+  a replay, logs and `result.json`. Runs as a Kubernetes Job, under plain
+  `docker run`, or on a GitHub runner through the reusable `simulate` workflow.
+- **`spads`** — a SPADS autohost on BAR's lobby server that runs Skirmish AI
+  bots inside its own `spring-headless`, so people can play with or against
+  custom AIs. Runs as a Deployment with `hostNetwork`.
 
-**Status: phase 1 implemented, never yet run on the cluster.** The design is
+The engine is BAR's **official Linux release** (`config/engine.pin`), and custom
+AIs are installed into `$BAR_ENGINE_DIR/AI/Skirmish` at container start
+(`scripts/install_ai.py`). Other repositories consume the image directly.
+
+**Status: both modes built and verified locally; neither has run on the
+cluster** — the deploy job waits on the cluster secrets. The design is
 [`docs/autohost-design.md`](docs/autohost-design.md) - read it before writing
 anything here.
 
-This project **operates no lobby infrastructure** in either phase.
+This project **operates no lobby infrastructure**: SPADS is a lobby *client*.
 
 ### Facts an agent must not get wrong
 
@@ -32,61 +37,61 @@ This project **operates no lobby infrastructure** in either phase.
    `springServerType:headless`. Any design that runs AI on the dedicated build
    is wrong.
 2. **The cluster has no UDP path to the internet.** HAProxy ingress is TCP/HTTP
-   on NodePorts 32080/32443. Human players would need inbound UDP, which
-   requires `hostNetwork: true` plus a **router port-forward to `mcgill-data`**
-   - configuration outside this repository. **Phase 1 sidesteps this entirely**:
-   both its sockets are loopback and nothing is exposed. Do not reintroduce
-   host networking for a workload that has no human players.
+   on NodePorts 32080/32443. SPADS's players need inbound UDP (8452), so the
+   SPADS pod uses `hostNetwork: true`, and internet players additionally need a
+   **router UDP forward to `mcgill-data`** - configuration outside this
+   repository. The match Job needs none of this: both its sockets are loopback.
+   Do not add host networking to a workload that has no human players.
 3. **Never modify the BAR game archive to make something work here.** Changing
    `../Beyond-All-Reason` alters the archive checksum, so stock clients can no
    longer join. That rules it out for public hosting regardless of merit.
-4. **Never interrupt a running match.** In phase 1 the workload is a `Job`, so
-   there is no rollout; the pipeline instead refuses to deploy while a match is
-   active, and deletes the old Job only once it is finished (a Job's pod
-   template is immutable). In phase 2 the same rule returns as
-   `strategy: Recreate` plus a guarded rollout restart, because `hostNetwork`
-   makes a surging pod collide on ports.
+4. **Never interrupt a running game.** The match is a `Job`: the pipeline refuses
+   to deploy while it is active and deletes it only once finished (a Job's pod
+   template is immutable). SPADS is a `Recreate` Deployment with no liveness
+   probe; the pipeline refuses to restart it while a `spring-headless` process
+   (a lobby game) is running in it, unless `interrupt_lobby` is set.
 5. **Secrets never enter git.** Lobby credentials, `rclone` tokens, kubeconfigs
    and WireGuard keys are gitignored. Templates end in `.example` or `.sample`.
 
-### Open question (phase 2 only)
+### Open questions
 
-**Do AI count toward the 8-player non-botflag lobby cap?** Unresolved. If they
-do, 8 AI exceeds it and a botflag from BAR devs is required before a public
-lobby host works. Ask in `#teiserver-spads` on the BAR Discord. Do not assume
-either answer in design or code.
-
-It **does not block phase 1**, which never contacts the lobby server.
+- **Team games collapse** (design §11 risk 1): with two or more AI teams per
+  allyteam, BAR's `game_end.lua` wipes out allyteam 0 within seconds; a 1v1 is
+  unaffected. Cause located, not fixed. The cluster match defaults to 1v1 until
+  it is. Never "fix" it by editing the game archive (fact 3).
+- **SPADS against the real lobby is unverified**: login, bot flag, bots-only
+  start. The owner reports the account is whitelisted to host bot servers; SPADS
+  logs a warning at login if it lacks the bot flag.
 
 ## Repository map
 
-| Path | Content | State |
-| --- | --- | --- |
-| `docs/autohost-design.md` | the design: both phases, with phase 2 quarantined in §10 | written |
-| `docker/runtime/Dockerfile` | multi-stage build: engine, then AI against that engine, then the runtime image | written |
-| `scripts/build-engine-ai.sh` | `docker buildx` wrapper for local builds and for extracting the install tree | written |
-| `scripts/measure_match.py` | runs a match and samples CPU/RSS/threads; the resource numbers in the design come from it | written |
-| `scripts/run_match.py` | generates the GameSetup script, drives the match over the Autohost Protocol, terminates the engine | written |
-| `config/engine.pin` | the engine commit and AI ref everything is built from | written |
-| `config/` | phase 2 SPADS templates, when that happens | to write |
-| `k8s/base/` | rbac, pvc, job, match.env, kustomization | written |
-| `k8s/overlays/{test,prod}/` | namespace, persistent volumes, image tags | written |
-| `.github/workflows/deploy.yml` | `set-env` -> `build` -> `deploy` | written |
+| Path | Content |
+| --- | --- |
+| `docs/autohost-design.md` | the design: engine choice, AI install, both modes, k8s, pipeline, risks |
+| `docker/runtime/Dockerfile` | engine release (sha256-verified) + SPADS (pinned commits) -> runtime image |
+| `docker/runtime/entrypoint.sh` | `match`, `spads`, `install-ai`, `list-ais`, `fetch-content` |
+| `docker/spads/` | SPADS config (`etc/`), `run_spads.sh` (incl. `--check`), `archive_game.sh` (per-game logs) |
+| `scripts/run_match.py` | writes the GameSetup script, drives the match over the Autohost Protocol, exits at game over |
+| `scripts/install_ai.py` | installs custom AIs from folders, archives or GitHub releases; refuses Windows builds |
+| `scripts/smoke_test.sh` | the checks CI runs before any image is published |
+| `scripts/demo_stats.py`, `scripts/measure_match.py` | replay statistics; the resource measurements |
+| `config/engine.pin` | engine release version and archive sha256 |
+| `k8s/base/` | rbac, network policy, pvcs, match Job, SPADS Deployment, `match.env`, `spads.env`, `secrets.yaml.example` |
+| `k8s/overlays/{test,prod}/` | namespace, persistent volumes, image tag |
+| `.github/workflows/` | `deploy.yml` (publish + deploy), `ci.yml` (checks), `simulate.yml` (reusable simulation) |
 
-Nothing here has been run on the cluster yet. The first real match is the test
-that matters.
+**Engine and AI must be interface-compatible.** A `libSkirmishAI.so` built
+against an engine whose C AI interface differs from the
+`AI/Interfaces/C/0.1/libAIInterface.so` beside it is dead at match start with no
+useful error (CircuitAI README). The engine here is the official release; AIs
+come from their own repositories' release builds (SMRTBARb:
+`S3KCentrifugal/CircuitAI` releases, `*-linux.tar.gz`). Moving
+`config/engine.pin` requires checking the AI still loads - the smoke test does.
+Never ship a Windows build (`SkirmishAI.dll`) into the image or a volume.
 
-**The engine and the AI are built together, always.** `s3k-CircuitAI` cannot
-build on its own - its `CMakeLists.txt` reaches into `${CMAKE_SOURCE_DIR}/rts/`
-- and shipping a `libSkirmishAI.so` built against a different engine than the
-`libAIInterface.so` beside it yields an AI that is dead at match start with no
-useful error. Do not introduce a path that builds or downloads either one
-separately.
-
-Match settings in `k8s/base/match.env` are a **ConfigMap**, not a build input:
-changing a map or a speed should not require a new image. The engine and AI
-refs in `config/engine.pin` are the opposite - those are build inputs, and
-moving them must be a reviewed diff.
+Match settings (`k8s/base/match.env`) and lobby settings (`k8s/base/spads.env`)
+are **ConfigMaps**, not build inputs. `config/engine.pin` is the opposite - a
+build input whose change must be a reviewed diff.
 
 ## Skills that govern this project
 
@@ -102,7 +107,7 @@ before authoring infrastructure rather than inventing conventions:
 | `troubleshoot-k8s` | ImagePullBackOff, CrashLoopBackOff, Released PVs, 503s |
 | `scaffold-k8s-project` | the new-project checklist, if starting a component from scratch |
 
-Documented deviations from those standards are in the design, §8.4. Keep that
+Documented deviations from those standards are in the design, §9. Keep that
 table current: a deviation that is not written down reads as a mistake.
 
 ## Workspace
@@ -112,12 +117,16 @@ this repository's parent.
 
 | Project | Path | What it is | Write policy |
 | --- | --- | --- | --- |
-| **rjm.bar.host** | `.` | this repository - containerised BAR autohost | writable |
+| **rjm.bar.host** | `.` | this repository - reusable BAR headless host image and its deployment | writable |
+| **rjm.bar.rustai** | `../rjm.bar.rustai` | Rust BAR Skirmish AI (`libSkirmishAI.so` over the C interface) - a consumer of this image | writable |
+| **rjm.bar.telemetry** | `../rjm.bar.telemetry` | replay (`.sdfz`) telemetry into Postgres - can consume this image's replays | writable |
 | **rjm.bar.docs** | `../rjm.bar.docs` | central game knowledge base for BAR + Recoil, shared by all projects | writable; **game facts only** |
 | **rjm.bar.tools** | `../rjm.bar.tools` | Rust `smrt-bar-map`: reads `.sd7` archives, parses SMF, derives terrain facts | writable |
 | **rjm.bar.ai** | `../rjm.bar.ai` | Rust BAR skirmish AI, first-principles design; requirements capture only | writable |
 | **rjm.bar.editor** | `../rjm.bar.editor` | Godot BAR map editor; requirements capture only | writable |
 | **s3k-CircuitAI** | `../s3k-CircuitAI` | the user's CircuitAI/BARb fork (`S3KCentrifugal/CircuitAI`, branch `smrt`) - **the AI this project hosts** | writable |
+| **BYAR-Chobby** | `../BYAR-Chobby` | BAR's lobby client (upstream `beyond-all-reason/BYAR-Chobby`) | read-only by convention |
+| **barb-playtest** | `../barb-playtest` | local playtest scratch directory (not a git repository) | inspect only |
 | **rlcevg-CircuitAI** | `../rlcevg-CircuitAI` | upstream CircuitAI (`rlcevg/CircuitAI`) for comparison | read-only by convention |
 | **bar-Beyond-All-Reason** | `../bar-Beyond-All-Reason` | upstream BAR game mirror (`beyond-all-reason/Beyond-All-Reason`, `master`) | **strictly read-only** |
 | **Beyond-All-Reason** | `../Beyond-All-Reason` | the user's BAR game fork (`S3KCentrifugal/Beyond-All-Reason`) | writable, but see fact 3 above |
@@ -174,13 +183,14 @@ The authority on what the server and the AI interface actually permit.
 | `doc/roles/` | per-role references for the AngelScript role layer |
 | `data/script/src/roles/` | the six AI roles (`air`, `front`, `sea`, `support`, `tactical`, `tech`) |
 | `data/config/` | JSON behaviour profiles; profile names map to SPADS AI options |
+| `.github/workflows/smrtbarb-release.yml`, `doc/release.md` | builds and publishes SMRTBARb for Windows and Linux; the Linux archive is what this image installs |
 | `src/circuit/setup/SetupManager.cpp` | start position and commander selection |
 
-The shipped AI layout this project must reproduce in its image:
-`AI/Skirmish/BARb/<version>/{AIInfo.lua, AIOptions.lua, config/, script/, libSkirmishAI.so}`
-alongside `AI/Interfaces/C/0.1/{InterfaceInfo.lua, libAIInterface.so}`. On Linux
-these are `.so`; a Windows install's `.dll` files are unusable. Both libraries
-must come from the **same engine build** or the AI dies at match start.
+The AI layout the engine loads, and that `install_ai.py` enforces:
+`AI/Skirmish/<shortName>/<version>/{AIInfo.lua, AIOptions.lua, config/, script/, libSkirmishAI.so}`
+alongside `AI/Interfaces/C/0.1/{InterfaceInfo.lua, libAIInterface.so}` from the
+engine release. On Linux these are `.so`; a Windows install's `.dll` files are
+unusable.
 
 ### `../rjm.bar.docs` - game truth
 

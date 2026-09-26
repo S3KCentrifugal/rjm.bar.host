@@ -30,6 +30,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -138,10 +139,10 @@ def default_modoptions(raw: str) -> "dict[str, str]":
 
 @dataclass
 class Config:
-    engine: str = "/opt/engine/spring-headless"
-    data_dir: str = "/spring-data"
-    write_dir: str = "/out"
-    engine_dir: str = "/opt/engine"
+    engine: str = ""
+    data_dir: str = "/bar/data"
+    write_dir: str = "/bar/out"
+    engine_dir: str = ""
 
     gametype: str = "byar:test"
     map_name: str = ""
@@ -168,11 +169,13 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
+        # BAR_ENGINE_DIR is set by the image; the engine binary lives in it.
+        engine_dir = env("BAR_ENGINE_DIR", env("BARHOST_ENGINE_DIR"))
         cfg = cls(
-            engine=env("BARHOST_ENGINE", cls.engine),
+            engine=env("BARHOST_ENGINE", str(Path(engine_dir) / "spring-headless") if engine_dir else ""),
             data_dir=env("BARHOST_DATA_DIR", cls.data_dir),
             write_dir=env("BARHOST_WRITE_DIR", cls.write_dir),
-            engine_dir=env("BARHOST_ENGINE_DIR", cls.engine_dir),
+            engine_dir=engine_dir,
             gametype=env("BARHOST_GAMETYPE", cls.gametype),
             map_name=env("BARHOST_MAP", cls.map_name),
             ai_shortname=env("BARHOST_AI_SHORTNAME", cls.ai_shortname),
@@ -212,8 +215,8 @@ class Config:
             raise SystemExit(
                 "BARHOST_AI_COUNT above %d is not supported" % len(TEAM_COLORS)
             )
-        if not Path(self.engine).is_file():
-            raise SystemExit("engine not found at " + self.engine)
+        if not self.engine or not Path(self.engine).is_file():
+            raise SystemExit("engine not found at %r (set BAR_ENGINE_DIR)" % self.engine)
 
 
 # --- GameSetup script generation -------------------------------------------
@@ -416,14 +419,13 @@ def build_script(cfg: Config) -> str:
     tdf.kv("GameType", cfg.gametype)
     tdf.kv("MapName", cfg.map_name)
 
-    # 0, not 2. BAR's game_initial_spawn.lua:710-728 branches on this:
+    # BAR's game_initial_spawn.lua:710-728 branches on this:
     #   0 automatic spawning at the map's default start positions, fixed order
     #   1 the same, random order
-    #   2 "manual spawning based on positions chosen by players in start boxes"
-    # An all-AI match has no players to choose, so 2 leaves teams unspawned and
-    # they are eliminated within a few seconds. Measured: with 2, allyteam 0's
-    # four teams died at frame 106 having never placed a commander.
-    # Fixed order is also what makes two runs comparable.
+    #   2 choose in game; BAR places every team that did not choose -- which is
+    #     every AI team -- via GuessStartSpot inside its start box
+    # 2 is the default because it is what multiplayer uses; 0 gives identical
+    # placement across runs for benchmarking. See design section 4.5.
     tdf.kv("StartPosType", cfg.startpostype)
     tdf.kv("NumPlayers", 1)
     tdf.kv("NumTeams", cfg.ai_count)
@@ -566,6 +568,26 @@ def handle_event(event: int, data: bytes, result: MatchResult, cfg: Config,
         log("<- %s player=%s" % (name, data[1] if len(data) > 1 else "?"))
 
 
+def tee(stream, sink) -> None:
+    """Copy the engine console to our stdout and to a file, line by line."""
+    for line in iter(stream.readline, b""):
+        sink.write(line)
+        sink.flush()
+        sys.stdout.buffer.write(line)
+        sys.stdout.buffer.flush()
+
+
+def installed_ai_version(cfg: Config) -> str:
+    """The build stamp an AI release carries, if any (e.g. SMRTBARb_VERSION.txt)."""
+    base = Path(cfg.engine_dir) / "AI" / "Skirmish" / cfg.ai_shortname / cfg.ai_version
+    for stamp in sorted(base.glob("*VERSION*.txt")):
+        try:
+            return stamp.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            pass
+    return ""
+
+
 def run(cfg: Config) -> MatchResult:
     write_dir = Path(cfg.write_dir)
     write_dir.mkdir(parents=True, exist_ok=True)
@@ -606,7 +628,14 @@ def run(cfg: Config) -> MatchResult:
     result.engine_config = engine_config
     started_at = time.monotonic()
 
-    proc = subprocess.Popen(cmd, env=child_env)
+    # The engine console goes to the pod log *and* to engine-console.log in the
+    # run directory, so it survives the pod. It holds what is printed before
+    # infolog.txt opens, which is exactly what explains a failed start.
+    console = (write_dir / "engine-console.log").open("wb")
+    proc = subprocess.Popen(cmd, env=child_env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT)
+    pump = threading.Thread(target=tee, args=(proc.stdout, console), daemon=True)
+    pump.start()
     deadline = started_at + cfg.timeout
     kill_sent_at = None
 
@@ -652,6 +681,8 @@ def run(cfg: Config) -> MatchResult:
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+        pump.join(timeout=10)
+        console.close()
 
     result.wallclock_seconds = round(time.monotonic() - started_at, 1)
     return result
@@ -667,12 +698,15 @@ def main() -> int:
     result = run(cfg)
 
     payload = {
+        "engineVersion": env("BAR_ENGINE_VERSION"),
+        "runDir": cfg.write_dir,
         "gametype": cfg.gametype,
         "map": cfg.map_name,
         "ai": {
             "shortName": cfg.ai_shortname,
             "version": cfg.ai_version,
             "count": cfg.ai_count,
+            "build": installed_ai_version(cfg),
             "options": cfg.ai_options,
         },
         "allyTeams": cfg.ally_teams,

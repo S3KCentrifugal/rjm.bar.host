@@ -1,167 +1,133 @@
-# BAR Headless Autohost — Design
+# BAR Headless Host — Design
 
-Design for a containerised Beyond All Reason headless host, deployed to the
-private k3s cluster by GitHub Actions.
+A reusable, containerised Beyond All Reason headless host, published to GHCR
+and deployed to the private k3s cluster by GitHub Actions.
 
-It has two phases, and they want different things:
-
-| Phase | Purpose | State |
+| Mode | Purpose | State |
 | --- | --- | --- |
-| **1. Match harness** | run AI-vs-AI matches on demand so a change to the AI can be built, played and scored without touching a machine | **designed and built** |
-| **2. Public lobby autohost** | keep a battle room open on BAR's lobby server for human players | designed, not built, not needed yet |
+| **`match`** | play an unattended AI-vs-AI simulation to game over and report it, so an AI change can be built, played and scored without touching a machine | built; verified locally end to end |
+| **`spads`** | a SPADS autohost on BAR's lobby server that hosts Skirmish AI bots in its own process, for people to play with or against custom AIs | built; verified locally up to the lobby login |
 
-Phase 1 is the active work. It exists to serve AI development: the loop is
-*change the AI → build → play a match → read the result*, and every decision
-below is made to keep that loop short. Phase 2 is documented in
-[§10](#10-phase-2-the-public-lobby-autohost) because its analysis is still
-valid and most of its cost is avoidable until somebody actually wants to play.
+Status: rebuilt 2026-09-26 around BAR's official engine release and runtime AI
+installation. Neither mode has yet run on the cluster: the deploy job waits on
+the cluster secrets (README "Cluster secrets").
 
-Status: phase 1 implemented, not yet run on the cluster. Written 2026-09-20,
-reframed 2026-09-21.
-
-Verified against RecoilEngine `92efda5e60` and Beyond All Reason `1d267c20d1`
-(both 2026-09-13), the shipped engine release `recoil_2026.07.04`, and the
-cluster inventory as of this date.
+Verified against the official release `recoil_2026.07.04` (RecoilEngine tag
+`2026.07.04` = `de69361239`), RecoilEngine `92efda5e60` and Beyond All Reason
+`1d267c20d1` sources (both 2026-09-13), SPADS 0.13.55 (`Yaribz/SPADS@4bbb2b8`)
+and `spads_config_bar@ca95fa1`.
 
 ---
 
 ## Contents
 
 - [1. Scope](#1-scope)
-- [2. Engine build: headless, not dedicated](#2-engine-build-headless-not-dedicated)
-- [3. Build: engine and AI from one tree](#3-build-engine-and-ai-from-one-tree)
+- [2. Engine: headless, not dedicated](#2-engine-headless-not-dedicated)
+- [3. Engine release and custom AIs](#3-engine-release-and-custom-ais)
 - [4. Running a match](#4-running-a-match)
 - [5. Container design](#5-container-design)
 - [6. Content](#6-content)
 - [7. Kubernetes design](#7-kubernetes-design)
 - [8. CI/CD pipeline](#8-cicd-pipeline)
 - [9. Deviations from the cluster standard](#9-deviations-from-the-cluster-standard)
-- [10. Phase 2: the public lobby autohost](#10-phase-2-the-public-lobby-autohost)
+- [10. The lobby host (SPADS)](#10-the-lobby-host-spads)
 - [11. Risks and open questions](#11-risks-and-open-questions)
 
 ---
 
 ## 1. Scope
 
-**In scope (phase 1).** A container that plays one Beyond All Reason match
-between N Skirmish AI instances, start to finish, unattended, and reports what
-happened. Triggered by CI when the AI changes. Deployed to `mcgill-data` as a
-Kubernetes Job.
+**In scope.** One image that other repositories can pull to run a BAR
+simulation or host a lobby room, with any custom Skirmish AI; its deployment to
+`mcgill-data` in namespace `rjm-host-<env>`; and the pipelines that build,
+publish, smoke-test and deploy it.
 
-**Out of scope (phase 1).** The lobby server, human players, inbound UDP, map
-rotation, chat, votes, and SPADS. None of it is needed to play an AI-vs-AI
-match, and all of it carries real cost — see [§10](#10-phase-2-the-public-lobby-autohost).
+**Out of scope, permanently.** Modifying the BAR game archive, which changes its
+checksum and breaks compatibility with stock clients. Operating lobby
+infrastructure: SPADS is a *client* of BAR's lobby server.
 
-**Out of scope, permanently.** Modifying the BAR game archive, which changes
-its checksum and breaks compatibility with stock clients.
-
-**Project name.** `barhost`. Namespaces `barhost-test`, `barhost-prod`.
+**Project name.** `rjm-host`. Namespaces `rjm-host-test`, `rjm-host-prod`.
+Image `ghcr.io/s3kcentrifugal/rjm-host` (private).
 
 ---
 
-## 2. Engine build: headless, not dedicated
+## 2. Engine: headless, not dedicated
 
-**This is still the load-bearing decision.**
-
-Recoil ships two non-graphical builds. They are not interchangeable:
+**Still the load-bearing decision.** Recoil ships two non-graphical builds:
 
 | Target | Simulation | Can host Skirmish AI | Cost |
 | --- | --- | --- | --- |
-| `engine-dedicated` | **no** | **no** | low — a net relay |
-| `engine-headless` | yes | **yes** | high — full sim |
+| `spring-dedicated` | **no** | **no** | low — a net relay |
+| `spring-headless` | yes | **yes** | high — full sim |
 
-Evidence, re-verified against the current tree:
-
-- `rts/builds/dedicated/CMakeLists.txt` contains no reference to `ExternalAI`,
-  `SkirmishAI` or `AIInterface` anywhere. Its `main.cpp:225` constructs
+- `rts/builds/dedicated/CMakeLists.txt` references no `ExternalAI`,
+  `SkirmishAI` or `AIInterface` source; its `main.cpp:225` constructs
   `CGameServer` and nothing else.
-- `rts/builds/headless/CMakeLists.txt:64` builds `engine-headless` from the
-  full engine sources. BAR's release packaging installs that binary as
-  `spring-headless`, which is the name present in a real release tree.
-- A Skirmish AI always carries a `hostPlayer` and executes inside a full engine
-  process — `GameSetup.cpp:47-48` refuses a script whose `[AIn]` section has no
-  `Host`.
+- A Skirmish AI always executes inside the process of the player hosting it —
+  `GameSetup.cpp:47-48` refuses an `[AIn]` section without `Host`.
 
-So: `spring-headless`, and size for a simulation with N AI rather than for a
-relay.
+So both modes run `spring-headless`: the match runner as a spectator that hosts
+every AI, and SPADS with `springServerType:headless`, which puts the autohost
+into the game as a player so bots added with `!addBot` run in its process
+(`spads.pl:5710-5715`, `SpringLobbyInterface.pm:513`).
 
 ---
 
-## 3. Build: engine and AI from one tree
+## 3. Engine release and custom AIs
 
-**Decision: build the engine and the Skirmish AI in a single CMake
-configuration, in Recoil's own build container.**
+**Decision: ship BAR's official Linux engine release, checksum-verified, and
+install custom AIs at container start.** This replaces the earlier design of
+compiling engine and AI from one source tree.
 
-Two facts force this:
+Why the official release:
 
-1. **The AI cannot be built alone.** `s3k-CircuitAI/CMakeLists.txt:12` pulls
-   `${CMAKE_SOURCE_DIR}/rts/System/StringUtil.cpp` out of the engine tree. The
-   AI is a subdirectory of an engine checkout, not a standalone project.
-2. **The two shared libraries must match.** CircuitAI's own README:25 records
-   the failure and the cure: *"Dead AI upon match start: ensure that
-   `libSkirmishAI.so` is compatible with `AI/Interfaces/C/0.1/libAIInterface.so`
-   (i.e. replace it with own build)."* Building both from one tree makes the
-   pairing structural rather than something to remember.
+1. **A lobby host must match its players.** People joining a room run the
+   engine the BAR launcher installed (`data/engine/recoil_2026.07.04` today). A
+   self-compiled binary from the same tag is not guaranteed to be sync-identical,
+   and a desync ends the game for everyone.
+2. **Simulations should measure what people play.** Same argument, weaker form.
+3. **Build time.** A source build is a long cold compile; downloading and
+   verifying a 33 MB archive takes seconds. The image now builds in about a
+   minute.
+4. **The AI already has a build pipeline.** `S3KCentrifugal/CircuitAI`'s release
+   workflow compiles SMRTBARb for Windows and Linux with Recoil's own docker
+   harness and publishes `SMRTBARb-v<version>-<channel>-linux.tar.gz`, laid out
+   to unpack straight into `engine/<version>/AI/Skirmish/`. Rebuilding it here
+   would duplicate that.
 
-`docker/runtime/Dockerfile` does this as a multi-stage build, so CI and a
-laptop run the same definition. `scripts/build-engine-ai.sh` is a thin wrapper
-around `docker buildx` that arranges the two checkouts and can extract just the
-install tree (`--target export`).
+The release's binaries are static apart from libc (checked with `ldd`:
+`libdl`, `libm`, `libpthread`, `librt`, `libc` only), so the runtime needs no
+engine libraries at all.
 
-### 3.1 Why the stages are split where they are
+### 3.1 Custom AIs
 
-```text
-engine-build ──▶ ai-build ──┬──▶ runtime
-                            └──▶ export
-```
+`scripts/install_ai.py` runs before every match and before SPADS starts. It puts
+AIs into `$BAR_ENGINE_DIR/AI/Skirmish/` — the same place a Windows install
+keeps them — from any combination of a mounted folder (`/bar/custom-ai/<Name>/`,
+linked), archive URLs, local archives, and `github:OWNER/REPO@TAG[#GLOB]`
+release assets (`latest`, or `newest` to include pre-releases). A custom AI
+named like a stock one replaces it.
 
-`engine-build` compiles the engine, the C AI interface and the C++ wrapper with
-**no Skirmish AI present**. `ai-build` then adds the AI and reconfigures *in
-place*, so CMake discovers the new target while `/build/out` still holds the
-engine's object files, and Ninja compiles only the AI.
+**A Windows build is refused, not skipped.** A folder copied from a Windows
+install carries `SkirmishAI.dll`; the Linux engine ignores it silently and the
+bot simply never appears. The installer requires `libSkirmishAI.so` in every
+version directory and fails the container with an explanation otherwise.
 
-The split exists because of how the work is distributed in practice: the AI
-changes several times a day and the engine changes when the pin moves. Keeping
-them in separate layers means an AI-only change reuses the cached engine layer
-and recompiles the small half. A single combined stage would rebuild everything
-on every AI edit, because the `COPY` of the AI source would invalidate it.
+### 3.2 The interface pairing
 
-`cmake --fresh` is therefore used in the first stage and deliberately **not** in
-the second — it would discard exactly the object files the split exists to
-preserve.
+CircuitAI's README records the failure mode: a `libSkirmishAI.so` incompatible
+with the `AI/Interfaces/C/0.1/libAIInterface.so` beside it is dead at match
+start. The engine release provides the interface, so an AI must be built against
+headers compatible with that engine.
 
-Two details that are easy to get wrong:
-
-- **AI discovery is a glob, not git.** `AI/Skirmish/CMakeLists.txt` calls
-  `get_list_of_submodules`, but that macro is `file(GLOB ... */CMakeLists.txt)`
-  (`rts/build/cmake/Util.cmake:169`). A plain directory is found. No submodule
-  wiring is needed, so our source can simply replace the vendored `BARb`
-  submodule directory.
-- **The directory name is the identity.** It becomes the CMake target name and
-  the installed path, and must match `shortName` in the AI's `data/AIInfo.lua`.
-  For this fork that is `BARb`, version `stable` — the version string is the
-  literal word, read from `VERSION`, not a number.
-- **`AI_EXCLUDE_REGEX` is not a safe way to drop AIs.** It is matched against
-  the C interface and the C++ wrapper too (`AI/Interfaces/C/CMakeLists.txt:26,81`
-  and `AI/Wrappers/Cpp/CMakeLists.txt:22`), both of which CircuitAI links
-  against, so a broad pattern silently removes its own dependencies. The engine
-  stage deletes `AI/Skirmish/*/` instead.
-- **Only the headless build is wanted.** `BUILD_spring-legacy` and
-  `BUILD_spring-dedicated` default to on (`rts/builds/CMakeLists.txt:76,105-107`).
-  Legacy is the full graphical engine and the largest target in the tree;
-  dedicated cannot host a Skirmish AI at all. Both are turned off.
-
-The build container is pinned by digest from
-`docker-build-v2/images_versions.sh`:
-`ghcr.io/beyond-all-reason/recoil-build-amd64-linux@sha256:31b3667…`. It is
-Ubuntu 18.04 with gcc-13 and `PREFER_STATIC_LIBS=TRUE`, deliberately old so the
-output runs widely (`images/all-linux/Dockerfile:1-3`).
-
-Both refs live in `config/engine.pin`. Moving `ENGINE_REF` is an engine upgrade
-and must be a reviewed diff: it silently invalidates the interface pairing.
+SMRTBARb v1.961-test is built against RecoilEngine `92efda5e60` (its
+`.github/recoil-engine.ref`), which is *newer* than `2026.07.04`. Measured on
+2026-09-26: it loads, is listed by `--list-skirmish-ais`, and played a full
+10-minute 1v1 on the `2026.07.04` release. The C interface is stable across that
+range; keep the AI's engine ref and `config/engine.pin` close, and treat an
+engine bump as needing a matching AI release.
 
 ---
-
 ## 4. Running a match
 
 ### 4.1 The script
@@ -191,7 +157,7 @@ through `GetRapidPackageFromTag`, so `byar:test` works without pre-resolving it.
 The engine talks to an autohost over **UDP on loopback**
 (`AutohostInterface.h:9-12`; `AutohostIP` defaults to `127.0.0.1`,
 `GameServer.cpp:78`). The supervisor binds that port and speaks the protocol
-directly. No SPADS.
+directly; SPADS is not involved in this mode.
 
 Events received (`AutohostInterface.cpp:36-130`):
 
@@ -250,135 +216,126 @@ autohost socket (`:2316-2318`). Measured: without this, runs finish with
 the server-side recorder.
 
 **`WorkerThreadCount` is sized to the container, not the host.** See
-[§7.4](#74-resources) — both the engine and the AI size their thread pools from
+[§7.5](#75-resources) — both the engine and the AI size their thread pools from
 the host's CPU topology, which inside a container is the wrong number. The
 runner reads the cgroup quota (`cpu.max`, or the v1 `cpu.cfs_quota_us` /
 `cpu.cfs_period_us`) and sets the engine's pool from that.
 
-Per run, into `/out/<pod-name>/`: `script.txt` (exactly what was played),
-`springsettings.cfg` (exactly how the engine was configured), `result.json`
-(winners, demo path, exit reason, wall-clock, engine warnings), plus the
-engine's own `infolog.txt` and `demos/`.
+Per run, into `/bar/out/matches/<run-id>/`: `script.txt` (exactly what was
+played), `springsettings.cfg` (exactly how the engine was configured),
+`result.json` (winners, demo path, exit reason, wall-clock, engine version, the
+AI's build stamp, engine warnings), `engine-console.log` (the engine's
+stdout/stderr, tee'd by the runner so it outlives the pod), plus the engine's own
+`infolog.txt`, `demos-server/` and `demos/`. The full list is in
+[§7.3](#73-output-what-is-captured).
 
-### 4.5 Spawning, which is where an all-AI match goes wrong
+### 4.5 Spawning
 
-Three settings decide whether the AI ever get a commander. All three were found
-by running real matches rather than by reading alone, and each failure looks the
-same from outside: a match that ends in seconds, with no error.
+**`StartPosType` 2 works for AI.** BAR branches on it at
+`game_initial_spawn.lua:710-728`: 0 and 1 spawn at the map's positions in fixed
+or random order; 2 is choose-in-game, and BAR places every team that did not
+choose — every AI team — with `GuessStartSpot` inside its start box at
+GameStart (`:676-699`). Measured 2026-09-26 on the official release: with 2,
+both SMRTBARb teams of a 1v1 spawned and played 18,455 frames (~10 minutes).
+The default is 2 because it is what multiplayer uses; 0 gives identical
+placement across runs for benchmarking.
 
-**`StartPosType` must be 0, not 2.** BAR branches on it at
-`game_initial_spawn.lua:710-728`:
+An earlier version of this document said 2 left AI unspawned. The symptom it
+described — allyteam 0 eliminated within seconds — is real, but it is
+[risk 1](#11-risks-and-open-questions) and has nothing to do with spawning.
 
-| Value | BAR's behaviour |
-| --- | --- |
-| 0 | automatic spawning at the map's default start positions, **fixed order** |
-| 1 | the same, random order |
-| 2 | "manual spawning based on positions chosen by players in start boxes" |
+**Start boxes are left to BAR** (`BARHOST_START_BOXES=map`): its startbox gadget
+uses the map's own layout, falling back to halves chosen from the aspect ratio
+(`startbox_utilities.lua:233`). With `StartPosType` other than 2, BAR widens
+every box to the whole map (`game_startbox_config.lua:30-40`).
 
-An all-AI match has nobody to choose, so with 2 the teams never spawn and are
-eliminated within seconds. Measured: allyteam 0's four teams died at frame 106
-having never placed a commander. Fixed order also keeps runs comparable, which
-matters more here than variety.
+**Teams are interleaved across allyteams** by default: BAR maps alternate start
+positions by index, so contiguous blocks (0-3 against 4-7) would seat each team
+beside an enemy under `StartPosType` 0.
 
-**Start rectangles must be set.** `AllyTeam.h:25-28` defaults every rectangle to
-the whole map — left/top 0, right/bottom 1 — so without them every allyteam
-shares one box covering everything.
-
-**Teams must be interleaved across allyteams.** BAR maps alternate their start
-positions by index: All That Glitters puts even-numbered positions on one half
-of the map and odd-numbered on the other. With `StartPosType` 0 the engine gives
-team *i* the map's position *i*, so assigning teams to allyteams in contiguous
-blocks (0-3 against 4-7) scatters each side across both halves and seats every
-team beside an enemy. `BARHOST_TEAM_LAYOUT` defaults to `interleaved` for that
-reason; `blocked` stays available for maps that group positions by side.
-
-**A limitation no setting fixes.** BAR vetoes AI-chosen start positions outright
-— `game_initial_spawn.lua:478-479` returns `false` for `isAiTeam` — and places
-them with `GuessStartSpot` (`common/lib_startpoint_guesser.lua:397`). AI
-placement cannot be influenced from the AI side. The only stock-game levers are
-start box geometry and post-spawn relocation.
+**AI placement cannot be influenced from the AI side.** BAR vetoes AI-chosen
+start positions (`game_initial_spawn.lua:478-479`) and places them itself.
 
 ---
 
 ## 5. Container design
 
-One image, `barhost-match`, produced by the `runtime` stage of the multi-stage
-build in [§3](#3-build-engine-and-ai-from-one-tree). The compiler and its
-toolchain stay behind in the build stages; only the install tree crosses over.
-
-| Layer | Contents |
-| --- | --- |
-| base | `debian:stable-slim` + runtime libs + `python3` |
-| engine | `COPY --from=ai-build`: `spring-headless`, `pr-downloader`, `AI/Interfaces/C/0.1/`, `AI/Skirmish/<name>/<version>/` |
-| runner | `run_match.py`, `entrypoint.sh` |
-
-Debian's glibc is newer than the Ubuntu 18.04 build stage's, which is the
-direction that works; the reverse would not. The build stage also links most
-dependencies statically via `spring-static-libs`, so the runtime package list
-is short.
-
-Runs as uid 10001, non-root, no added capabilities. Nothing here needs
-privilege: the ports used (53200, 53210) are unprivileged and loopback-only.
-
-**Build-time smoke test.** The image build runs
-`spring-headless --list-skirmish-ais` (`SpringApp.cpp:138`) and fails unless the
-expected AI and version appear. That turns the "dead AI at match start" failure
-into a build error found in seconds, instead of a mystery five minutes into a
-game. It also catches a missing runtime library, since the engine has to load to
-answer at all.
-
-The check matches the exact output format of
-`AILibraryManager::OutputSkirmishAIInfo` (`AILibraryManager.cpp:450-466`),
-confirmed against a real engine release:
+One image, `ghcr.io/s3kcentrifugal/rjm-host`, from a three-stage build:
 
 ```text
-# Available Spring Skirmish AIs
-# -----------------------------
+engine (official release, sha256-verified) ─┐
+spads  (Yaribz repos at pinned commits)     ─┴─▶ runtime (debian:stable-slim)
+```
+
+| Path | Windows equivalent | Content |
+| --- | --- | --- |
+| `/bar/engine/recoil_<ver>/` (`$BAR_ENGINE_DIR`) | `data\engine\recoil_<ver>\` | engine release, minus the graphical `spring` |
+| `$BAR_ENGINE_DIR/AI/Skirmish/` | `...\AI\Skirmish\` | stock BARb, CircuitAI, NullAI + custom AIs at start |
+| `/bar/data` | `data\` | game and maps (volume) |
+| `/bar/custom-ai` | — | custom AI folders (optional volume) |
+| `/bar/out` | — | everything produced (volume) |
+| `/opt/spads`, `/opt/rjm-host/spads/etc` | — | SPADS and its configuration |
+
+Runtime packages: `python3` (runner, installer), `perl` with `FFI::Platypus`,
+`IO::Socket::SSL` and `DBD::SQLite` (SPADS: unitsync over FFI, lobby TLS,
+preferences), `tini` as PID 1, `ca-certificates`.
+
+Runs as uid 10001, non-root, no added capabilities. uid 10001 owns the engine's
+`AI/Skirmish` so AIs can be installed at start, which is why the root
+filesystem cannot be read-only ([§9](#9-deviations-from-the-cluster-standard)).
+
+**Build-time check.** The build runs `spring-headless --list-skirmish-ais` and
+fails unless `BARb stable` is listed, matching the row format of
+`AILibraryManager::OutputSkirmishAIInfo`:
+
+```text
 # [Name]               [Version]            [Interface-name]     [Interface-version]
 # BARb                 stable               C                    0.1
 ```
 
-It also fails on the duplicate-AI warning the same function emits (`:474`),
-which is what two copies of one AI installed side by side would look like.
+**Pre-publish smoke test** (`scripts/smoke_test.sh`, run by CI before any push):
+stock AI listed; a custom AI from a GitHub release installs and is listed; a
+mounted folder is linked and listed; a Windows-only AI is refused with its
+explanation; SPADS's configuration loads through SPADS's own parser.
 
-Entrypoint subcommands: `match` (default), `fetch-content`, `list-ais`.
+Entrypoint commands: `match` (default), `spads`, `install-ai`, `list-ais`,
+`fetch-content`, or any command.
 
 ---
 
 ## 6. Content
 
-Stock BAR, fetched with `pr-downloader` into a persistent volume, not baked
-into the image.
+Stock BAR, fetched with the release's `pr-downloader` into the `/bar/data`
+volume — not baked into the image (the rapid pool alone is ~3.3 GB).
 
-**Why the volume and not the image.** The rapid pool plus maps is gigabytes;
-the AI changes several times a day. Keeping content out of the image keeps each
-AI rebuild a small push and a small pull onto an HDD-backed single node. The
-init container is idempotent — rapid skips what the pool already has — so a warm
-volume costs seconds.
+**pr-downloader needs BAR's launcher settings.** Its defaults point at
+springrts.com, which carries neither the `byar` repository nor BAR's maps, and
+BAR's CDN answers the rapid *streamer* endpoint with an HTTP error — measured:
+`Sdp.cpp:422 ... HTTP response code said error`, `Couldn't download files`. The
+installed BAR launcher sets exactly three variables, and the entrypoint sets the
+same:
 
-**A trap worth recording.** `pr-downloader --help` shows its rapid master
-defaults to `https://repos.springrts.com/repos.gz`, which does not carry BAR's
-repo. `byar:` tags will not resolve against it. The entrypoint sets
-`PRD_RAPID_REPO_MASTER=https://repos-cdn.beyondallreason.dev/repos.gz`, which is
-the master a real BAR install uses.
+```text
+PRD_RAPID_REPO_MASTER=https://repos-cdn.beyondallreason.dev/repos.gz
+PRD_RAPID_USE_STREAMER=false
+PRD_HTTP_SEARCH_URL=https://files-cdn.beyondallreason.dev/find
+```
 
-**Pinning.** Rapid exposes named tags (`byar:test`, `byar:stable`,
-`byar:br-master`) and a `byar:git:<sha>` form — over 12,000 of them in the
-current index. For a benchmark that should stay comparable across AI versions,
-pin the sha; `byar:test` tracks BAR's test branch and will drift.
+**Pinning.** `byar:test` tracks BAR's test branch and moves; pin `byar:git:<sha>`
+for a benchmark that must stay comparable.
 
-**Maps.** A small fixed set, named by the archive's internal display name
-(`mapinfo.lua` `name`), which is both what `GAME\MapName` resolves
-(`GameSetup.cpp:679`) and what `--download-map` expects. Defaults are
-`All That Glitters v2.2.3` and `Comet Catcher Remake`, read out of the
-archives rather than guessed. A fixed map set matters more than variety: it is
-what makes two runs comparable.
+**Maps** are named by their *versioned* archive name — `All That Glitters v2.2.3`,
+`Comet Catcher Remake 1.8` — which is what `GAME\MapName` resolves
+(`ArchiveScanner.cpp:187-196`, `GameSetup.cpp:679`) and what `--download-map`
+expects. The match map is always fetched, whether or not it is in
+`BARHOST_MAPS`.
 
-`--isolation --isolation-dir /spring-data` pins content discovery to the
-volume. Because isolation mode would otherwise hide the engine's own `AI/` and
-`base/` trees, the runner also sets `SPRING_DATADIR` to the engine directory —
-LEVEL 3 of `LocateDataDirs` honours it even in isolation mode
-(`DataDirLocater.cpp:434-441`), and `AddDirs` splits on colons (`:178`).
+**Discovery.** The runner starts the engine with `--isolation --isolation-dir
+/bar/data` and `SPRING_DATADIR=$BAR_ENGINE_DIR`, which LEVEL 3 of
+`LocateDataDirs` honours even in isolation (`DataDirLocater.cpp:434-441`). SPADS
+cannot rely on unitsync finding the engine's `base/` beside itself — measured:
+`Required base file 'base/springcontent.sdz' does not exist` — so its
+`springDataDir` lists both `/bar/data` and the engine directory.
 
 ---
 
@@ -389,45 +346,76 @@ Kustomize base + `test`/`prod` overlays, manual PVs with `claimRef`,
 
 ```text
 k8s/
-  base/     rbac.yaml  pvc.yaml  job.yaml  match.env  kustomization.yaml
+  base/     rbac.yaml  network-policies.yaml  pvc.yaml  match-job.yaml
+            spads-deployment.yaml  match.env  spads.env  secrets.yaml.example
   overlays/{test,prod}/  namespace.yaml  persistent-volumes.yaml  kustomization.yaml
 ```
 
-### 7.1 Workload type
+### 7.1 Workloads
 
-**A `Job`, not a Deployment.** The work is a batch that ends. `backoffLimit: 0`
-— a failed match is a result to read, and a retry would overwrite the infolog
-explaining it. `ttlSecondsAfterFinished: 86400` reaps pods while leaving the
-replay and `result.json` on the volume.
+**`rjm-host-match`, a Job.** One simulation per deploy; `backoffLimit: 0` (a
+failed match is a result to read, and a retry would bury its infolog);
+`ttlSecondsAfterFinished: 86400`. A Job's pod template is immutable, so the
+pipeline deletes and recreates it — and refuses to while one is running.
 
-A Job's pod template is immutable, so the pipeline deletes and recreates rather
-than patching.
+**`rjm-host-spads`, a Deployment** of one replica, `strategy: Recreate`,
+`hostNetwork: true` ([§10](#10-the-lobby-host-spads)). Held at zero replicas by
+the pipeline until the `rjm-host-secrets` Secret exists. A readiness probe marks
+it ready when it holds an established TCP connection to the lobby (port 8200);
+there is deliberately **no liveness probe**, because a restart ends any game in
+progress and SPADS reconnects to the lobby by itself.
 
-This choice removes most of the original design's difficulty at a stroke: no
-`hostNetwork`, so no port collisions and no router forwarding; no rolling-update
-hazard; no liveness probe that must never fire mid-match.
+Both use an init container that runs `fetch-content`, so the main container
+starts with content in place.
 
 ### 7.2 Storage
 
-Two volumes on `storageClassName: data2`, host path
-`/mnt/data2/k8s-volumes/barhost/<env>/<purpose>`, `mcgill-data` node affinity,
-`Retain`, every PV carrying `claimRef`.
+Three volumes on `storageClassName: data2`, host path
+`/mnt/data2/k8s-volumes/rjm-host/<env>/<purpose>`, `mcgill-data` affinity,
+`Retain`, every PV carrying `claimRef`:
 
-| PVC | Purpose | Size |
-| --- | --- | --- |
-| `barhost-spring-data-pvc` | rapid pool + curated maps | 20Gi |
-| `barhost-runs-pvc` | replays, infologs, `result.json` per run | 20Gi |
+| PVC | Mount | Purpose | Size |
+| --- | --- | --- | --- |
+| `rjm-host-data-pvc` | `/bar/data` | rapid pool + maps | 40Gi |
+| `rjm-host-out-pvc` | `/bar/out` | every log and replay | 50Gi |
+| `rjm-host-ai-pvc` | `/bar/custom-ai` (read-only) | custom AI folders | 5Gi |
 
-Host directories are created by the pipeline and `chown`ed to 10001 to match
-the container user.
+Both workloads mount all three; they run on the one node, so `ReadWriteOnce`
+does not keep them apart. The pipeline creates the host directories and
+`chown`s them to 10001.
 
-### 7.3 Networking
+**Loading a custom AI folder onto the cluster:**
+`kubectl cp ./SMRTBARb <pod>:/bar/custom-ai/` from any pod that mounts the
+volume read-write, or place it under `/mnt/data2/k8s-volumes/rjm-host/<env>/ai/`
+on the node. It must be the Linux build.
 
-**Nothing is exposed.** Both sockets are loopback inside the pod: the autohost
-channel on 53200 and the local game server on 53210. No Service, no Ingress, no
-NodePort, no UDP forwarding.
+### 7.3 Output: what is captured
 
-### 7.4 Resources
+Everything lands on `rjm-host-out-pvc`:
+
+| Path | Written by |
+| --- | --- |
+| `matches/<pod>/result.json` | runner: winners, exit reason, engine version, AI build stamp |
+| `matches/<pod>/infolog.txt` | engine, including every Skirmish AI log line |
+| `matches/<pod>/engine-console.log` | runner: the engine's stdout/stderr, tee'd |
+| `matches/<pod>/demos-server/*.sdfz`, `demos/*.sdfz` | engine: server and client replays |
+| `matches/<pod>/script.txt`, `springsettings.cfg` | runner: exactly what was played, and how |
+| `spads/log/spads.log`, `log/chat/`, `log/spring-headless.log` | SPADS; engine console of every lobby game |
+| `spads/var/demos*/*.sdfz` | engine: every lobby game's replay |
+| `spads/games/<time>-<gameId>/` | `archive_game.sh` (SPADS `endGameCommand`): that game's `infolog.txt`, `startscript.txt`, `game.json`, a link to its replay |
+
+SPADS overwrites `infolog.txt` and `startscript.txt` every game; the end-game
+hook is what keeps them per game. Nothing prunes the volume yet
+([risk 7](#11-risks-and-open-questions)).
+
+### 7.4 Networking
+
+The match Job exposes nothing: the autohost channel (53200) and the game server
+(53210) are loopback. A default-deny ingress NetworkPolicy covers the namespace.
+Egress stays open — pr-downloader, GitHub and the lobby server have no fixed
+addresses a policy could name. SPADS's networking is in [§10](#10-the-lobby-host-spads).
+
+### 7.5 Resources
 
 **Measured, not estimated.** `scripts/measure_match.py` reproduces the numbers.
 
@@ -465,7 +453,7 @@ matters because [risk 1](#11-risks-and-open-questions) kills an allyteam three
 seconds into a *normal* match — `deathmode=neverend` removes the gadget
 responsible, so these figures measure eight working AI rather than four.
 
-"Requested settings" is the configuration in [§10.1](#101-the-requested-configuration):
+"Requested settings" is the lobby configuration the owner asked for:
 Legion enabled, co-op on, and every AI on +50% income. It is the one to size
 against, and it is materially more expensive than bare defaults — **8 AI with
 these settings costs roughly what 16 AI cost without them**: +16% CPU and +37%
@@ -513,7 +501,7 @@ deliberate — the request reflects a typical match, the limit covers a long one
 **For an 8v8 with human players** (16 slots, 8 of them AI) the compute is
 bounded above by the 16-AI column: the same 16 teams of units, but 8 AI brains
 instead of 16. It fits the sizing above. What it *does* change is everything in
-[§10](#10-phase-2-the-public-lobby-autohost) — human players mean the lobby,
+[§10](#10-the-lobby-host-spads) — human players mean the lobby,
 inbound UDP, `hostNetwork`, and a long-running Deployment instead of a Job.
 The resource question is the easy half of that.
 
@@ -545,51 +533,60 @@ limit at or above 8 cores' worth of slack, or accept the throttling.
 
 ### 7.5 Security
 
+### 7.6 Security
+
 Non-root (uid 10001), `allowPrivilegeEscalation: false`, all capabilities
-dropped, `RuntimeDefault` seccomp, and no service account token mounted — the
-runner has no reason to reach the Kubernetes API.
+dropped, `RuntimeDefault` seccomp, no service-account token. The lobby
+credentials live only in the `rjm-host-secrets` Secret, applied by hand and
+never committed; SPADS refuses to start with an empty owner login, because
+`users.conf` would then grant owner rights to every user.
 
 ---
 
 ## 8. CI/CD pipeline
 
-Standard three jobs: `set-env → build → deploy`, in
-`.github/workflows/deploy.yml`. Branch name is the environment; `main` never
-deploys.
+Three workflows in `.github/workflows/`:
 
-**Triggers.** `push` to `test`/`prod`, `workflow_dispatch` (choose an AI ref and
-environment), and `repository_dispatch` with type `ai-updated` — the last is
-what lets a push in the AI repository start a match here, which is the point of
-the whole pipeline.
+| Workflow | Trigger | Does |
+| --- | --- | --- |
+| `ci.yml` | pull request, push to `main` | shellcheck, Python compile, render both overlays, build the image, smoke test — publishes nothing |
+| `deploy.yml` | push to `test`/`prod`, `workflow_dispatch`, `repository_dispatch: ai-updated` | `set-env → build → deploy`: publish the image, deploy, run a match |
+| `simulate.yml` | `workflow_call` (reusable), `workflow_dispatch` | run one simulation on a GitHub runner with the image, upload `/bar/out` as an artifact |
 
-`concurrency` pins one match per environment: the node has one set of volumes
-and one CPU budget, and overlapping runs would make the timings meaningless.
+**`set-env`** resolves the environment (`test`/`prod`; a dispatch from an AI
+repository always targets `test`), lowercases the owner for the GHCR name, reads
+`config/engine.pin`, validates any AI override from an input or dispatch payload
+(passed through the environment, never interpolated into a script), decides
+whether the image changed (`docker/`, `scripts/`, `config/engine.pin`, a
+`[force-build]` commit, or any non-push trigger) and whether the cluster secrets
+are configured.
 
-**`set-env`** resolves the environment, reads `config/engine.pin`, and lets an
-explicitly requested AI ref override the pinned default.
+**`build`** builds once into the runner's daemon with the GHA layer cache, runs
+`scripts/smoke_test.sh`, and only then pushes `:<sha>` and `:<env>` (plus
+`:recoil-<engine>` and `:latest` from prod).
 
-**`build`** checks out this repo, the engine at its pinned SHA (with
-submodules), and the AI at its ref; restores a ccache keyed on the engine ref so
-an AI-only change reuses the engine objects; runs
-`scripts/build-engine-ai.sh`; then builds and pushes the image with
-`docker/build-push-action@v6` and `cache-from: type=gha`.
+**`deploy`** runs in `mcgill-deployer` with `--privileged` for WireGuard, and is
+**skipped with a warning** while the cluster secrets are missing, so the image
+still publishes. The 12 steps, with this project's specifics:
 
-The first build is slow — a full engine compile. Later ones are dominated by
-the AI alone, which is what the cache key is arranged to achieve.
+1. WireGuard up. 2. kubectl from `KUBE_CONFIG_DATA`. 3. Namespace.
+4. Pull secret (the image is private). 5. **Guard**: refuse while the match Job
+is running. 6. Host directories, owned by 10001. 7. Image tag: the new SHA, or
+the deployed one if nothing rebuilt. 8. Delete `Released` PVs. 9. **Render
+once**: tag, AI override, SPADS config hash, and SPADS replicas (0 without the
+Secret). 10. Delete the finished Job; **guard**: refuse to restart SPADS while a
+`spring-headless` process — a lobby game — is running in it, unless
+`interrupt_lobby` is set. 11. Apply the rendered file; wait for SPADS if it
+runs. 12. Wait for the match (5400 s), print its log, fail the run if it did not
+succeed. Tear down the VPN always.
 
-**`deploy`** runs in `mcgill-deployer` with `--privileged` for WireGuard. The
-12-step process applies, with these project-specific points:
+SPADS restarts only when its pod template changes: the image tag, or the
+`rjm-host/config-hash` annotation computed from `spads.env` and `docker/spads/`.
 
-- **Step 5 is a guard.** If a match is still running, the deploy fails with a
-  clear message instead of killing it. The same intent as the original design's
-  rollout guard, in the form a Job needs.
-- **Step 6** creates both volume paths and `chown`s them to 10001.
-- **Step 10** deletes the previous Job, because a Job is immutable.
-- **Step 12** waits for the Job to succeed or fail — not `rollout status`,
-  which does not apply — then prints the match log either way.
-
-**Secrets.** The standard seven, plus **`AI_REPO_TOKEN`**, a PAT that can read
-the private AI repository; the workflow's own `GITHUB_TOKEN` cannot.
+**Secrets.** The standard seven. `GHCR_PULL_TOKEN` must read both
+`mcgill-software/mcgill-deployer` and this account's private package. No
+`AI_REPO_TOKEN`: the AI repository is public and its releases are fetched at
+runtime.
 
 ---
 
@@ -597,160 +594,151 @@ the private AI repository; the workflow's own `GITHUB_TOKEN` cannot.
 
 | Standard | Here | Why |
 | --- | --- | --- |
-| Deployment | `Job` | the work is a batch that ends |
-| RollingUpdate | n/a | a Job is replaced, not rolled |
-| Liveness + readiness probes | none | a batch pod has nothing to probe; success is the exit code |
-| Service per workload | none | nothing listens outside the pod |
-| Ingress per service | none | nothing to expose |
-| `rollout status` wait | poll Job conditions | Jobs have no rollout |
-| Namespace `mcgill-<service>-<env>` | `barhost-<env>` | follows the existing design and the skill's own Kustomize templates; the standard's two references disagree — **confirm before prod** |
+| Image per environment (`<project>-<component>-<env>`) | one image, `rjm-host`, tagged `<sha>`/`<env>` | it is a reusable artifact consumed by other repositories; the same image is promoted, never rebuilt per environment (convention-deployment §6) |
+| Namespace `mcgill-<service>-<env>` | `rjm-host-<env>` | requested name; matches the Kustomize skill's `<project>-<env>` |
 | Namespace in `base/` | in each overlay | avoids relying on the namespace transformer renaming a Namespace object |
-| 120s rollout wait | 5400s job wait | a cold content fetch plus a full match |
-| 7 GitHub secrets | 8 | `AI_REPO_TOKEN` for the private AI repository |
+| Deployment + RollingUpdate | a Job for matches; SPADS uses `Recreate` | a match is a batch; a hostNetwork surge pod would collide on the game port |
+| Liveness + readiness probes | Job: none; SPADS: readiness only | a batch has nothing to probe; a liveness restart would end a lobby game |
+| Service / Ingress per workload | none | nothing is served over HTTP; SPADS needs raw UDP, which ingress cannot carry |
+| `readOnlyRootFilesystem` | not set | custom AIs are installed into the engine's `AI/Skirmish` at start |
+| Default-deny egress | ingress only | CDN, GitHub and lobby have no fixed addresses; hostNetwork bypasses policy anyway |
+| `rollout status` 120 s | Job wait 5400 s; SPADS 900 s | a cold 3.5 GB content fetch plus a full match; SPADS indexes content at start |
+| Pull secret in manifests only | also deploy-job `container.credentials` | the deployer image lives in another account's registry |
 
 ---
 
-## 10. Phase 2: the private lobby host
+## 10. The lobby host (SPADS)
 
-**Now requested, not yet built.** The target is a *private, passworded* battle
-room on BAR's lobby server, hosted by the secondary account, with humans playing
-co-op against 8 AI. That is a different product from phase 1 and it re-opens
-every cost phase 1 was designed to avoid.
+**Built.** A private, optionally passworded room on BAR's lobby server, hosted
+by the owner's whitelisted secondary account, with SPADS running Skirmish AI
+bots in its own `spring-headless`.
 
-### 10.1 The requested configuration
+### 10.1 How it is put together
 
-| Setting | Value | Where it lives |
+SPADS 0.13.55 is installed from pinned commits of `Yaribz/SPADS` and its five
+libraries, laid flat in `/opt/spads` exactly as its installer would — not with
+`spadsInstaller.pl`, which downloads packages over plain HTTP and needs the
+engine at install time. Configuration is `docker/spads/etc/` (four customised
+files; the other five are SPADS's stock ones), parametrised with SPADS's own
+`%ENV{..}%` / `%(ENV{..}|default)%` macros (`SpadsConf.pm:904-905`), so the
+ConfigMap `spads.env` and the Secret feed it directly. `run_spads.sh --check`
+loads it through `SpadsConf` without connecting anywhere; CI runs that.
+
+| Setting | Value | Why |
 | --- | --- | --- |
-| Room | private, password-protected | SPADS battle setting |
-| Host role | the headless host is boss | SPADS owner/boss |
-| AI | 8 × BARb, all on one team (the human side opposite) | `autoAddBotNb` / `!addBot` |
-| AI bonus | +50% each | team `Handicap` — `TeamBase.cpp:59-64` divides by 100 into `SetAdvantage`, which is `SetIncomeMultiplier(v + 1)` (`TeamBase.h:73`) |
-| Balancing | auto-balance **off** | SPADS `autoBalance` |
-| Co-op | on | modoption `coop` (`modoptions.lua:690`) |
-| Start positions | chosen in game, **skill-ordered draft** | `StartPosType` 2 + modoption `draft_mode=skill` (`modoptions.lua:224-257`) |
-| Start boxes | the map's own | leave to `game_startbox_config.lua`; see [§4.5](#45-spawning-which-is-where-an-all-ai-match-goes-wrong) |
-| Legion | enabled | modoption `experimentallegionfaction` (`modoptions.lua:1855`) |
+| `springServerType` | `headless` | only headless can run bots in the autohost (`spads.pl:7698-7700`) |
+| `lobbyHost:lobbyPort`, `lobbyTls` | `server4.beyondallreason.info:8200`, `on` | BAR's current SPADS configs; STARTTLS on the same port |
+| `autoHostPort` | 8454, loopback | SPADS binds it to 127.0.0.1 (`SpringAutoHostInterface.pm:395-405`) |
+| hosting `port` | 8452 UDP | what players connect to |
+| `modName` | `rapid://byar:test` | resolved from the content volume; must be the tag `fetch-content` downloads |
+| `allowedLocalAIs` | `SMRTBARb;BARb` | `!addBot` accepts only these; the engine picks the highest installed version |
+| `autoBalance`, `autoStart`, `autoLock` | off | manual control by the owner |
+| `varDir`, `logDir` | `/bar/out/spads/{var,log}` | everything on the output volume |
+| `endGameCommand` | `archive_game.sh` | keeps each game's infolog and start script |
+| owner | `SPADS_OWNER_LOBBY_LOGIN`, level 140 | can `!addBot`, `!force`, `!start` by private message |
 
-The modoption half of this is already implemented and shared with phase 1 —
-`run_match.py` sets `experimentallegionfaction`, `draft_mode=skill` and `coop`
-by default, and gives every AI team `Handicap=50`. `draft_mode` only does
-anything with `StartPosType` 2, since `game_initial_spawn.lua` consults it only
-on the choose-in-game path.
+Adding bots: `!addBot <name> <side> <AI>` (e.g. `!addBot Bot1 0 SMRTBARb`), or
+`!addBot <name>` for a name in `SPADS_LOCAL_BOTS`; `!force %Bot1 bonus 50` for a
++50% handicap; `!force %Bot1 team N`. `autoStart` never starts with bots
+present, so start with `!start` or `!forceStart`. SPADS preset syntax uses `|`
+for alternatives, so an AI's version cannot be pinned in configuration.
 
-The SPADS half is not. `autoBalance`, the room password, boss handling and
-placing all bots on one team are SPADS settings, and **none of them can be
-verified from this workspace** — SPADS is not vendored here. Diff them against
-upstream `Yaribz/SPADS` `etc/spads.conf` and BAR's `spads_config_bar` before
-writing `config/`, the same way engine claims are cited by `file:line`.
+**Verified locally (2026-09-26):** SPADS starts, loads unitsync `2026.07.04`,
+indexes the game and maps in 23 s, runs in headless mode, binds the autohost
+port to loopback, and reaches the lobby-connect step. **Not yet verified:** the
+login to BAR's server and hosting a bot game, which need the real account.
 
-### 10.2 What it costs, all of which returns together
+### 10.2 What it costs
 
-1. **Inbound UDP.** The cluster's only internet path is a router forward to
-   HAProxy NodePorts 32080/32443, which are TCP/HTTP. Players need inbound UDP
-   to the engine. Ingress cannot carry it, and the default NodePort range
-   (30000–32767) excludes SPADS's usual base ports. The workable answer is
-   `hostNetwork: true` plus **a router UDP forward to `mcgill-data`**, which is
-   configuration outside this repository. Without it the room is visible and
-   unjoinable — a failure that looks like success. A password does not remove
-   this: the room is private, not unreachable.
-2. **`hostNetwork` erases the pod network boundary.** Pod NetworkPolicies do not
-   apply to such a pod, and it can reach everything on the node, including the
-   shared databases. The autohost control socket must be bound explicitly to
-   `127.0.0.1`.
-3. **A long-running Deployment**, which brings back `strategy: Recreate` (a
-   surging pod collides on host ports), a liveness probe that must never fire
-   mid-match, and a deploy guard against live games.
-4. **The botflag**, below.
-5. **A social prerequisite.** BAR discourages third-party autohosts by default
-   and asks to be contacted first. A private room is a weaker version of this
-   concern, not an exemption.
-
-Secrets it needs, none of which phase 1 uses: `SPADS_LOBBY_LOGIN`,
-`SPADS_LOBBY_PASSWORD`, `SPADS_OWNER_LOBBY_LOGIN`, `SPADS_REGISTRATION_EMAIL`,
-plus the room password.
-
-### 10.3 The botflag is now on the critical path
-
-Phase 1 did not care about this. The requested room does: **8 AI plus 8 human
-players is 16 slots**, and without a botflag a room is capped at 8 players plus
-spectators. Even if AI turn out not to count against the cap, 8 humans plus the
-host is already at it.
-
-So the question AGENTS.md records as blocking — *do AI count toward the
-8-player non-botflag cap?* — has to be answered before this is worth building,
-and the answer is very likely "request a botflag either way". Ask in
-`#teiserver-spads` on the BAR Discord.
+1. **Inbound UDP.** The cluster's only internet path is the router forward to
+   the HAProxy NodePorts (TCP). Players connect to the engine over UDP, which
+   ingress cannot carry, so the pod uses `hostNetwork: true` and listens on
+   8452/UDP on `mcgill-data`. **For players on the internet, the router must
+   forward UDP 8452 to `mcgill-data`** — configuration outside this
+   repository. Without it the room is visible and unjoinable. The address the
+   lobby sees for SPADS's outbound TCP connection must be the same public
+   address that forwards the UDP.
+2. **`hostNetwork` removes the pod network boundary.** NetworkPolicy does not
+   apply and the pod can reach everything on the node, including the shared
+   databases. Mitigated by running as non-root with all capabilities dropped,
+   and by SPADS binding its control port to loopback; not eliminated.
+3. **A long-running Deployment**: `Recreate`, no liveness probe, and a deploy
+   guard against live games (§8).
+4. **Lobby permissions.** Without a bot flag the lobby caps a room at 8
+   players. The owner reports the account is whitelisted to host bot servers;
+   whether it carries the bot flag is visible in SPADS's log at login (it warns
+   when it does not, `spads.pl:14043-14044`).
 
 ---
 
 ## 11. Risks and open questions
 
-Ordered by how much they could invalidate phase 1.
+Ordered by how much they could invalidate the work.
 
-**1. An all-AI match with no human players loses one allyteam immediately.**
-*Open, reproducible, cause unknown.* In every unattended run, every team in
-allyteam 0 is eliminated between frames 86 and 121 — roughly three seconds — and
-the other side is declared the winner. Ruled out by experiment, not argument:
+**1. Team games collapse: allyteam 0 is wiped out within ~5 seconds.**
+*Open; cause located, not fixed.* Reproduced 2026-09-26 on the official
+release. It happens whenever an allyteam holds two or more AI teams, and never
+in a 1v1:
 
-| Varied | Values tried | Result |
-| --- | --- | --- |
-| map | All That Glitters v2.2.3, Comet Catcher Remake 1.8 | no change |
-| `StartPosType` | 0 (fixed), 2 (choose-in-game) | no change |
-| start boxes | map default, even bands, explicit rects | no change |
-| team layout | blocked (0-3 vs 4-7), interleaved (evens vs odds) | no change; the dead side follows allyteam 0, not a faction |
-| spectator's team | 0, 1 | no change |
+| Run | Result |
+| --- | --- |
+| 1v1 SMRTBARb | full game, 18,455 frames, game over by elimination |
+| 2v2 SMRTBARb, 4v4 SMRTBARb, 4v4 stock BARb | allyteam 0 dead by frame 113–193 |
+| 4v4 with `draft_mode` removed, or `coop` removed, or blocked layout | no change |
 
-`deathmode=neverend` removes `game_end.lua` entirely (`:246`) and the match then
-runs indefinitely, which is what makes the measurements in
-[§7.4](#74-resources) possible. That also points at the likely culprit —
-`game_end.lua` deciding an allyteam is dead when there is no human player in the
-game at all — but that is a hypothesis, not a finding.
+The cause is in BAR's `luarules/gadgets/game_end.lua`:
 
-It matters for the CI harness, where there are never human players. It probably
-does **not** affect [§10](#10-phase-2-the-private-lobby-host), where humans are
-in the room. Resolve before trusting an unattended match's *result*; the
-resource numbers do not depend on it.
+- `playerQuitIsDead` is true for every game except a 1v1 (`:76`, cleared at
+  `:263`), which is why only team games fail.
+- In a team game an allyteam is wiped out when none of its teams is
+  "controlled" (`:128`). For an engine AI, "controlled" copies whether the
+  player hosting it is `active` (`:212`), and here that host is a spectator.
+- The check runs only for the allyteam of the player being evaluated
+  (`:214-217`). The only player is the spectator host, and it sits on team 0,
+  which is why only allyteam 0 dies.
 
-**2. Team statistics only exist for games that reach game over.** The recorder
-fills them in on the game-over path (`GameServer.cpp:313-322`), so a run cut
-short by the wall clock, or one using `deathmode=neverend`, has none.
-`scripts/demo_stats.py` reports this rather than showing zeros as if they were
-data. Combined with risk 1, this currently leaves no clean way to score an
-unattended match objectively.
+The fix is not in the AI. The likely levers are the host player's standing (not
+a spectator, or on its own allyteam) or an upstream change to `game_end.lua`.
+The game archive must not be modified here (AGENTS fact 3). Until it is
+resolved, the cluster's default match is a 1v1 (`match.env`), so each deploy's
+match is a real game. It probably does not affect SPADS lobby games, where
+human players are the active hosts of their own teams, but that is unverified.
 
-**3. Resource sizing is measured but on a desktop, not the node.**
-[§7.4](#74-resources). `mcgill-data` also carries eight database instances.
-Check allocatable capacity before prod.
+**2. Team statistics are missing from replays.** `demo_stats.py` finds no team
+statistics even in a 1v1 that reached game over by elimination, and reports
+`teams 1` for a two-team game — its demo parsing likely predates this engine's
+format. The runner's `result.json` (winners, frames, exit reason) is unaffected.
 
-**4. Build time.** A cold engine build is long. The ccache key is arranged so
-an AI-only change is cheap, but a cold cache — or an engine pin bump — is not.
+**3. SPADS against the real lobby is unverified** (§10.1): login, TLS
+certificate acceptance, `rapid://byar:test` resolution at battle open, and a
+bots-only `!forceStart`.
 
-**5. Engine/AI version coupling.** Mitigated structurally by building both from
-one tree and by the `--list-skirmish-ais` smoke test, but an engine pin bump
-still needs a matching AI.
+**4. Router UDP forward** for internet players is outside this repository (§10.2).
 
-**6. Content drift.** `byar:test` moves. Pin `byar:git:<sha>` for anything whose
-results you intend to compare over time.
+**5. Resource sizing is from a desktop.** [§7.5](#75-resources). `mcgill-data`
+also carries the cluster's databases; check allocatable capacity before prod.
+Match and SPADS together request 4 cores and 16 GiB.
 
-**7. Disk growth.** Replays and infologs accumulate on the runs volume with no
-pruning yet. Tens of MB per match adds up; a full volume fails silently-ish.
+**6. Engine/AI coupling.** SMRTBARb is built against a newer engine commit than
+the release it runs on (§3.2). It works today; an engine bump needs a matching
+AI release, checked by the pipeline's smoke test.
 
-**8. Namespace naming.** The cluster standard's own references disagree
-(`<project>-<env>` vs `mcgill-<service>-<env>`). `barhost-<env>` is assumed.
+**7. Disk growth.** Replays and logs accumulate on the output volume with no
+pruning. Tens of MB per match.
 
-**9. The botflag now blocks phase 2.** *Do AI count toward the 8-player
-non-botflag lobby cap?* Still unresolved, and no longer hypothetical: the
-requested room is 8 AI plus 8 humans, so even if AI are exempt, 8 humans plus
-the host is already at the cap. See [§10.3](#103-the-botflag-is-now-on-the-critical-path).
-It does **not** affect phase 1, which never touches the lobby server.
+**8. Content drift.** `byar:test` moves; pin `byar:git:<sha>` for comparable
+benchmarks. Match Job and SPADS may run `pr-downloader` against the content
+volume at the same time.
+
+**9. Shared WireGuard peer.** If the deploy job reuses another repository's
+WireGuard key and address, concurrent runs of both knock each other off.
 
 ---
 
 ## Related
 
 - `../rjm.bar.docs/knowledge/` — game and unit facts
-- `../s3k-CircuitAI/doc/roles/` — BARb AI role behaviour
-- [`RecoilEngine docker-build-v2`](https://github.com/beyond-all-reason/RecoilEngine/tree/master/docker-build-v2) — the pinned build container this uses
-- [`Yaribz/SPADS`](https://github.com/Yaribz/SPADS) — phase 2's autohost
+- `../s3k-CircuitAI/doc/release.md` — how SMRTBARb releases are built and laid out
+- [`Yaribz/SPADS`](https://github.com/Yaribz/SPADS) — the autohost
 - [`spads_config_bar`](https://github.com/beyond-all-reason/spads_config_bar) — BAR's reference SPADS configuration
-- [`BAR-Devtools`](https://github.com/beyond-all-reason/BAR-Devtools) — local Teiserver + SPADS + client, for phase 2 testing
+- [`BAR-Devtools`](https://github.com/beyond-all-reason/BAR-Devtools) — local Teiserver + SPADS + client, for lobby testing

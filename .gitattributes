@@ -1,0 +1,8 @@
+# Everything here runs inside Linux containers or on Linux CI runners. A CRLF
+# shell script fails there with "bad interpreter: /bin/bash^M", so keep LF in the
+# working tree regardless of core.autocrlf.
+* text=auto eol=lf
+*.7z binary
+*.gz binary
+*.zip binary
+*.sdfz binary

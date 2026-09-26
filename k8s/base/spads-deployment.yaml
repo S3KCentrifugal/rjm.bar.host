@@ -1,0 +1,128 @@
+# SPADS autohost on BAR's lobby server, hosting Skirmish AI bots inside its own
+# spring-headless process so people can play with or against custom AIs.
+#
+# Runs only when the rjm-host-secrets Secret exists: the deploy pipeline
+# replaces the replica marker below with 0 otherwise.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rjm-host-spads
+  labels:
+    app.kubernetes.io/name: rjm-host-spads
+    app.kubernetes.io/component: lobby-autohost
+    app.kubernetes.io/part-of: rjm-host
+spec:
+  replicas: 1 # SPADS_REPLICAS
+  # Recreate, never RollingUpdate: with hostNetwork a surge pod would collide
+  # on the game port, and there is only ever one lobby account to log in with.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rjm-host-spads
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rjm-host-spads
+        app.kubernetes.io/component: lobby-autohost
+        app.kubernetes.io/part-of: rjm-host
+      annotations:
+        # Changes when spads.env or docker/spads/ change, so the pod restarts
+        # for a config change and only then (set by the deploy pipeline).
+        rjm-host/config-hash: SPADS_CONFIG_HASH
+    spec:
+      serviceAccountName: rjm-host
+      imagePullSecrets:
+        - name: mcgill-k8s-pull-2026
+      # Players connect straight to the engine over UDP; there is no UDP path
+      # through the cluster's ingress, so the pod uses the node's network.
+      # NetworkPolicy does not apply to it (design section 10.2).
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/hostname: mcgill-data
+      # SPADS saves its state on SIGTERM; give a running game time to be
+      # recorded rather than cutting it off at the default 30s.
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: fetch-content
+          image: ghcr.io/s3kcentrifugal/rjm-host:latest
+          args: ["fetch-content"]
+          envFrom:
+            - configMapRef:
+                name: rjm-host-spads-config
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: "200m", memory: "256Mi" }
+            limits: { cpu: "2000m", memory: "1Gi" }
+          volumeMounts:
+            - name: data
+              mountPath: /bar/data
+      containers:
+        - name: spads
+          image: ghcr.io/s3kcentrifugal/rjm-host:latest
+          args: ["spads"]
+          envFrom:
+            - configMapRef:
+                name: rjm-host-spads-config
+            - secretRef:
+                name: rjm-host-secrets
+          env:
+            - name: BARHOST_FETCH_CONTENT
+              value: "0"
+          ports:
+            - name: game
+              containerPort: 8452
+              protocol: UDP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # Ready once SPADS holds its connection to the lobby server: an
+          # ESTABLISHED TCP socket to port 8200 (0x2008, state 01). There is
+          # deliberately no liveness probe -- a restart ends any game in
+          # progress, and SPADS reconnects to the lobby by itself.
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  grep -qE '^ *[0-9]+: [0-9A-F]+:[0-9A-F]+ [0-9A-F]+:2008 01 '
+                  /proc/net/tcp /proc/net/tcp6
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            failureThreshold: 3
+          # Same sizing as the match Job: a lobby game is at most 16 teams, which
+          # measured ~2.9 cores and ~6.3 GiB (design section 7.4).
+          resources:
+            requests: { cpu: "2000m", memory: "8Gi" }
+            limits: { cpu: "6000m", memory: "16Gi" }
+          volumeMounts:
+            - name: data
+              mountPath: /bar/data
+            - name: out
+              mountPath: /bar/out
+            - name: custom-ai
+              mountPath: /bar/custom-ai
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rjm-host-data-pvc
+        - name: out
+          persistentVolumeClaim:
+            claimName: rjm-host-out-pvc
+        - name: custom-ai
+          persistentVolumeClaim:
+            claimName: rjm-host-ai-pvc

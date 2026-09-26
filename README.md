@@ -1,94 +1,182 @@
 # rjm.bar.host
 
-Containerised Beyond All Reason headless host, deployed to the private k3s
-cluster by GitHub Actions.
+A reusable **Beyond All Reason headless host** container, and its deployment to
+the private k3s cluster.
 
-Its job is to make AI development fast: change the AI, and CI builds it,
-plays a full match against itself in a container, and hands back a replay and a
-result — without anyone setting up a machine.
+One image, `ghcr.io/s3kcentrifugal/rjm-host`, does two jobs:
+
+| Mode | What it does | Where it runs |
+| --- | --- | --- |
+| `match` | an unattended AI-vs-AI simulation, played to game over at high speed, leaving a replay, logs and `result.json` | the cluster (a Job), any Docker host, or a GitHub runner via the reusable `simulate` workflow |
+| `spads` | a [SPADS](https://github.com/Yaribz/SPADS) autohost on BAR's lobby server that hosts Skirmish AI bots in its own process, so people can play with or against custom AIs | the cluster (a Deployment) |
+
+Both run BAR's **official** Linux engine release (`recoil_2026.07.04`, pinned in
+[`config/engine.pin`](config/engine.pin)), so what they host is exactly what
+players run. Custom AIs are installed at start, not baked in.
 
 Design: [`docs/autohost-design.md`](docs/autohost-design.md). Agent and
 contributor rules: [`AGENTS.md`](AGENTS.md).
 
-## What this is
+## Container layout
 
-A Kubernetes `Job` that runs one AI-vs-AI Beyond All Reason match to completion
-and reports the outcome.
+| Path | Windows install equivalent | Content |
+| --- | --- | --- |
+| `/bar/engine/recoil_2026.07.04/` (`$BAR_ENGINE_DIR`) | `data\engine\recoil_2026.07.04\` | the engine, from the image |
+| `$BAR_ENGINE_DIR/AI/Skirmish/` | `data\engine\recoil_2026.07.04\AI\Skirmish\` | stock AIs (`BARb`, `CircuitAI`, `NullAI`) plus custom ones installed at start |
+| `/bar/data` (volume) | `data\` (games, maps, pool, packages) | game and maps, fetched by pr-downloader; persist it |
+| `/bar/custom-ai` (volume, optional) | — | custom AI folders, each `<Name>/<version>/`, linked into `AI/Skirmish` at start |
+| `/bar/out` (volume) | — | **everything a run produces**, see below |
 
-The engine and the Skirmish AI are compiled **from a single source tree** in
-Recoil's own pinned build container. That is not a convenience: CircuitAI's
-`CMakeLists.txt` reaches into the engine tree for its sources, and its README
-records that mismatched `libSkirmishAI.so` / `libAIInterface.so` produce an AI
-that is silently dead at match start. Building both together makes that
-impossible rather than merely unlikely.
+### Custom AIs
 
-`engine-dedicated` compiles no `ExternalAI` sources and cannot host a Skirmish
-AI, so the headless build is required.
+Any of these, combined:
 
-There is no lobby server, no SPADS, no inbound UDP and no exposed port. A
-public player-facing autohost is designed but deliberately not built — see
-design §10 for what it would cost.
+- **Mount a folder** at `/bar/custom-ai/<Name>` (or straight onto
+  `$BAR_ENGINE_DIR/AI/Skirmish/<Name>`). Same layout as a Windows install:
+  `<Name>/<version>/{AIInfo.lua, AIOptions.lua, libSkirmishAI.so, config/, script/}`.
+- **`BARHOST_AI_ARCHIVES`**: `.tar.gz`/`.zip` URLs, local archive paths, or
+  `github:OWNER/REPO@TAG[#GLOB]` (TAG may be `latest` or `newest`; GLOB defaults
+  to `*-linux.tar.gz`). Example: `github:S3KCentrifugal/CircuitAI@newest`.
 
-## The loop
+A folder copied from a Windows install has `SkirmishAI.dll`, which Linux cannot
+load. It is **refused with an error** rather than silently skipped: use the
+AI's `-linux` build (CircuitAI's release workflow publishes one per release).
+
+### What lands in `/bar/out`
 
 ```
-push to the AI repo
-  -> repository_dispatch: ai-updated
-    -> engine-build   (cached layer; only rebuilt when the engine pin moves)
-    -> ai-build       (recompiles the AI alone against that exact engine)
-    -> runtime image  -> GHCR
-      -> Job on mcgill-data: fetch content, play the match
-        -> replay + result.json on the runs volume
+matches/<run-id>/
+  result.json            winners, exit reason, engine + AI build, timings
+  infolog.txt            the engine's log, including every Skirmish AI line
+  engine-console.log     engine stdout/stderr, including what precedes infolog
+  demos-server/*.sdfz    the server replay (open it in BAR to watch)
+  demos/*.sdfz           the host client's replay
+  script.txt             exactly what was played
+  springsettings.cfg     exactly how the engine was configured
+spads/
+  log/                   SPADS logs
+  demos/                 replays of every lobby game
+  infolog*.txt           engine logs of every lobby game
 ```
 
-A match runs at an elevated simulation speed, so it finishes in a fraction of
-real time.
+`<run-id>` is `$BARHOST_RUN_ID` (the pod name in Kubernetes) or a timestamp.
+
+## Run it locally
+
+```bash
+docker run --rm \
+  -v bar-data:/bar/data -v "$PWD/out:/bar/out" \
+  -e BARHOST_AI_ARCHIVES=github:S3KCentrifugal/CircuitAI@newest \
+  -e BARHOST_AI_SHORTNAME=SMRTBARb -e BARHOST_AI_COUNT=2 \
+  -e "BARHOST_MAP=All That Glitters v2.2.3" \
+  ghcr.io/s3kcentrifugal/rjm-host:test match
+```
+
+The first run downloads the game (~3.5 GB) into the `bar-data` volume. Every
+setting is documented in [`k8s/base/match.env`](k8s/base/match.env). Other
+entrypoint commands: `list-ais`, `install-ai`, `fetch-content`, `spads`, or any
+shell command.
+
+## Using the image from another repository
+
+The package is **private**. For another repository to pull it:
+
+1. GitHub → your profile → Packages → `rjm-host` → Package settings →
+   **Manage Actions access** → add the repository (role: Read).
+2. In that repository's workflow, log in to `ghcr.io` with its own
+   `GITHUB_TOKEN` (`permissions: packages: read`), then `docker run` as above.
+
+Or call the reusable workflow, which runs a simulation on a GitHub runner and
+uploads the whole output directory as an artifact:
+
+```yaml
+jobs:
+  sim:
+    uses: S3KCentrifugal/rjm.bar.host/.github/workflows/simulate.yml@main
+    permissions: { contents: read, packages: read }
+    with:
+      ai_archives: github:S3KCentrifugal/CircuitAI@v1.961-test
+      ai_shortname: SMRTBARb
+      ai_count: 2
+```
+
+A calling repository must also be allowed to use this private repository's
+workflows (Settings → Actions → General → Access: "Accessible from repositories
+owned by the user"; already set).
+
+Image tags: `<commit sha>` (immutable), `test` and `prod` (what each environment
+runs), and on prod builds `recoil-<engine version>` and `latest`.
+
+## Cluster deployment
+
+Namespace `rjm-host-<env>` on `mcgill-data`, deployed by
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) on push to the
+`test` or `prod` branch:
+
+| Object | Purpose |
+| --- | --- |
+| Job `rjm-host-match` | one simulation per deploy; the deploy waits for it and fails if it fails |
+| Deployment `rjm-host-spads` | the lobby autohost; held at 0 replicas until `rjm-host-secrets` exists |
+| PVCs `rjm-host-{data,out,ai}-pvc` | content, output, custom AIs, under `/mnt/data2/k8s-volumes/rjm-host/<env>/` |
+
+A deploy never interrupts a game: it refuses while the match Job is running, and
+refuses to restart SPADS while a lobby game is in progress (dispatch with
+`interrupt_lobby` to override).
+
+### Cluster secrets
+
+The image publishes without them; the deploy job is skipped (with a warning)
+until they are set on this repository. They are the same values the
+`mcgill-software` repositories use:
+
+```bash
+gh secret set WG_PRIVATE_KEY       -R S3KCentrifugal/rjm.bar.host
+gh secret set WG_CLIENT_ADDRESS    -R S3KCentrifugal/rjm.bar.host
+gh secret set WG_SERVER_PUBLIC_KEY -R S3KCentrifugal/rjm.bar.host
+gh secret set WG_ENDPOINT          -R S3KCentrifugal/rjm.bar.host
+gh secret set WG_ALLOWED_IPS       -R S3KCentrifugal/rjm.bar.host
+gh secret set KUBE_CONFIG_DATA     -R S3KCentrifugal/rjm.bar.host   # base64 kubeconfig
+gh secret set GHCR_PULL_TOKEN      -R S3KCentrifugal/rjm.bar.host   # PAT: read:packages
+```
+
+`GHCR_PULL_TOKEN` must be able to read **both** `ghcr.io/mcgill-software/mcgill-deployer`
+(the deploy job's container) and this account's private `rjm-host` package (the
+cluster's pull secret) — a classic PAT with `read:packages` from an account that
+can see both.
+
+The WireGuard peer must be one not already in use by another runner: two
+tunnels with the same private key and address knock each other off.
+
+### The lobby host (SPADS)
+
+1. Create the lobby credentials once per namespace (never committed) from
+   [`k8s/base/secrets.yaml.example`](k8s/base/secrets.yaml.example):
+   the whitelisted autohost account, its password, **your** account as owner,
+   and the room password. Then redeploy; SPADS starts and joins the lobby.
+2. For players outside your network, forward **UDP 8452** on the router to
+   `mcgill-data`. Without it the room is visible but nobody can join.
+3. In the room (or by private message to the autohost), as owner:
+   - `!addBot Bot1 0 SMRTBARb` — add a server-side bot (`SPADS_ALLOWED_AIS`
+     lists which AIs are allowed)
+   - `!force %Bot1 bonus 50` — +50% resource bonus; `!force %Bot1 team 1` — move it
+   - `!forceStart` — start (SPADS never auto-starts a room with bots in it)
+
+Room settings — name, map, allowed AIs, AI releases — are in
+[`k8s/base/spads.env`](k8s/base/spads.env). Every game's replay, infolog and
+start script land under `spads/` on the output volume.
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `docker/runtime/Dockerfile` | multi-stage build: engine → AI → runtime image; fails the build if the AI will not load |
-| `scripts/build-engine-ai.sh` | `docker buildx` wrapper for local builds and for extracting the install tree |
-| `scripts/run_match.py` | generates the GameSetup script, drives the match over the Autohost Protocol, exits when it ends |
-| `scripts/measure_match.py` | runs a match and samples CPU, RSS and threads — how the resource numbers were derived |
-| `scripts/demo_stats.py` | per-team units built/killed, metal and damage from a replay — the objective scoreboard for comparing AI builds |
-| `config/engine.pin` | the engine commit and AI ref everything is built from |
-| `k8s/base/`, `k8s/overlays/{test,prod}/` | Kustomize Job, PVCs, PVs |
-| `.github/workflows/deploy.yml` | `set-env` → `build` → `deploy` |
-
-## Status
-
-Phase 1 is implemented and not yet run on the cluster.
-
-| Stage | State |
-| --- | --- |
-| Design document | Done |
-| Multi-stage build | Written, not yet run in CI |
-| Match runner | **Exercised against the real engine**, see below |
-| Runtime image | Written, not yet built |
-| Kustomize base + overlays | Written; both overlays render |
-| Deploy workflow | Written, not yet run |
-| First real match on the cluster | **Not done** |
-
-## Before the first run
-
-- `AI_REPO_TOKEN` — a PAT that can read the private AI repository. The
-  workflow's own `GITHUB_TOKEN` cannot, and this is the one secret beyond the
-  cluster's standard seven.
-- Check `kubectl describe node mcgill-data` for allocatable CPU and memory
-  against what is already requested. The node also runs the shared databases,
-  and the match's resource numbers are an unmeasured starting point.
-- Decide whether the namespace should be `barhost-<env>` or
-  `mcgill-barhost-<env>`; the cluster standard's own references disagree.
-
-## Related repositories
-
-Siblings under `C:\bardev`.
-
-| Path | What it is |
-| --- | --- |
-| `../s3k-CircuitAI` | the BARb/CircuitAI fork this builds and tests |
-| `../rjm.bar.docs` | shared BAR and Recoil game knowledge |
-| `../bar-RecoilEngine` | engine source; read-only reference |
-| `../bar-Beyond-All-Reason` | game source; read-only reference |
+| `docker/runtime/Dockerfile` | engine release → runtime image (+ SPADS) |
+| `docker/runtime/entrypoint.sh` | `match`, `spads`, `install-ai`, `list-ais`, `fetch-content` |
+| `docker/spads/` | SPADS configuration templates and launcher |
+| `scripts/run_match.py` | writes the game script, drives the match over the Autohost Protocol, exits at game over |
+| `scripts/install_ai.py` | installs custom AIs into `AI/Skirmish` |
+| `scripts/smoke_test.sh` | the checks CI runs before publishing an image |
+| `scripts/demo_stats.py` | per-team statistics from a replay |
+| `scripts/measure_match.py` | CPU/RSS sampling behind the resource numbers |
+| `config/engine.pin` | engine release version and checksum |
+| `k8s/base/`, `k8s/overlays/{test,prod}/` | Kustomize manifests |
+| `.github/workflows/` | `deploy` (publish + deploy), `ci` (checks), `simulate` (reusable) |

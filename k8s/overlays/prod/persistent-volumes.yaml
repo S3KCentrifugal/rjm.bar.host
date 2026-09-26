@@ -1,18 +1,23 @@
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: barhost-spring-data-pv-prod
+  name: rjm-host-data-pv-prod
+  labels:
+    app.kubernetes.io/name: rjm-host
+    app.kubernetes.io/component: data
+    app.kubernetes.io/part-of: rjm-host
+    environment: prod
 spec:
   capacity:
-    storage: 20Gi
+    storage: 40Gi
   accessModes: [ReadWriteOnce]
   persistentVolumeReclaimPolicy: Retain
   storageClassName: data2
   claimRef:
-    namespace: barhost-prod
-    name: barhost-spring-data-pvc
+    namespace: rjm-host-prod
+    name: rjm-host-data-pvc
   local:
-    path: /mnt/data2/k8s-volumes/barhost/prod/spring-data
+    path: /mnt/data2/k8s-volumes/rjm-host/prod/data
   nodeAffinity:
     required:
       nodeSelectorTerms:
@@ -24,18 +29,51 @@ spec:
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: barhost-runs-pv-prod
+  name: rjm-host-out-pv-prod
+  labels:
+    app.kubernetes.io/name: rjm-host
+    app.kubernetes.io/component: out
+    app.kubernetes.io/part-of: rjm-host
+    environment: prod
 spec:
   capacity:
-    storage: 20Gi
+    storage: 50Gi
   accessModes: [ReadWriteOnce]
   persistentVolumeReclaimPolicy: Retain
   storageClassName: data2
   claimRef:
-    namespace: barhost-prod
-    name: barhost-runs-pvc
+    namespace: rjm-host-prod
+    name: rjm-host-out-pvc
   local:
-    path: /mnt/data2/k8s-volumes/barhost/prod/runs
+    path: /mnt/data2/k8s-volumes/rjm-host/prod/out
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [mcgill-data]
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: rjm-host-ai-pv-prod
+  labels:
+    app.kubernetes.io/name: rjm-host
+    app.kubernetes.io/component: ai
+    app.kubernetes.io/part-of: rjm-host
+    environment: prod
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: data2
+  claimRef:
+    namespace: rjm-host-prod
+    name: rjm-host-ai-pvc
+  local:
+    path: /mnt/data2/k8s-volumes/rjm-host/prod/ai
   nodeAffinity:
     required:
       nodeSelectorTerms:

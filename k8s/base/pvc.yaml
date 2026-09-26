@@ -1,32 +1,54 @@
+# Three local volumes on mcgill-data, shared by the match Job and SPADS. Both
+# run on the one node, so ReadWriteOnce does not stop them sharing.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: barhost-spring-data-pvc
+  name: rjm-host-data-pvc
   labels:
-    app.kubernetes.io/name: barhost-spring-data
-    app.kubernetes.io/part-of: barhost
+    app.kubernetes.io/name: rjm-host
+    app.kubernetes.io/component: content
+    app.kubernetes.io/part-of: rjm-host
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: data2
   resources:
     requests:
-      # Pinned game (rapid pool) plus a curated test map set. This is a
-      # deliberately small fraction of the ~22GB a full map mirror would need:
-      # an AI benchmark wants a fixed, comparable map set, not every map.
-      storage: 20Gi
+      # BAR's rapid pool plus a curated map set: a small fraction of a full map
+      # mirror. SPADS downloads maps a room switches to, so this grows.
+      storage: 40Gi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: barhost-runs-pvc
+  name: rjm-host-out-pvc
   labels:
-    app.kubernetes.io/name: barhost-runs
-    app.kubernetes.io/part-of: barhost
+    app.kubernetes.io/name: rjm-host
+    app.kubernetes.io/component: output
+    app.kubernetes.io/part-of: rjm-host
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: data2
   resources:
     requests:
-      # Replays and infologs, one directory per run. A single 8-AI match demo
-      # is tens of MB; prune this on a schedule or it will fill.
-      storage: 20Gi
+      # Everything a run produces: matches/<run>/{infolog.txt, engine-console.log,
+      # demos/*.sdfz, result.json, script.txt, AI logs} and spads/{log,demos,...}.
+      # Tens of MB per match; nothing prunes it yet.
+      storage: 50Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rjm-host-ai-pvc
+  labels:
+    app.kubernetes.io/name: rjm-host
+    app.kubernetes.io/component: custom-ai
+    app.kubernetes.io/part-of: rjm-host
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: data2
+  resources:
+    requests:
+      # Custom AI folders, each <Name>/<version>/ with a Linux libSkirmishAI.so.
+      # Copied in by hand (kubectl cp) and linked into the engine's
+      # AI/Skirmish at every start.
+      storage: 5Gi

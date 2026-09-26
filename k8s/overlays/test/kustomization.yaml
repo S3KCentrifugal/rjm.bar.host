@@ -1,33 +1,41 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: barhost-test
+namespace: rjm-host-test
 
 resources:
   - namespace.yaml
   - ../../base/
   - persistent-volumes.yaml
 
+# One reusable image for every environment (design section 9): the tag, not
+# the name, says which build runs here. CI replaces IMAGE_TAG with the commit.
 images:
-  - name: ghcr.io/S3KCentrifugal/barhost-match
-    newName: ghcr.io/S3KCentrifugal/barhost-match-test
+  - name: ghcr.io/s3kcentrifugal/rjm-host
     newTag: IMAGE_TAG
 
 patches:
-  # Bind each claim to this environment's PV explicitly. storageClassName data2
-  # is WaitForFirstConsumer with no provisioner, so without both this and the
-  # PV's claimRef a claim can bind across environments.
+  # Bind each claim to this environment's PV. data2 is WaitForFirstConsumer
+  # with no provisioner, so without this and the PV's claimRef a claim can bind
+  # across environments.
   - target:
       kind: PersistentVolumeClaim
-      name: barhost-spring-data-pvc
+      name: rjm-host-data-pvc
     patch: |-
       - op: add
         path: /spec/volumeName
-        value: barhost-spring-data-pv-test
+        value: rjm-host-data-pv-test
   - target:
       kind: PersistentVolumeClaim
-      name: barhost-runs-pvc
+      name: rjm-host-out-pvc
     patch: |-
       - op: add
         path: /spec/volumeName
-        value: barhost-runs-pv-test
+        value: rjm-host-out-pv-test
+  - target:
+      kind: PersistentVolumeClaim
+      name: rjm-host-ai-pvc
+    patch: |-
+      - op: add
+        path: /spec/volumeName
+        value: rjm-host-ai-pv-test

@@ -1,0 +1,19 @@
+# Default-deny ingress for every pod in the namespace. Nothing here serves
+# traffic to other pods: the match runner's sockets are loopback, and SPADS runs
+# with hostNetwork, which NetworkPolicy does not govern (see design section 10.2).
+#
+# Egress stays open on purpose. pr-downloader fetches the game and maps from
+# BAR's CDNs, install_ai.py fetches AI releases from GitHub, and SPADS holds an
+# outbound connection to the lobby server -- none of them have fixed addresses
+# a policy could name.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rjm-host-default-deny-ingress
+  labels:
+    app.kubernetes.io/name: rjm-host
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/part-of: rjm-host
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]

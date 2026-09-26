@@ -3,22 +3,28 @@ kind: Kustomization
 
 resources:
   - rbac.yaml
+  - network-policies.yaml
   - pvc.yaml
-  - job.yaml
+  - match-job.yaml
+  - spads-deployment.yaml
 
 configMapGenerator:
-  - name: barhost-match-config
+  - name: rjm-host-match-config
     envs:
       - match.env
+  - name: rjm-host-spads-config
+    envs:
+      - spads.env
 
-# The ConfigMap is referenced by name from the Job's envFrom, and a Job's pod
-# template is immutable once created, so a rolling hash suffix would strand the
-# Job against a ConfigMap that no longer exists.
+# The match Job references its ConfigMap by name and a Job's pod template is
+# immutable, so a hash suffix would strand a finished Job against a ConfigMap
+# that no longer exists. SPADS picks config changes up because the pipeline
+# restarts it when spads.env changes.
 generatorOptions:
   disableNameSuffixHash: true
 
 labels:
   - includeSelectors: false
     pairs:
-      app.kubernetes.io/part-of: barhost
+      app.kubernetes.io/part-of: rjm-host
       app.kubernetes.io/managed-by: kustomize

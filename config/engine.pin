@@ -1,24 +1,18 @@
-# The RecoilEngine commit that the engine and the AI are both built from.
+# The Recoil engine release the rjm-host image is built from.
 #
-# This single value is what keeps libSkirmishAI.so and libAIInterface.so
-# ABI-compatible (CircuitAI README:25). Changing it is an engine upgrade and
-# must be a reviewed diff, never an incidental drift -- a mismatch produces an
-# AI that is dead at match start with no useful error.
+# This is BAR's *official* Linux build, downloaded and checksum-verified, not a
+# source build: a lobby host must run the same engine as the players who join
+# it, and a simulation result is only meaningful against what people play.
+# It must match the engine the BAR launcher currently installs
+# (data/engine/recoil_<version>/ on a player's machine).
 #
-# Verified against this tree: rts/builds/dedicated/CMakeLists.txt compiles zero
-# ExternalAI sources, so only the headless build can host a Skirmish AI.
-ENGINE_REPO=beyond-all-reason/RecoilEngine
-ENGINE_REF=92efda5e60fb6df54a8f17a87e4f4cdb4aa2de31
-
-# The AI under test. Overridable per run via workflow_dispatch.
-AI_REPO=S3KCentrifugal/CircuitAI
-AI_REF=smrt
-
-# Directory name under AI/Skirmish/. Decides the CMake target name and the
-# installed path, and must match `shortName` in the AI's data/AIInfo.lua.
-AI_DIR_NAME=BARb
-
-# The AI's version string. Comes from the AI's VERSION file and is the literal
-# word "stable" for this fork, not a number. The image build asserts that
-# exactly this shortName/version pair is loadable before it will publish.
-AI_VERSION=stable
+# Custom Skirmish AIs are built elsewhere (the AI's own repository, e.g.
+# S3KCentrifugal/CircuitAI's release workflow) and installed at container start.
+# An AI's libSkirmishAI.so should be built against this engine's headers; see
+# design section 3 for what a mismatch looks like.
+#
+# Changing these is an engine upgrade: a reviewed diff, never incidental drift.
+# ENGINE_SHA256 is the sha256 of recoil_<version>_amd64-linux.7z from
+# https://github.com/beyond-all-reason/RecoilEngine/releases/tag/<version>.
+ENGINE_VERSION=2026.07.04
+ENGINE_SHA256=9824c2c38124e4b90a9b5f7c4e7200c3ea6503c0bd4bff0e0ff46212ec29dcab
