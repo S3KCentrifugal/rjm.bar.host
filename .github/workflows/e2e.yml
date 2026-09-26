@@ -72,12 +72,19 @@ jobs:
           docker run --rm -v "$PWD/content:/src" -v rjm-bar-data:/bar/data --user 0 --entrypoint sh rjm-host:e2e \
             -c 'cp -a /src/. /bar/data/ 2>/dev/null; chown -R 10001:10001 /bar/data'
 
+      - name: Runner resources
+        run: nproc; free -m; df -h / | tail -1
+
       - name: End-to-end test
         env:
           E2E_SURVIVE_SECONDS: ${{ inputs.survive_seconds || 120 }}
           # Two engines and eight AIs loading on a small runner: allow for slow loading
           # before the survival window starts.
           E2E_PREGAME_ALLOWANCE: 300
+          # A runner has ~16 GB; two engines plus eight AIs loading at once got the
+          # host engine OOM-killed (signal 9). Two bots exercise the same flow; the
+          # full 8-bot run is the local default (docs/testing.md).
+          E2E_BOTS: 2
           E2E_ARTIFACTS: ${{ github.workspace }}/e2e-artifacts
         run: tests/e2e/run.sh rjm-host:e2e
 

@@ -8,6 +8,7 @@
 #   E2E_DATA_VOLUME   docker volume with BAR content (default rjm-bar-data);
 #                     filled on first use (~3.5 GB), reused after
 #   E2E_AI            AI shortName for the bots (default SMRTBARb)
+#   E2E_BOTS          size of the bot team (default 8; CI uses 2 to fit a runner's memory)
 #   E2E_AI_ARCHIVES   where it comes from (default github:S3KCentrifugal/CircuitAI@newest;
 #                     set empty with E2E_AI=BARb to use the engine's stock AI, fully offline)
 #   E2E_SURVIVE_SECONDS  game time the bot team must survive (default 120)
@@ -25,6 +26,7 @@ IMAGE="${1:-rjm-host:dev}"
 HERE="$(cd "$(dirname "$0")" && { pwd -W 2> /dev/null || pwd; })"   # pwd -W: a Windows path for docker.exe under Git Bash
 DATA="${E2E_DATA_VOLUME:-rjm-bar-data}"
 AI="${E2E_AI:-SMRTBARb}"
+BOTS="${E2E_BOTS:-8}"
 AI_ARCHIVES="${E2E_AI_ARCHIVES-github:S3KCentrifugal/CircuitAI@newest}"
 ARTIFACTS="${E2E_ARTIFACTS:-$PWD/e2e-artifacts}"
 mkdir -p "$ARTIFACTS"
@@ -81,7 +83,7 @@ docker create --name "$SPADS" --network "$NET" \
 	-e SPADS_GAME=rapid://byar:test \
 	-e "SPADS_ALLOWED_AIS=$AI" \
 	-e "SPADS_LOCAL_BOTS=${AI}1 0 $AI;${AI}2 1 $AI;${AI}3 0 $AI;${AI}4 1 $AI;${AI}5 0 $AI;${AI}6 1 $AI;${AI}7 0 $AI;${AI}8 1 $AI" \
-	-e SPADS_AUTO_ADD_BOTS=8 \
+	-e "SPADS_AUTO_ADD_BOTS=$BOTS" \
 	-e "BARHOST_AI_ARCHIVES=$AI_ARCHIVES" -e BARHOST_FETCH_CONTENT=0 \
 	-e AUTOPILOT_BOT_BONUS=50 -e AUTOPILOT_START_DELAY=5 -e AUTOPILOT_PREGAME_FORCE=30 \
 	-e SPADS_SPRING_CONFIG=/tmp/e2e-springsettings.cfg \
@@ -92,7 +94,7 @@ docker start "$SPADS" > /dev/null
 log "starting the fake lobby and scripted players ($DRIVER)"
 docker create --name "$DRIVER" --network "$NET" \
 	-v "$DATA:/bar/data:ro" \
-	-e "E2E_AI=$AI" -e E2E_BOTS=8 -e E2E_BONUS=50 -e "E2E_MAP=$MAP1" \
+	-e "E2E_AI=$AI" -e "E2E_BOTS=$BOTS" -e E2E_BONUS=50 -e "E2E_MAP=$MAP1" \
 	-e "E2E_SURVIVE_SECONDS=${E2E_SURVIVE_SECONDS:-120}" \
 	-e "E2E_PREGAME_ALLOWANCE=${E2E_PREGAME_ALLOWANCE:-75}" \
 	--entrypoint python3 "$IMAGE" /tmp/lobby_e2e.py --serve > /dev/null
@@ -116,7 +118,7 @@ if [ "$FAILED" = 0 ]; then
 	log "control socket: status"
 	STATUS="$(docker exec "$SPADS" spadsctl status)" || fail "spadsctl status"
 	grep -q '"battleOpen": true' <<< "$STATUS" || fail "status does not show the room open"
-	[ "$(grep -c '"ai": "'"$AI" <<< "$STATUS")" -ge 8 ] || fail "status does not list 8 $AI bots"
+	[ "$(grep -c '"ai": "'"$AI" <<< "$STATUS")" -ge "$BOTS" ] || fail "status does not list $BOTS $AI bots"
 
 	log "control socket: change the map"
 	docker exec "$SPADS" spadsctl spads map "$MAP2" > /dev/null || fail "spadsctl spads map"

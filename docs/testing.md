@@ -94,6 +94,11 @@ Then, against the live room, through the control socket:
 - the socket is owner-only (no group or other access) and owned by the container user;
 - both games' logs were archived and a replay recorded.
 
+**In CI** (`e2e` workflow) the same scenario runs with `E2E_BOTS=2` and
+`E2E_PREGAME_ALLOWANCE=300`. A GitHub runner (~16 GB) could not hold two full
+engines plus eight AIs while loading: the host engine was OOM-killed with
+signal 9. Locally the default is the full 8 bots.
+
 Options: `E2E_AI=BARb E2E_AI_ARCHIVES=` for the stock AI (no GitHub
 download), `E2E_SURVIVE_SECONDS`, `E2E_KEEP=1` to leave the containers up,
 `E2E_ARTIFACTS` for where logs go. Artifacts: the lobby transcript,
