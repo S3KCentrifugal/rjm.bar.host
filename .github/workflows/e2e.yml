@@ -75,6 +75,9 @@ jobs:
       - name: End-to-end test
         env:
           E2E_SURVIVE_SECONDS: ${{ inputs.survive_seconds || 120 }}
+          # Two engines and eight AIs loading on a small runner: allow for slow loading
+          # before the survival window starts.
+          E2E_PREGAME_ALLOWANCE: 300
           E2E_ARTIFACTS: ${{ github.workspace }}/e2e-artifacts
         run: tests/e2e/run.sh rjm-host:e2e
 

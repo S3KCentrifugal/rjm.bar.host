@@ -38,9 +38,13 @@ Chobby. You cannot be logged in to it in Chobby at the same time.
    all are ready and synced, Autopilot announces a countdown
    (`AUTOPILOT_START_DELAY`) and starts. SPADS balances every human onto one
    team and every bot onto the other.
-6. **Pre-game.** Players place start positions. If the pre-game stalls for
-   `AUTOPILOT_PREGAME_FORCE` seconds (someone AFK), Autopilot force-starts and
-   BAR places them.
+6. **Pre-game.** Players place start positions. If the pre-game stalls
+   (someone AFK), Autopilot force-starts `AUTOPILOT_PREGAME_FORCE` seconds
+   after the **last player has finished loading**, and BAR places anyone who
+   didn't choose. It never forces while a player is still loading: BAR would
+   treat their team as abandoned and, with one human, end the game at once.
+   A player who never finishes loading is forced past after
+   `AUTOPILOT_PREGAME_MAX`.
 7. **Game.** The bots run inside the container's engine.
 8. **Game over.** SPADS stops the engine 5 s after the end. The game's
    infolog, start script and replay link are archived under
@@ -148,7 +152,8 @@ only.
 | `AUTOPILOT_MIN_HUMANS` | 1 | players before auto-start; 0 disables auto-start |
 | `AUTOPILOT_START_DELAY` | 20 | countdown, seconds |
 | `AUTOPILOT_REQUIRE_READY` | 1 | all players must be ready and synced |
-| `AUTOPILOT_PREGAME_FORCE` | 120 | force a stalled pre-game after this many seconds; 0 disables |
+| `AUTOPILOT_PREGAME_FORCE` | 120 | force a stalled pre-game this many seconds after the last player loaded; 0 disables |
+| `AUTOPILOT_PREGAME_MAX` | 600 | force anyway if a player never finishes loading |
 | `SPADS_GAME_PORT` | 8452 (prod 8462) | UDP port players connect to; forward it on the router |
 | `AUTOPILOT_GUARD` | 1 | the vote guard (§3) |
 | `AUTOPILOT_DENY_VOTES` | boss,hset,rehost,quit,preset,hpreset,bpreset | commands that may never be voted |

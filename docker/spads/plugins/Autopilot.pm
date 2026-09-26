@@ -6,8 +6,9 @@
 #                    this starts the game once enough humans are present and
 #                    ready, after a countdown announced in the room.
 #   * Pre-game       with choose-in-game start positions, a player who never
-#                    places stalls the game; after AUTOPILOT_PREGAME_FORCE
-#                    seconds the game is force-started (BAR places them).
+#                    places stalls the game; AUTOPILOT_PREGAME_FORCE seconds
+#                    after the last human has loaded, the game is force-started
+#                    (BAR places them). Never while a human is still loading.
 #   * Control socket a Unix socket (AUTOPILOT_SOCKET) taking one command per
 #                    connection -- `status`, `spads <command>`, `say <text>` --
 #                    and answering with one JSON line. `spadsctl` is its client;
@@ -20,7 +21,9 @@
 #   AUTOPILOT_MIN_HUMANS      humans needed before auto-start, default 1; 0 disables auto-start
 #   AUTOPILOT_START_DELAY     countdown in seconds once conditions hold, default 20
 #   AUTOPILOT_REQUIRE_READY   1 (default): every human player must be ready and synced
-#   AUTOPILOT_PREGAME_FORCE   seconds before forcing a stalled pre-game, default 120; 0 disables
+#   AUTOPILOT_PREGAME_FORCE   seconds of pre-game, counted once every human has loaded,
+#                             before forcing the start, default 120; 0 disables
+#   AUTOPILOT_PREGAME_MAX     force anyway after this long if someone never loads, default 600
 #   AUTOPILOT_DEFAULT_SPLIT   start boxes for maps BAR's mapBoxes.conf does not
 #                             know, as !split arguments, default "h 25"; empty disables
 #   AUTOPILOT_SOCKET          default /tmp/autopilot.sock
@@ -61,6 +64,8 @@ sub new {
     startDelay    => envInt('AUTOPILOT_START_DELAY', 20),
     requireReady  => envInt('AUTOPILOT_REQUIRE_READY', 1),
     pregameForce  => envInt('AUTOPILOT_PREGAME_FORCE', 120),
+    pregameMax    => envInt('AUTOPILOT_PREGAME_MAX', 600),
+    allLoadedSince => 0,
     defaultSplit  => $ENV{AUTOPILOT_DEFAULT_SPLIT} // 'h 25',
     socketPath    => $ENV{AUTOPILOT_SOCKET} || '/tmp/autopilot.sock',
     countdownFrom => 0,     # time the start conditions first held; 0 = not counting
@@ -161,6 +166,7 @@ sub tick {
   } else {
     $self->{pregameSince} = 0;
     $self->{pregameForced} = 0;
+    $self->{allLoadedSince} = 0;
   }
 
   $self->autoStart($b) if getSpringPid() == 0;
@@ -221,14 +227,50 @@ sub autoStart {
   $self->{countdownFrom} = 0 if $r->{ok};
 }
 
+# Players in this game who have not finished loading. Forcing the start while
+# a human is still loading is not neutral: BAR's game_end treats their team as
+# abandoned, so with one human the game is over at once (seen on a slow CI
+# runner). A player counts as loaded when the engine reports them connected
+# (SpringAutoHostInterface CLI_STATE_CONNECTED = -1; -2 is still loading).
+sub loadingPlayers {
+  my $b = getRunningBattle() // {};
+  my $me = myLogin();
+  my $players = getSpringInterface()->getPlayersByNames();
+  my @loading;
+  foreach my $u (keys %{$b->{users} // {}}) {
+    next if $u eq $me;
+    my $st = $b->{users}{$u}{battleStatus} or next;
+    next unless $st->{mode};
+    my $p = $players->{$u};
+    push @loading, $u unless $p && $p->{disconnectCause} == -1;
+  }
+  return sort @loading;
+}
+
+# Force a stalled pre-game (players who never place a start position), but
+# only once everyone has loaded: the delay counts from the moment the last
+# human finished loading. A player who never finishes loading is forced past
+# after AUTOPILOT_PREGAME_MAX, so the room cannot stall for ever.
 sub pregame {
   my $self = shift;
   my $now = time;
   $self->{pregameSince} ||= $now;
   return if $self->{pregameForce} == 0 || $self->{pregameForced};
-  return if $now - $self->{pregameSince} < $self->{pregameForce};
+
+  my @loading = loadingPlayers();
+  if (@loading) {
+    $self->{allLoadedSince} = 0;
+    return if $now - $self->{pregameSince} < $self->{pregameMax};
+    $self->{pregameForced} = 1;
+    sayBattle("Autopilot: pre-game has lasted $self->{pregameMax}s and " . join(', ', @loading)
+              . " never finished loading; forcing the start.");
+    $self->runSpadsCommand(['forceStart']);
+    return;
+  }
+  $self->{allLoadedSince} ||= $now;
+  return if $now - $self->{allLoadedSince} < $self->{pregameForce};
   $self->{pregameForced} = 1;
-  sayBattle("Autopilot: pre-game has lasted $self->{pregameForce}s, forcing the start.");
+  sayBattle("Autopilot: everyone has loaded; forcing the start after $self->{pregameForce}s of pre-game.");
   $self->runSpadsCommand(['forceStart']);
 }
 

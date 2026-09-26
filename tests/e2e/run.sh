@@ -11,6 +11,8 @@
 #   E2E_AI_ARCHIVES   where it comes from (default github:S3KCentrifugal/CircuitAI@newest;
 #                     set empty with E2E_AI=BARb to use the engine's stock AI, fully offline)
 #   E2E_SURVIVE_SECONDS  game time the bot team must survive (default 120)
+#   E2E_PREGAME_ALLOWANCE  seconds allowed for loading and the pre-game force start
+#                     before the survival window (default 75; CI uses 300)
 #   E2E_ARTIFACTS     where logs are copied (default ./e2e-artifacts)
 #   E2E_KEEP=1        leave the containers running afterwards, for inspection
 #
@@ -92,6 +94,7 @@ docker create --name "$DRIVER" --network "$NET" \
 	-v "$DATA:/bar/data:ro" \
 	-e "E2E_AI=$AI" -e E2E_BOTS=8 -e E2E_BONUS=50 -e "E2E_MAP=$MAP1" \
 	-e "E2E_SURVIVE_SECONDS=${E2E_SURVIVE_SECONDS:-120}" \
+	-e "E2E_PREGAME_ALLOWANCE=${E2E_PREGAME_ALLOWANCE:-75}" \
 	--entrypoint python3 "$IMAGE" /tmp/lobby_e2e.py --serve > /dev/null
 docker cp "$HERE/lobby_e2e.py" "$DRIVER:/tmp/lobby_e2e.py"
 docker cp "$(win_path "$ARTIFACTS/e2e-springsettings.cfg")" "$DRIVER:/tmp/e2e-springsettings.cfg"
