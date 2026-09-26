@@ -29,6 +29,7 @@ spec:
       annotations:
         # Changes when spads.env or docker/spads/ change, so the pod restarts
         # for a config change and only then (set by the deploy pipeline).
+        # h-<hash>: the prefix keeps YAML from reading an all-digit hash as a number.
         rjm-host/config-hash: SPADS_CONFIG_HASH
     spec:
       serviceAccountName: rjm-host
@@ -88,18 +89,14 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-          # Ready once SPADS holds its connection to the lobby server: an
-          # ESTABLISHED TCP socket to port 8200 (0x2008, state 01). There is
+          # Ready once this pod's SPADS process holds an established connection
+          # to the lobby server (docker/spads/ready.sh matches the process's own
+          # sockets, since hostNetwork shows every socket on the node). There is
           # deliberately no liveness probe -- a restart ends any game in
           # progress, and SPADS reconnects to the lobby by itself.
           readinessProbe:
             exec:
-              command:
-                - sh
-                - -c
-                - >-
-                  grep -qE '^ *[0-9]+: [0-9A-F]+:[0-9A-F]+ [0-9A-F]+:2008 01 '
-                  /proc/net/tcp /proc/net/tcp6
+              command: ["/opt/rjm-host/spads/ready.sh"]
             initialDelaySeconds: 20
             periodSeconds: 30
             failureThreshold: 3

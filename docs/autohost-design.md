@@ -360,8 +360,11 @@ pipeline deletes and recreates it — and refuses to while one is running.
 
 **`rjm-host-spads`, a Deployment** of one replica, `strategy: Recreate`,
 `hostNetwork: true` ([§10](#10-the-lobby-host-spads)). Held at zero replicas by
-the pipeline until the `rjm-host-secrets` Secret exists. A readiness probe marks
-it ready when it holds an established TCP connection to the lobby (port 8200);
+the pipeline until the `rjm-host-secrets` Secret exists. A readiness probe
+(`docker/spads/ready.sh`) marks it ready when *its own* SPADS process holds an
+established TCP connection to the lobby — matched by socket inode, because under
+`hostNetwork` `/proc/net/tcp` lists every socket on the node, including the
+other environment's SPADS;
 there is deliberately **no liveness probe**, because a restart ends any game in
 progress and SPADS reconnects to the lobby by itself.
 
@@ -384,10 +387,11 @@ Both workloads mount all three; they run on the one node, so `ReadWriteOnce`
 does not keep them apart. The pipeline creates the host directories and
 `chown`s them to 10001.
 
-**Loading a custom AI folder onto the cluster:**
-`kubectl cp ./SMRTBARb <pod>:/bar/custom-ai/` from any pod that mounts the
-volume read-write, or place it under `/mnt/data2/k8s-volumes/rjm-host/<env>/ai/`
-on the node. It must be the Linux build.
+**Loading a custom AI folder onto the cluster:** `scripts/upload_ai.sh <env>
+<folder>...` — both workloads mount the volume read-only, so it starts a
+short-lived pod that mounts it read-write, rejects a folder without
+`libSkirmishAI.so`, copies, and deletes the pod. Alternatively place it under
+`/mnt/data2/k8s-volumes/rjm-host/<env>/ai/` on the node.
 
 ### 7.3 Output: what is captured
 
@@ -553,35 +557,42 @@ Three workflows in `.github/workflows/`:
 | `deploy.yml` | push to `test`/`prod`, `workflow_dispatch`, `repository_dispatch: ai-updated` | `set-env → build → deploy`: publish the image, deploy, run a match |
 | `simulate.yml` | `workflow_call` (reusable), `workflow_dispatch` | run one simulation on a GitHub runner with the image, upload `/bar/out` as an artifact |
 
-**`set-env`** resolves the environment (`test`/`prod`; a dispatch from an AI
-repository always targets `test`), lowercases the owner for the GHCR name, reads
-`config/engine.pin`, validates any AI override from an input or dispatch payload
-(passed through the environment, never interpolated into a script), decides
-whether the image changed (`docker/`, `scripts/`, `config/engine.pin`, a
-`[force-build]` commit, or any non-push trigger) and whether the cluster secrets
-are configured.
+**`set-env`** resolves the environment and the commit to deploy. A push deploys
+its branch; a `workflow_dispatch` must be run *from* the `test` or `prod` branch
+it deploys; a `repository_dispatch` (which GitHub always runs on the default
+branch) checks out and deploys the **`test` branch**, so an AI release never
+puts unreviewed `main` on the cluster. It lowercases the owner for GHCR, reads
+`config/engine.pin`, validates any AI override (passed through the environment,
+limited to characters inert in the `sed` that uses it), and decides whether a
+build is needed: on a push, from everything pushed (`before..sha`, not just the
+last commit) touching `docker/`, `scripts/` or the pin, or a `[force-build]`
+commit; always on a manual run; never on an AI dispatch, which reruns the match
+on the image test already runs.
 
-**`build`** builds once into the runner's daemon with the GHA layer cache, runs
-`scripts/smoke_test.sh`, and only then pushes `:<sha>` and `:<env>` (plus
-`:recoil-<engine>` and `:latest` from prod).
+**`build`**: `<sha>` tags are **written once and never re-pushed**. If this
+commit already has an image — a test → prod fast-forward, or a rerun — it is
+retagged, so prod runs the exact bytes test ran. Otherwise it builds into the
+runner's daemon with the GHA layer cache, runs `scripts/smoke_test.sh`, and only
+then pushes `:<sha>`. Moving tags (`:<env>`; from prod also `:recoil-<engine>`
+and `:latest`) are then pointed at it with `buildx imagetools create`.
 
 **`deploy`** runs in `mcgill-deployer` with `--privileged` for WireGuard, and is
 **skipped with a warning** while the cluster secrets are missing, so the image
-still publishes. The 12 steps, with this project's specifics:
+still publishes. Every refusal check runs **before anything is changed**:
 
-1. WireGuard up. 2. kubectl from `KUBE_CONFIG_DATA`. 3. Namespace.
-4. Pull secret (the image is private). 5. **Guard**: refuse while the match Job
-is running. 6. Host directories, owned by 10001. 7. Image tag: the new SHA, or
-the deployed one if nothing rebuilt. 8. Delete `Released` PVs. 9. **Render
-once**: tag, AI override, SPADS config hash, and SPADS replicas (0 without the
-Secret). 10. Delete the finished Job; **guard**: refuse to restart SPADS while a
-`spring-headless` process — a lobby game — is running in it, unless
-`interrupt_lobby` is set. 11. Apply the rendered file; wait for SPADS if it
-runs. 12. Wait for the match (5400 s), print its log, fail the run if it did not
-succeed. Tear down the VPN always.
-
-SPADS restarts only when its pod template changes: the image tag, or the
-`rjm-host/config-hash` annotation computed from `spads.env` and `docker/spads/`.
+1. WireGuard. 2. kubectl. 3. Namespace. 4. Pull secret (private image).
+5. Image tag: the commit's, or the deployed one if nothing was built.
+6. **Render once**: tag, AI override, SPADS replicas (0 without the Secret), and
+   the SPADS template hash — a hash of the SPADS manifest, its ConfigMap source
+   and the base and overlay kustomizations, so *any* change to SPADS changes it.
+7. **Guards**: refuse while the match Job is running; refuse when SPADS would
+   restart (hash or replicas changed) while a `spring-headless` process — a
+   lobby game — runs in it. The SPADS guard fails closed: if the pod cannot be
+   inspected, a game is assumed. `interrupt_lobby` overrides it.
+8. Host directories, owned by 10001. 9. Delete `Released` PVs. 10. Delete the
+   finished match Job. 11. Apply the rendered file; wait for SPADS if it runs.
+12. Wait for the match (5400 s), print its log, fail the run if it failed.
+   The VPN is torn down always.
 
 **Secrets.** The standard seven. `GHCR_PULL_TOKEN` must read both
 `mcgill-software/mcgill-deployer` and this account's private package. No
@@ -594,7 +605,7 @@ runtime.
 
 | Standard | Here | Why |
 | --- | --- | --- |
-| Image per environment (`<project>-<component>-<env>`) | one image, `rjm-host`, tagged `<sha>`/`<env>` | it is a reusable artifact consumed by other repositories; the same image is promoted, never rebuilt per environment (convention-deployment §6) |
+| Image per environment (`<project>-<component>-<env>`) | one image, `rjm-host`, tagged `<sha>`/`<env>` | it is a reusable artifact consumed by other repositories; a commit's image is built once and promoted by retagging, never rebuilt per environment (convention-deployment §6) |
 | Namespace `mcgill-<service>-<env>` | `rjm-host-<env>` | requested name; matches the Kustomize skill's `<project>-<env>` |
 | Namespace in `base/` | in each overlay | avoids relying on the namespace transformer renaming a Namespace object |
 | Deployment + RollingUpdate | a Job for matches; SPADS uses `Recreate` | a match is a batch; a hostNetwork surge pod would collide on the game port |
@@ -653,8 +664,10 @@ login to BAR's server and hosting a bot game, which need the real account.
 1. **Inbound UDP.** The cluster's only internet path is the router forward to
    the HAProxy NodePorts (TCP). Players connect to the engine over UDP, which
    ingress cannot carry, so the pod uses `hostNetwork: true` and listens on
-   8452/UDP on `mcgill-data`. **For players on the internet, the router must
-   forward UDP 8452 to `mcgill-data`** — configuration outside this
+   8452/UDP (test) or 8462/UDP (prod) on `mcgill-data` — the environments share
+   the node's ports, so prod's overlay moves both SPADS ports (8462 game, 8464
+   autohost). **For players on the internet, the router must forward the UDP
+   port to `mcgill-data`** — configuration outside this
    repository. Without it the room is visible and unjoinable. The address the
    lobby sees for SPADS's outbound TCP connection must be the same public
    address that forwards the UDP.

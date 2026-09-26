@@ -14,7 +14,24 @@ images:
   - name: ghcr.io/s3kcentrifugal/rjm-host
     newTag: IMAGE_TAG
 
+# SPADS runs with hostNetwork, so test and prod share mcgill-data's ports.
+# Prod takes the next pair; forward UDP 8462 on the router for prod players.
+configMapGenerator:
+  - name: rjm-host-spads-config
+    behavior: merge
+    literals:
+      - SPADS_GAME_PORT=8462
+      - SPADS_AUTOHOST_PORT=8464
+      - SPADS_BATTLE_NAME=rjm-host room
+
 patches:
+  - target:
+      kind: Deployment
+      name: rjm-host-spads
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/ports/0/containerPort
+        value: 8462
   # Bind each claim to this environment's PV. data2 is WaitForFirstConsumer
   # with no provisioner, so without this and the PV's claimRef a claim can bind
   # across environments.

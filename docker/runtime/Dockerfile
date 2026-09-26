@@ -59,7 +59,7 @@ RUN set -eux; \
 # Not spadsInstaller.pl: it fetches packages over plain HTTP from
 # planetspads.free.fr and needs the engine at install time. SPADS is plain Perl,
 # so a release is just its files, laid flat in one directory exactly as the
-# installer lays them (docker/spads/README.md).
+# installer lays them (design section 10.1).
 # ---------------------------------------------------------------------------
 FROM ${RUNTIME_BASE} AS spads
 

@@ -109,17 +109,23 @@ jobs:
           name: ${{ inputs.ai_artifact }}
           path: custom-ai
 
-      # The game is ~3.5 GB; cache the rapid pool per game tag so repeated
-      # simulations do not re-download it. A moving tag (byar:test) still
-      # updates incrementally on top of the cached pool.
+      # The game is ~3.5 GB. Cache the rapid pool under a key that changes
+      # weekly, so it is saved once per week per game tag rather than on every
+      # run (the repository's cache is 10 GB and also holds the image build
+      # cache). A moving tag like byar:test updates incrementally in between.
+      - name: Content cache key
+        id: cachekey
+        env:
+          GAMETYPE: ${{ inputs.gametype || 'byar:test' }}
+        run: echo "key=bar-content-$(echo "$GAMETYPE" | tr -c 'A-Za-z0-9._-' '_')-$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
       - name: Content cache
         uses: actions/cache@v4
         with:
           path: data
-          key: bar-content-${{ inputs.gametype }}-${{ inputs.map }}-${{ github.run_id }}
+          key: ${{ steps.cachekey.outputs.key }}
           restore-keys: |
-            bar-content-${{ inputs.gametype }}-${{ inputs.map }}-
-            bar-content-${{ inputs.gametype }}-
+            bar-content-
 
       - name: Run the simulation
         env:

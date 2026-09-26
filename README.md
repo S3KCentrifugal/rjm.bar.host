@@ -54,9 +54,10 @@ matches/<run-id>/
   script.txt             exactly what was played
   springsettings.cfg     exactly how the engine was configured
 spads/
-  log/                   SPADS logs
-  demos/                 replays of every lobby game
-  infolog*.txt           engine logs of every lobby game
+  log/spads.log          SPADS log; log/chat/ holds chat logs
+  log/spring-headless.log  engine console of every lobby game
+  var/demos*/*.sdfz      every lobby game's replay
+  games/<time>-<gameId>/ per game: infolog.txt, startscript.txt, game.json, replay.sdfz link
 ```
 
 `<run-id>` is `$BARHOST_RUN_ID` (the pod name in Kubernetes) or a timestamp.
@@ -104,8 +105,10 @@ A calling repository must also be allowed to use this private repository's
 workflows (Settings → Actions → General → Access: "Accessible from repositories
 owned by the user"; already set).
 
-Image tags: `<commit sha>` (immutable), `test` and `prod` (what each environment
-runs), and on prod builds `recoil-<engine version>` and `latest`.
+Image tags: `<commit sha>` (written once, never re-pushed), `test` and `prod`
+(what each environment runs), and from prod `recoil-<engine version>` and
+`latest`. Promoting a commit from test to prod retags its tested image rather
+than rebuilding it.
 
 ## Cluster deployment
 
@@ -118,6 +121,11 @@ Namespace `rjm-host-<env>` on `mcgill-data`, deployed by
 | Job `rjm-host-match` | one simulation per deploy; the deploy waits for it and fails if it fails |
 | Deployment `rjm-host-spads` | the lobby autohost; held at 0 replicas until `rjm-host-secrets` exists |
 | PVCs `rjm-host-{data,out,ai}-pvc` | content, output, custom AIs, under `/mnt/data2/k8s-volumes/rjm-host/<env>/` |
+
+**Loading a custom AI folder onto the cluster**: `scripts/upload_ai.sh test
+path/to/AI/Skirmish/SMRTBARb` copies it onto the custom-AI volume (Linux build
+only; a Windows folder is rejected). It is installed at the next match, or the
+next SPADS restart.
 
 A deploy never interrupts a game: it refuses while the match Job is running, and
 refuses to restart SPADS while a lobby game is in progress (dispatch with
@@ -153,8 +161,8 @@ tunnels with the same private key and address knock each other off.
    [`k8s/base/secrets.yaml.example`](k8s/base/secrets.yaml.example):
    the whitelisted autohost account, its password, **your** account as owner,
    and the room password. Then redeploy; SPADS starts and joins the lobby.
-2. For players outside your network, forward **UDP 8452** on the router to
-   `mcgill-data`. Without it the room is visible but nobody can join.
+2. For players outside your network, forward **UDP 8452** (test; 8462 for
+   prod) on the router to `mcgill-data`. Without it the room is visible but nobody can join.
 3. In the room (or by private message to the autohost), as owner:
    - `!addBot Bot1 0 SMRTBARb` — add a server-side bot (`SPADS_ALLOWED_AIS`
      lists which AIs are allowed)
@@ -174,6 +182,7 @@ start script land under `spads/` on the output volume.
 | `docker/spads/` | SPADS configuration templates and launcher |
 | `scripts/run_match.py` | writes the game script, drives the match over the Autohost Protocol, exits at game over |
 | `scripts/install_ai.py` | installs custom AIs into `AI/Skirmish` |
+| `scripts/upload_ai.sh` | copies AI folders onto the cluster's custom-AI volume |
 | `scripts/smoke_test.sh` | the checks CI runs before publishing an image |
 | `scripts/demo_stats.py` | per-team statistics from a replay |
 | `scripts/measure_match.py` | CPU/RSS sampling behind the resource numbers |

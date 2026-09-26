@@ -48,7 +48,7 @@ spec:
   storageClassName: data2
   resources:
     requests:
-      # Custom AI folders, each <Name>/<version>/ with a Linux libSkirmishAI.so.
-      # Copied in by hand (kubectl cp) and linked into the engine's
-      # AI/Skirmish at every start.
+      # Custom AI folders, each <Name>/<version>/ with a Linux libSkirmishAI.so,
+      # linked into the engine's AI/Skirmish at every start. The workloads
+      # mount it read-only; load it with scripts/upload_ai.sh.
       storage: 5Gi
