@@ -25,6 +25,7 @@ DATA="${E2E_DATA_VOLUME:-rjm-bar-data}"
 AI="${E2E_AI:-SMRTBARb}"
 AI_ARCHIVES="${E2E_AI_ARCHIVES-github:S3KCentrifugal/CircuitAI@newest}"
 ARTIFACTS="${E2E_ARTIFACTS:-$PWD/e2e-artifacts}"
+mkdir -p "$ARTIFACTS"
 NET="rjm-e2e-$$"
 SPADS="rjm-e2e-spads-$$"
 DRIVER="rjm-e2e-driver-$$"
@@ -32,6 +33,8 @@ MAP1="All That Glitters v2.2.3"
 MAP2="Comet Catcher Remake 1.8"
 
 log()  { echo "[e2e] $*"; }
+# docker.exe under Git Bash needs a Windows path for host files; elsewhere, as-is.
+win_path() { if command -v cygpath > /dev/null 2>&1; then cygpath -w "$1"; else echo "$1"; fi; }
 fail() { echo "[e2e] FAIL: $*" >&2; FAILED=1; }
 FAILED=0
 
@@ -59,7 +62,15 @@ docker run --rm -v "$DATA:/bar/data" -e BARHOST_GAMETYPE=byar:test \
 docker network create "$NET" > /dev/null
 
 log "starting SPADS ($SPADS)"
-docker run -d --name "$SPADS" --network "$NET" \
+# Both engines, eight AIs and SPADS share one machine here; on a small CI
+# runner loading takes long enough to hit the engine's 30 s initial-connection
+# timeout (GlobalConfig.cpp InitialNetworkTimeout), and the host drops the
+# human client. Test-only: production keeps the engine defaults players get.
+cat > "$ARTIFACTS/e2e-springsettings.cfg" <<'EOF'
+InitialNetworkTimeout = 300
+NetworkTimeout = 300
+EOF
+docker create --name "$SPADS" --network "$NET" \
 	-v "$DATA:/bar/data:ro" \
 	-e SPADS_LOBBY_HOST="$DRIVER" -e SPADS_LOBBY_TLS=off \
 	-e SPADS_LOBBY_LOGIN=AutoHost -e SPADS_LOBBY_PASSWORD=e2e-secret \
@@ -71,7 +82,10 @@ docker run -d --name "$SPADS" --network "$NET" \
 	-e SPADS_AUTO_ADD_BOTS=8 \
 	-e "BARHOST_AI_ARCHIVES=$AI_ARCHIVES" -e BARHOST_FETCH_CONTENT=0 \
 	-e AUTOPILOT_BOT_BONUS=50 -e AUTOPILOT_START_DELAY=5 -e AUTOPILOT_PREGAME_FORCE=30 \
+	-e SPADS_SPRING_CONFIG=/tmp/e2e-springsettings.cfg \
 	"$IMAGE" spads > /dev/null
+docker cp "$(win_path "$ARTIFACTS/e2e-springsettings.cfg")" "$SPADS:/tmp/e2e-springsettings.cfg"
+docker start "$SPADS" > /dev/null
 
 log "starting the fake lobby and scripted players ($DRIVER)"
 docker create --name "$DRIVER" --network "$NET" \
@@ -80,6 +94,7 @@ docker create --name "$DRIVER" --network "$NET" \
 	-e "E2E_SURVIVE_SECONDS=${E2E_SURVIVE_SECONDS:-120}" \
 	--entrypoint python3 "$IMAGE" /tmp/lobby_e2e.py --serve > /dev/null
 docker cp "$HERE/lobby_e2e.py" "$DRIVER:/tmp/lobby_e2e.py"
+docker cp "$(win_path "$ARTIFACTS/e2e-springsettings.cfg")" "$DRIVER:/tmp/e2e-springsettings.cfg"
 docker start "$DRIVER" > /dev/null
 
 docker logs -f "$DRIVER" 2>&1 | sed -u 's/^/  | /' &

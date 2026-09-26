@@ -408,8 +408,14 @@ class HumanEngine:
         self.log = open(self.dir / "engine-console.log", "wb")
         self.proc = subprocess.Popen(
             [f"{engine_dir}/spring-headless", "--isolation", "--isolation-dir", "/bar/data",
-             "--write-dir", str(self.dir), str(script)],
+             "--write-dir", str(self.dir), *self.config_args(), str(script)],
             env=env, stdout=self.log, stderr=subprocess.STDOUT)
+
+    @staticmethod
+    def config_args() -> list:
+        """The same long network timeouts run.sh gives the host (slow CI runners)."""
+        cfg = Path("/tmp/e2e-springsettings.cfg")
+        return ["--config", str(cfg)] if cfg.exists() else []
 
     def infolog(self) -> str:
         p = self.dir / "infolog.txt"
