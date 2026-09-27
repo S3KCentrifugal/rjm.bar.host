@@ -55,11 +55,12 @@ This project **operates no lobby infrastructure**: SPADS is a lobby *client*.
 
 ### Open questions
 
-- **All-AI team simulations collapse** (design §11 risk 1): with two or more
-  AI teams per allyteam and only the spectator host, BAR's `game_end.lua` wipes
-  out allyteam 0 within seconds; a 1v1, and a lobby game with humans, are
-  unaffected. The cluster simulation defaults to 1v1. Never "fix" it by editing
-  the game archive (fact 3).
+- **All-AI team games collapse unless spectators sit on an observer team**
+  (design §11 risk 1). BAR's `game_end.lua` wipes out the allyteam a spectator
+  sits in when it holds two or more AI teams. `run_match.py` and `lan_game.py`
+  seat the host and spectators on an extra empty team in its own allyteam
+  (default on), which fixes it without touching the game. Never "fix" it by
+  editing the game archive (fact 3).
 - **SPADS against BAR's real lobby server is unverified**: TLS, login flags,
   bot flag, and whether it accepts bots added by a spectating host. The rest of
   the lobby flow is proven offline by `tests/e2e/run.sh`; run it after any
@@ -79,6 +80,7 @@ This project **operates no lobby infrastructure**: SPADS is a lobby *client*.
 | `docker/spads/` | SPADS config (`etc/`), `run_spads.sh` (incl. `--check`), `plugins/Autopilot.pm` (bot bonus, auto-start, control socket), `spadsctl`, `archive_game.sh`, `ready.sh` |
 | `tests/` | `run_unit.sh` (unit + static manifest checks), `e2e/run.sh` (offline lobby end-to-end) |
 | `scripts/run_match.py` | writes the GameSetup script, drives the match over the Autohost Protocol, exits at game over |
+| `scripts/lan_game.py`, `examples/lan/`, `docs/lan.md` | direct-connect (LAN) games between containers: `host` / `join` entrypoint modes |
 | `scripts/install_ai.py` | installs custom AIs from folders, archives or GitHub releases; refuses Windows builds |
 | `scripts/smoke_test.sh` | the checks CI runs before any image is published |
 | `scripts/demo_stats.py`, `scripts/measure_match.py` | replay statistics; the resource measurements |

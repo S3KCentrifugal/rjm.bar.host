@@ -725,38 +725,51 @@ through the router.
 
 ---
 
+### 10.3 LAN games between containers
+
+`lan_game.py` (entrypoint `host` / `join`) runs a direct-connect game between
+containers with no lobby server: the engine's own host/client networking,
+unmodified. A JSON spec lists the participants and the teams, each played by a
+human participant or by an AI running in a named participant's engine, so two
+AI builds can meet from separate containers.
+
+The host's supervisor starts the game only when every participant has finished
+loading (Autohost `PLAYER_JOINED`, not merely "connection established"), for
+the same reason Autopilot waits in the lobby. Spectators sit on the observer
+team (risk 1). Guide: [`lan.md`](lan.md). Verified by `tests/lan/run.sh`:
+three containers, SMRTBARb against BARb, 150 s of play.
+
+---
+
 ## 11. Risks and open questions
 
 Ordered by how much they could invalidate the work.
 
-**1. All-AI team games collapse: allyteam 0 is wiped out within seconds.**
-*Open for simulations; does not affect lobby games.* Reproduced 2026-09-26 on
-the official release. It happens whenever an allyteam holds two or more AI
-teams and the only player is the spectator host, and never in a 1v1:
+**1. All-AI team games collapse — fixed by the observer team.** Reproduced
+2026-09-26 on the official release; fixed 2026-09-27 without modifying the game.
 
 | Run | Result |
 | --- | --- |
-| 1v1 SMRTBARb (simulation) | full game, 18,455 frames, game over by elimination |
-| 2v2 SMRTBARb, 4v4 SMRTBARb, 4v4 stock BARb (simulation) | allyteam 0 dead by frame 113–193 |
-| 4v4 with `draft_mode` removed, or `coop` removed, or blocked layout (simulation) | no change |
-| **1 human vs 8 SMRTBARb, SPADS lobby game (e2e)** | **no team defeated**; the game ran on until stopped |
+| 1v1 SMRTBARb, spectator on team 0 | full game, 18,455 frames |
+| 2v2 / 4v4 SMRTBARb, 4v4 stock BARb, spectator on team 0 | allyteam 0 dead by frame 113–193 |
+| 4v4 with `draft_mode` removed, or `coop` removed, or blocked layout | no change |
+| 1 human vs 8 SMRTBARb, SPADS lobby game (e2e) | no team defeated |
+| **4v4 SMRTBARb, spectator on its own observer team** | **33,047 frames (18 min), real elimination** |
+| **1v1 SMRTBARb, observer team** | **37,052 frames (20 min), real elimination** |
 
-The cause is in BAR's `luarules/gadgets/game_end.lua`:
-- `playerQuitIsDead` is true for every game except a 1v1 (`:76`, cleared at
-  `:263`).
-- In a team game an allyteam is wiped out when none of its teams is
-  "controlled" (`:128`). For an engine AI, "controlled" copies whether the
-  player hosting it is `active` (`:212`).
-- The check runs only for the allyteam of a player being evaluated
-  (`:214-217`).
+BAR's `luarules/gadgets/game_end.lua` evaluates allyteams through the players
+in them (`CheckPlayer` → `UpdateAllyTeamIsDead` for the player's allyteam,
+`:214-217`), and in a team game (`playerQuitIsDead`, `:76`/`:263`) wipes out an
+allyteam whose AI teams it judges uncontrolled (`:128`, `:212`). In a
+simulation the only player is the spectator host. Seated on team 0, it gets
+allyteam 0 evaluated and wiped. An allyteam with no player in it is never
+evaluated that way, which is also why the AI side survives in a lobby game.
 
-In a simulation the only player is the spectator host on team 0, so allyteam 0
-dies. In a lobby game, the humans are active players in their own allyteam,
-and the AI allyteam survives — the e2e test proves it.
-
-For simulations the likely levers are the host player's standing or an
-upstream fix to `game_end.lua`; the game archive must not be modified here
-(AGENTS fact 3). Until then the cluster's default simulation is a 1v1.
+**The fix, in the start script only:** the host (and in LAN games every
+spectator) sits on an extra, empty team in an allyteam of its own
+(`BARHOST_OBSERVER_TEAM`, default on; `observerTeam` in LAN specs). The cost is
+an idle observer commander that the AIs eventually destroy — a third side on
+the map. With it the cluster simulation is back to 8 AI (4v4).
 
 **2. Team statistics are missing from replays.** `demo_stats.py` finds no team
 statistics even in a 1v1 that reached game over by elimination, and reports

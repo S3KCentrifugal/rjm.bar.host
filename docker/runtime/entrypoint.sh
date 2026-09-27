@@ -3,6 +3,10 @@
 #
 #   match           install AIs, fetch content, run one AI-vs-AI simulation (default)
 #   spads           install AIs, fetch content, run a SPADS lobby autohost
+#   host            install AIs, fetch content, host a direct-connect (LAN) game
+#                   described by BARHOST_LAN_SPEC / BARHOST_LAN_SPEC_FILE
+#   join            install AIs, fetch content, join a LAN game (BARHOST_LAN_HOST,
+#                   BARHOST_LAN_NAME, BARHOST_LAN_PASSWORD)
 #   fetch-content   populate $BARHOST_DATA_DIR with the game and maps
 #   install-ai      install custom AIs into $BAR_ENGINE_DIR/AI/Skirmish
 #   list-ais        print the Skirmish AIs the engine can load
@@ -100,6 +104,16 @@ cmd_match() {
 	BARHOST_WRITE_DIR="$dir" exec python3 "$BIN/run_match.py"
 }
 
+# LAN games: the host and each joiner write under /bar/out/lan/<run-id>/.
+cmd_lan() {
+	prepare
+	local dir
+	dir="$OUT_DIR/lan/$(run_id)${BARHOST_LAN_NAME:+-$BARHOST_LAN_NAME}"
+	mkdir -p "$dir"
+	log "writing this $1 to $dir"
+	BARHOST_WRITE_DIR="$dir" exec python3 "$BIN/lan_game.py" "$1"
+}
+
 cmd_spads() {
 	prepare
 	exec "/opt/rjm-bar-host/spads/run_spads.sh"
@@ -108,6 +122,8 @@ cmd_spads() {
 case "${1:-match}" in
 	match)         cmd_match ;;
 	spads)         cmd_spads ;;
+	host)          cmd_lan host ;;
+	join)          cmd_lan join ;;
 	fetch-content) cmd_fetch_content ;;
 	install-ai)    cmd_install_ai ;;
 	list-ais)      cmd_install_ai && cmd_list_ais ;;

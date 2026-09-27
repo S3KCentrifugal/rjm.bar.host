@@ -8,6 +8,7 @@ from GitHub.
 | --- | --- | --- | --- | --- |
 | Smoke | `scripts/smoke_test.sh <image>` | the image | ~1 min | every build (`ci`, `deploy`) |
 | Unit + static | `tests/run_unit.sh <image>` | the image, `kubectl`, PyYAML | ~1 min | every build (`ci`, `deploy`) |
+| LAN end-to-end | `tests/lan/run.sh <image>` | the image, the content volume, ~12 GB | ~5 min | no: three engines exceed CI's 7 GB runner |
 | Lobby end-to-end | `tests/e2e/run.sh <image>` | the image, ~2 GB content volume | ~10 min | `e2e` workflow: weekly, on demand, on PRs touching the lobby host |
 
 Build the image first: `docker build -f docker/runtime/Dockerfile -t rjm-bar-host:dev .`
@@ -30,8 +31,9 @@ Python `unittest` suites run inside the image against the installed code
 | File | Covers |
 | --- | --- |
 | `test_install_ai.py` | mounted folders, tar and zip archives, both archive layouts, Windows refusal, zip and tar path traversal, reporting every failed source, GitHub `latest`/`newest`/tag/glob resolution (mocked), token handling |
-| `test_run_match.py` | spectator host of every AI, interleaved and blocked teams, handicap, modoption defaults and removal, start boxes, loopback autohost, config validation, engine config |
+| `test_run_match.py` | the observer team (on by default, and off), spectator host of every AI, interleaved and blocked teams, handicap, modoption defaults and removal, start boxes, loopback autohost, config validation, engine config |
 | `test_autopilot_guard.py` | the real Autopilot plugin under a stub SPADS API: boss votes refused in every form, the owner and autohost protected (including via aliases and case), room settings unvotable, only `set map` votable, ordinary votes allowed, every policy setting honoured, `commands.conf` makes `!boss` owner-only |
+| `test_lan_game.py` | LAN game spec validation (players, teams, AI hosts, names, passwords, allyteams, observer rules) and the host and client start scripts |
 | `test_spads_scripts.py` | `run_spads.sh --check` (config loads, prod ports, owner required, owner-name validation, password file, missing credentials), `archive_game.sh` (archiving, hostile arguments), `ready.sh` (the probe follows *this* SPADS process's lobby socket and ignores other processes'), `spadsctl` error handling |
 
 `tests/static/check_manifests.py` renders both overlays and checks:
@@ -122,3 +124,16 @@ archive.
 - **Internet players through the router.**
 
 Those are checked by the first real deploy (`setup.md` §8).
+
+## LAN end-to-end — `tests/lan/run.sh`
+
+Three containers and one direct-connect game, with no lobby server: `host`
+(the game server only), `box-a` running SMRTBARb from its GitHub release, and
+`box-b` running stock BARb. It passes when:
+- both joiners finish loading;
+- the host starts the game only then;
+- the game is still running at `LAN_PLAY_SECONDS` (default 150), or ended by
+  a real game over after that long;
+- each joiner's own log shows its AI running as a local AI.
+
+See [`lan.md`](lan.md).

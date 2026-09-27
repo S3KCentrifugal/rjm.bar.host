@@ -3,12 +3,13 @@
 A reusable **Beyond All Reason headless host** container, and its deployment to
 the private k3s cluster.
 
-One image, `ghcr.io/s3kcentrifugal/rjm-bar-host`, does two jobs:
+One image, `ghcr.io/s3kcentrifugal/rjm-bar-host`, does three jobs:
 
 | Mode | What it does | Where it runs |
 | --- | --- | --- |
 | `match` | an unattended AI-vs-AI simulation, played to game over at high speed, leaving a replay, logs and `result.json` | the cluster (a Job), any Docker host, or a GitHub runner via the reusable `simulate` workflow |
 | `spads` | a [SPADS](https://github.com/Yaribz/SPADS) autohost on BAR's lobby server that hosts Skirmish AI bots in its own process, so people can play with or against custom AIs | the cluster (a Deployment) |
+| `host` / `join` | a direct-connect (LAN) game between containers, no lobby and no internet: e.g. two AI builds, each in its own container, playing each other ([`docs/lan.md`](docs/lan.md)) | any Docker hosts that can reach each other over UDP |
 
 Both run BAR's **official** Linux engine release (`recoil_2026.07.04`, pinned in
 [`config/engine.pin`](config/engine.pin)), so what they host is exactly what
@@ -205,7 +206,9 @@ SMRTBARb, with a real headless human client, against a fake lobby server. See
 | `docker/runtime/Dockerfile` | engine release → runtime image (+ SPADS) |
 | `docker/runtime/entrypoint.sh` | `match`, `spads`, `install-ai`, `list-ais`, `fetch-content` |
 | `docker/spads/` | SPADS configuration, launcher, Autopilot plugin, `spadsctl`, per-game archiver, readiness probe |
-| `tests/` | unit tests, static manifest checks, the lobby end-to-end test |
+| `tests/` | unit tests, static manifest checks, the lobby and LAN end-to-end tests |
+| `examples/lan/` | a docker compose LAN game: SMRTBARb against BARb from separate containers |
+| `scripts/lan_game.py` | LAN games: host a spec'd game or join one |
 | `scripts/run_match.py` | writes the game script, drives the match over the Autohost Protocol, exits at game over |
 | `scripts/install_ai.py` | installs custom AIs into `AI/Skirmish` |
 | `scripts/upload_ai.sh` | copies AI folders onto the cluster's custom-AI volume |

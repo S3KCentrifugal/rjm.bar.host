@@ -166,6 +166,7 @@ class Config:
     host_name: str = "Autohost"
     record_demos: bool = True
     worker_threads: int = 0  # 0 = derive from the cgroup CPU quota
+    observer_team: bool = True
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -195,6 +196,7 @@ class Config:
             host_name=env("BARHOST_HOST_NAME", cls.host_name),
             record_demos=env("BARHOST_RECORD_DEMOS", "1") not in ("0", "false", "no"),
             worker_threads=env_int("BARHOST_WORKER_THREADS", cls.worker_threads),
+            observer_team=env("BARHOST_OBSERVER_TEAM", "1") not in ("0", "false", "no"),
         )
         cfg.validate()
         return cfg
@@ -428,14 +430,23 @@ def build_script(cfg: Config) -> str:
     # placement across runs for benchmarking. See design section 4.5.
     tdf.kv("StartPosType", cfg.startpostype)
     tdf.kv("NumPlayers", 1)
-    tdf.kv("NumTeams", cfg.ai_count)
-    tdf.kv("NumAllyTeams", cfg.ally_teams)
+    observer = 1 if cfg.observer_team else 0
+    tdf.kv("NumTeams", cfg.ai_count + observer)
+    tdf.kv("NumAllyTeams", cfg.ally_teams + observer)
 
     # The host: a spectator, so it fields no units and cannot win.
+    #
+    # Its team is an extra "observer" team in an allyteam of its own
+    # (BARHOST_OBSERVER_TEAM, default on). Without it, an all-AI team game
+    # collapses: BAR's game_end.lua wipes out the allyteam the spectator sits in
+    # within seconds whenever that allyteam holds two or more AI teams (design
+    # section 11, risk 1). With it, measured 2026-09-27: a 4v4 of SMRTBARb ran
+    # 18 minutes to a real elimination, and a 1v1 20 minutes. The cost is an idle
+    # observer commander on the map, a third side the AIs eventually destroy.
     tdf.open("PLAYER0")
     tdf.kv("Name", cfg.host_name)
     tdf.kv("Spectator", 1)
-    tdf.kv("Team", 0)
+    tdf.kv("Team", cfg.ai_count if observer else 0)
     tdf.close()
 
     for i in range(cfg.ai_count):
@@ -460,6 +471,14 @@ def build_script(cfg: Config) -> str:
         tdf.kv("Handicap", "%g" % cfg.ai_handicap)
         tdf.close()
 
+    if observer:
+        tdf.open("TEAM%d" % cfg.ai_count)
+        tdf.kv("TeamLeader", 0)
+        tdf.kv("AllyTeam", cfg.ally_teams)
+        tdf.kv("RGBColor", "0.5 0.5 0.5")
+        tdf.kv("Side", SIDES[0])
+        tdf.close()
+
     boxes = start_boxes(cfg)
     for i in range(cfg.ally_teams):
         tdf.open("ALLYTEAM%d" % i)
@@ -470,6 +489,10 @@ def build_script(cfg: Config) -> str:
             tdf.kv("StartRectTop", top)
             tdf.kv("StartRectRight", right)
             tdf.kv("StartRectBottom", bottom)
+        tdf.close()
+    if observer:
+        tdf.open("ALLYTEAM%d" % cfg.ally_teams)
+        tdf.kv("NumAllies", 0)
         tdf.close()
 
     tdf.open("MODOPTIONS")

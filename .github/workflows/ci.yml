@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Shell scripts
-        run: shellcheck -S warning docker/runtime/entrypoint.sh docker/spads/*.sh scripts/*.sh tests/*.sh tests/e2e/*.sh
+        run: shellcheck -S warning docker/runtime/entrypoint.sh docker/spads/*.sh scripts/*.sh tests/*.sh tests/e2e/*.sh tests/lan/*.sh
 
       - name: Python
         run: python3 -m py_compile scripts/*.py docker/spads/spadsctl tests/unit/*.py tests/e2e/*.py tests/static/*.py

@@ -73,6 +73,31 @@ class Script(unittest.TestCase):
         self.assertIn("HostIP=127.0.0.1;", s)
 
 
+class ObserverTeam(unittest.TestCase):
+    """The spectator host sits on its own team in its own allyteam, so BAR's
+    game_end never evaluates an AI allyteam through it (design risk 1)."""
+
+    def test_default_adds_an_observer_team_and_allyteam(self):
+        s = run_match.build_script(cfg(ai_count=4, ally_teams=2))
+        self.assertIn("NumTeams=5;", s)
+        self.assertIn("NumAllyTeams=3;", s)
+        self.assertIn("Team=4;", section(s, "PLAYER0"))
+        self.assertIn("AllyTeam=2;", section(s, "TEAM4"))
+        self.assertNotIn("[AI4]", s)          # nobody controls it
+        self.assertIn("[ALLYTEAM2]", s)
+
+    def test_ai_teams_keep_their_allyteams(self):
+        s = run_match.build_script(cfg(ai_count=4, ally_teams=2))
+        allies = [re.search(r"AllyTeam=(\d+);", section(s, f"TEAM{i}")).group(1) for i in range(4)]
+        self.assertEqual(allies, ["0", "1", "0", "1"])
+
+    def test_can_be_turned_off(self):
+        s = run_match.build_script(cfg(observer_team=False))
+        self.assertIn("NumTeams=4;", s)
+        self.assertIn("NumAllyTeams=2;", s)
+        self.assertIn("Team=0;", section(s, "PLAYER0"))
+
+
 class Validation(unittest.TestCase):
     def test_map_required(self):
         with self.assertRaises(SystemExit):

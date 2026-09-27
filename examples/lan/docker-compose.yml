@@ -1,0 +1,63 @@
+# Two AI builds playing each other from separate containers, with no lobby
+# server and no internet during the game. See docs/lan.md.
+#
+#   docker compose -f examples/lan/docker-compose.yml up --abort-on-container-exit
+#
+# The first run downloads the game and map into the `bar-data` volume (the
+# only step that needs internet); later runs reuse it.
+#
+# Each participant is one container running the same rjm-bar-host image, so
+# every engine is the same build. BoxA runs SMRTBARb, installed from its GitHub
+# release; BoxB runs the engine's stock BARb. Output lands in ./out/lan/.
+name: rjm-bar-lan
+
+x-common: &common
+  image: ghcr.io/s3kcentrifugal/rjm-bar-host:test
+  volumes:
+    - bar-data:/bar/data
+    - ./out:/bar/out
+  environment: &env
+    BARHOST_FETCH_CONTENT: "1"
+    BARHOST_GAMETYPE: byar:test
+    BARHOST_MAPS: All That Glitters v2.2.3
+    BARHOST_RUN_ID: example
+    # generous for machines that load slowly
+    BARHOST_ENGINE_SETTINGS: InitialNetworkTimeout=300,NetworkTimeout=300
+
+services:
+  host:
+    <<: *common
+    command: ["host"]
+    environment:
+      <<: *env
+      BARHOST_LAN_SPEC_FILE: /spec/ai-vs-ai.json
+    volumes:
+      - bar-data:/bar/data
+      - ./out:/bar/out
+      - ./ai-vs-ai.json:/spec/ai-vs-ai.json:ro
+    # For players on other machines, publish the game port:
+    # ports: ["8452:8452/udp"]
+
+  box-a:
+    <<: *common
+    command: ["join"]
+    depends_on: [host]
+    environment:
+      <<: *env
+      BARHOST_LAN_HOST: host
+      BARHOST_LAN_NAME: BoxA
+      BARHOST_LAN_PASSWORD: boxa1
+      BARHOST_AI_ARCHIVES: github:S3KCentrifugal/CircuitAI@newest
+
+  box-b:
+    <<: *common
+    command: ["join"]
+    depends_on: [host]
+    environment:
+      <<: *env
+      BARHOST_LAN_HOST: host
+      BARHOST_LAN_NAME: BoxB
+      BARHOST_LAN_PASSWORD: boxb1
+
+volumes:
+  bar-data:

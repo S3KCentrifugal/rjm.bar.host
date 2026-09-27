@@ -1,0 +1,20 @@
+{
+  "map": "All That Glitters v2.2.3",
+  "game": "byar:test",
+  "port": 8452,
+  "startPosType": 2,
+  "speed": 1,
+  "waitForPlayers": 600,
+  "forceStartDelay": 10,
+  "maxGameSeconds": 0,
+  "players": [
+    {"name": "BoxA", "password": "boxa1", "spectator": true},
+    {"name": "BoxB", "password": "boxb1", "spectator": true}
+  ],
+  "teams": [
+    {"allyTeam": 0, "side": "Armada", "handicap": 0,
+     "ai": {"shortName": "SMRTBARb", "version": "stable", "host": "BoxA"}},
+    {"allyTeam": 1, "side": "Cortex", "handicap": 0,
+     "ai": {"shortName": "BARb", "version": "stable", "host": "BoxB"}}
+  ]
+}
