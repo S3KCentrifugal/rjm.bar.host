@@ -1,14 +1,16 @@
 # rjm.bar.host
 
-A reusable **Beyond All Reason headless host** container, and its deployment to
-the private k3s cluster.
+A reusable **Beyond All Reason headless host** container, built, tested and
+published to GHCR by this repository. It runs under Docker or Kubernetes; the
+cluster's lobbies are deployed from it by
+[`rjm.bar.lobbies`](https://github.com/S3KCentrifugal/rjm.bar.lobbies).
 
 One image, `ghcr.io/s3kcentrifugal/rjm-bar-host`, does three jobs:
 
 | Mode | What it does | Where it runs |
 | --- | --- | --- |
-| `match` | an unattended AI-vs-AI simulation, played to game over at high speed, leaving a replay, logs and `result.json` | the cluster (a Job), any Docker host, or a GitHub runner via the reusable `simulate` workflow |
-| `spads` | a [SPADS](https://github.com/Yaribz/SPADS) autohost on BAR's lobby server that hosts Skirmish AI bots in its own process, so people can play with or against custom AIs | the cluster (a Deployment) |
+| `match` | an unattended AI-vs-AI simulation, played to game over at high speed, leaving a replay, logs and `result.json` | any Docker host, a GitHub runner via the reusable `simulate` workflow, or the cluster (a Job; not deployed yet) |
+| `spads` | a [SPADS](https://github.com/Yaribz/SPADS) autohost on BAR's lobby server that hosts Skirmish AI bots in its own process, so people can play with or against custom AIs | the cluster, deployed by `rjm.bar.lobbies` (a Deployment) |
 | `host` / `join` | a direct-connect (LAN) game between containers, no lobby and no internet: e.g. two AI builds, each in its own container, playing each other ([`docs/lan.md`](docs/lan.md)) | any Docker hosts that can reach each other over UDP |
 
 Both run BAR's **official** Linux engine release (`recoil_2026.07.04`, pinned in
@@ -110,87 +112,33 @@ owned by the user"; already set).
 
 Image tags: `<commit sha>` and `tree-<source tree hash>` (each written once,
 never re-pushed), `test` and `prod` (what each environment runs), and from prod
-`recoil-<engine version>` and `latest`. A squash merge from test to prod has a
+`recoil-<engine version>` and `latest`. `test` and `prod` always name the
+newest image published from that branch; `rjm.bar.lobbies` resolves them to a
+digest at each deploy. A squash merge from test to prod has a
 new commit hash but the same source tree, so prod reuses the exact image test
 ran instead of rebuilding it.
 
 ## Branches
 
-`test` is the default branch: every push to it builds, publishes and deploys to
-`bar-test`. `prod` changes only when you squash-merge a pull request from
-`test`; nothing merges to it automatically. Pull requests into either branch
-run the `ci` checks.
+`test` is the default branch: every push to it builds, tests and publishes the
+image ([`.github/workflows/publish.yml`](.github/workflows/publish.yml)) and
+moves the `test` tag. `prod` changes only when you squash-merge a pull request
+from `test`; nothing merges to it automatically. Pull requests into either
+branch run the `ci` checks. Publishing needs no repository secrets: it uses the
+workflow's own `GITHUB_TOKEN`.
 
 ## Cluster deployment
 
-Namespace `bar-<env>` on `mcgill-data`, deployed by
-[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) on push to the
-`test` or `prod` branch:
+This repository no longer deploys anything. The lobby is deployed from
+[`rjm.bar.lobbies`](https://github.com/S3KCentrifugal/rjm.bar.lobbies)
+(namespace `bar-lobbies-<env>`), which owns its settings, account and
+pipeline. `k8s/` here is kept as the reference for the match Job and the SPADS
+Deployment, still covered by the static checks, but no pipeline applies it.
+The AI-vs-AI match Job will be deployed in a follow-up.
 
-| Object | Purpose |
-| --- | --- |
-| Job `rjm-bar-host-match` | one simulation per deploy; the deploy waits for it and fails if it fails |
-| Deployment `rjm-bar-host-spads` | the lobby autohost; held at 0 replicas until `rjm-bar-host-secrets` exists |
-| PVCs `rjm-bar-host-{data,out,ai}-pvc` | content, output, custom AIs, under `/mnt/data2/k8s-volumes/rjm-bar-host/<env>/` |
-
-**Loading a custom AI folder onto the cluster**: `scripts/upload_ai.sh test
-path/to/AI/Skirmish/SMRTBARb` copies it onto the custom-AI volume (Linux build
-only; a Windows folder is rejected). It is installed at the next match, or the
-next SPADS restart.
-
-A deploy never interrupts a game: it refuses while the match Job is running, and
-refuses to restart SPADS while a lobby game is in progress (dispatch with
-`interrupt_lobby` to override).
-
-### Cluster secrets
-
-Full provisioning steps for every key and token: [`docs/setup.md`](docs/setup.md).
-
-The image publishes without them; the deploy job is skipped (with a warning)
-until they are set on this repository. They are the same values the
-`mcgill-software` repositories use:
-
-```bash
-gh secret set WG_PRIVATE_KEY       -R S3KCentrifugal/rjm.bar.host
-gh secret set WG_CLIENT_ADDRESS    -R S3KCentrifugal/rjm.bar.host
-gh secret set WG_SERVER_PUBLIC_KEY -R S3KCentrifugal/rjm.bar.host
-gh secret set WG_ENDPOINT          -R S3KCentrifugal/rjm.bar.host
-gh secret set WG_ALLOWED_IPS       -R S3KCentrifugal/rjm.bar.host
-gh secret set KUBE_CONFIG_DATA     -R S3KCentrifugal/rjm.bar.host   # base64 kubeconfig
-gh secret set GHCR_PULL_TOKEN      -R S3KCentrifugal/rjm.bar.host   # PAT: read:packages
-```
-
-`GHCR_PULL_TOKEN` must be able to read **both** `ghcr.io/mcgill-software/mcgill-deployer`
-(the deploy job's container) and this account's private `rjm-bar-host` package (the
-cluster's pull secret) — a classic PAT with `read:packages` from an account that
-can see both.
-
-The WireGuard peer must be one not already in use by another runner: two
-tunnels with the same private key and address knock each other off.
-
-### The lobby host (SPADS)
-
-A co-op room on BAR's lobby server that runs itself: humans against a team of
-8 server-side SMRTBARb bots at +50%. It starts games automatically once
-players are ready, stays open between games, kicks spammers, and archives
-every game. Full guide: [`docs/lobby.md`](docs/lobby.md).
-
-1. **Credentials** (your second Chobby account): set the repository secrets
-   `LOBBY_LOGIN_TEST`, `LOBBY_PASSWORD_TEST`, `LOBBY_OWNER_TEST` (your main
-   account) and optionally `LOBBY_ROOM_PASSWORD_TEST`, then push to `test`.
-   The deploy writes them into the cluster. See
-   [`docs/setup.md`](docs/setup.md) §5.
-2. **Router**: forward **UDP 8452** (test; 8462 for prod) to `mcgill-data`.
-   Without it the room is visible but nobody outside can join.
-3. **Control it** from anywhere with cluster access:
-   ```bash
-   kubectl exec -n bar-test deploy/rjm-bar-host-spads -c spads -- spadsctl status
-   kubectl exec -n bar-test deploy/rjm-bar-host-spads -c spads -- spadsctl spads map Comet Catcher Remake 1.8
-   ```
-   Or as owner, by private message to the autohost: `!map …`, `!forceStart`,
-   `!stop`.
-
-Room settings are in [`k8s/base/spads.env`](k8s/base/spads.env).
+For that repository's workflows to read this private package, its
+`GHCR_PULL_TOKEN` must be able to read `rjm-bar-host` (or grant it Actions
+access: [`docs/setup.md`](docs/setup.md) §7).
 
 ## Tests
 
@@ -216,5 +164,5 @@ SMRTBARb, with a real headless human client, against a fake lobby server. See
 | `scripts/demo_stats.py` | per-team statistics from a replay |
 | `scripts/measure_match.py` | CPU/RSS sampling behind the resource numbers |
 | `config/engine.pin` | engine release version and checksum |
-| `k8s/base/`, `k8s/overlays/{test,prod}/` | Kustomize manifests |
-| `.github/workflows/` | `deploy` (publish + deploy), `ci` (checks), `simulate` (reusable) |
+| `k8s/base/`, `k8s/overlays/{test,prod}/` | Kustomize manifests (reference; not applied by any pipeline) |
+| `.github/workflows/` | `publish` (build, test, publish), `ci` (checks), `e2e` (lobby end-to-end), `simulate` (reusable) |

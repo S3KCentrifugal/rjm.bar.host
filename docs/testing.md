@@ -6,8 +6,8 @@ from GitHub.
 
 | Suite | Command | Needs | Time | Runs in CI |
 | --- | --- | --- | --- | --- |
-| Smoke | `scripts/smoke_test.sh <image>` | the image | ~1 min | every build (`ci`, `deploy`) |
-| Unit + static | `tests/run_unit.sh <image>` | the image, `kubectl`, PyYAML | ~1 min | every build (`ci`, `deploy`) |
+| Smoke | `scripts/smoke_test.sh <image>` | the image | ~1 min | every build (`ci`, `publish`) |
+| Unit + static | `tests/run_unit.sh <image>` | the image, `kubectl`, PyYAML | ~1 min | every build (`ci`, `publish`) |
 | LAN end-to-end | `tests/lan/run.sh <image>` | the image, the content volume, ~12 GB | ~5 min | no: three engines exceed CI's 7 GB runner |
 | Lobby end-to-end | `tests/e2e/run.sh <image>` | the image, ~2 GB content volume | ~10 min | `e2e` workflow: weekly, on demand, on PRs touching the lobby host |
 

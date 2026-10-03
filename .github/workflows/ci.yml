@@ -1,7 +1,7 @@
 # Checks for pull requests -- feature branches into test, and test into prod:
 # lint, static manifest checks, build the image, smoke test, unit tests.
-# Nothing is published. Pushes to test and prod are built, tested, published
-# and deployed by deploy.yml; the full lobby end-to-end test is e2e.yml.
+# Nothing is published. Pushes to test and prod are built, tested and
+# published by publish.yml; the full lobby end-to-end test is e2e.yml.
 name: ci
 
 on:

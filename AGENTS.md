@@ -8,8 +8,10 @@ override this file.
 ## Project
 
 A **reusable Beyond All Reason headless host image**,
-`ghcr.io/s3kcentrifugal/rjm-bar-host` (private), plus its deployment to the private
-k3s cluster in namespace `bar-<env>`. One image, two modes:
+`ghcr.io/s3kcentrifugal/rjm-bar-host` (private), built, tested and published to
+GHCR by `.github/workflows/publish.yml`. This repository deploys nothing: the
+cluster's lobbies are deployed from the image by `../rjm.bar.lobbies`
+(namespace `bar-lobbies-<env>`). One image, two modes:
 
 - **`match`** — an unattended AI-vs-AI simulation played to game over, leaving
   a replay, logs and `result.json`. Runs as a Kubernetes Job, under plain
@@ -22,8 +24,10 @@ The engine is BAR's **official Linux release** (`config/engine.pin`), and custom
 AIs are installed into `$BAR_ENGINE_DIR/AI/Skirmish` at container start
 (`scripts/install_ai.py`). Other repositories consume the image directly.
 
-**Status: both modes built and verified locally; neither has run on the
-cluster** — the deploy job waits on the cluster secrets. The design is
+**Status: both modes built and verified locally.** The SPADS lobby is
+deployed by `../rjm.bar.lobbies`; the match Job is not deployed anywhere yet
+(a follow-up). `k8s/` here is the reference for both and is still covered by
+the static checks, but no pipeline applies it. The design is
 [`docs/autohost-design.md`](docs/autohost-design.md) - read it before writing
 anything here.
 
@@ -45,11 +49,11 @@ This project **operates no lobby infrastructure**: SPADS is a lobby *client*.
 3. **Never modify the BAR game archive to make something work here.** Changing
    `../Beyond-All-Reason` alters the archive checksum, so stock clients can no
    longer join. That rules it out for public hosting regardless of merit.
-4. **Never interrupt a running game.** The match is a `Job`: the pipeline refuses
-   to deploy while it is active and deletes it only once finished (a Job's pod
-   template is immutable). SPADS is a `Recreate` Deployment with no liveness
-   probe; the pipeline refuses to restart it while a `spring-headless` process
-   (a lobby game) is running in it, unless `interrupt_lobby` is set.
+4. **Never interrupt a running game.** A match is a `Job`: never replace one
+   while it is active (a Job's pod template is immutable). SPADS is a
+   `Recreate` Deployment with no liveness probe, and whatever deploys it
+   (today `../rjm.bar.lobbies`) must refuse to restart it while a
+   `spring-headless` process (a lobby game) is running in it.
 5. **Secrets never enter git.** Lobby credentials, `rclone` tokens, kubeconfigs
    and WireGuard keys are gitignored. Templates end in `.example` or `.sample`.
 
@@ -87,7 +91,7 @@ This project **operates no lobby infrastructure**: SPADS is a lobby *client*.
 | `config/engine.pin` | engine release version and archive sha256 |
 | `k8s/base/` | rbac, network policy, pvcs, match Job, SPADS Deployment, `match.env`, `spads.env`, `secrets.yaml.example` |
 | `k8s/overlays/{test,prod}/` | namespace, persistent volumes, image tag |
-| `.github/workflows/` | `deploy.yml` (publish + deploy), `ci.yml` (checks), `simulate.yml` (reusable simulation) |
+| `.github/workflows/` | `publish.yml` (build, test, publish to GHCR), `ci.yml` (checks), `e2e.yml` (lobby end-to-end), `simulate.yml` (reusable simulation) |
 
 **Engine and AI must be interface-compatible.** A `libSkirmishAI.so` built
 against an engine whose C AI interface differs from the
@@ -111,7 +115,7 @@ before authoring infrastructure rather than inventing conventions:
 | --- | --- |
 | `author-k8s-manifests` | Deployments, Services, PVs/PVCs, RBAC, Kustomize base/overlay |
 | `convention-kustomize` | manifest naming, labels, claimRef binding, validation |
-| `configure-k8s-pipeline` | `.github/workflows/deploy.yml`, the 3-job architecture, WireGuard, the 12-step deploy |
+| `configure-k8s-pipeline` | `.github/workflows/publish.yml` (set-env and build jobs); the deploy half lives in `../rjm.bar.lobbies` |
 | `convention-deployment` | Dockerfiles, image tagging, health checks, observability |
 | `troubleshoot-k8s` | ImagePullBackOff, CrashLoopBackOff, Released PVs, 503s |
 | `scaffold-k8s-project` | the new-project checklist, if starting a component from scratch |
@@ -126,7 +130,8 @@ this repository's parent.
 
 | Project | Path | What it is | Write policy |
 | --- | --- | --- | --- |
-| **rjm.bar.host** | `.` | this repository - reusable BAR headless host image and its deployment | writable |
+| **rjm.bar.host** | `.` | this repository - reusable BAR headless host image | writable |
+| **rjm.bar.lobbies** | `../rjm.bar.lobbies` | lobby configuration and the cluster deploy pipeline that runs this image | writable |
 | **rjm.bar.rustai** | `../rjm.bar.rustai` | Rust BAR Skirmish AI (`libSkirmishAI.so` over the C interface) - a consumer of this image | writable |
 | **rjm.bar.telemetry** | `../rjm.bar.telemetry` | replay (`.sdfz`) telemetry into Postgres - can consume this image's replays | writable |
 | **rjm.bar.docs** | `../rjm.bar.docs` | central game knowledge base for BAR + Recoil, shared by all projects | writable; **game facts only** |
@@ -239,7 +244,8 @@ Use the narrowest authoritative source:
 - Read `docs/autohost-design.md` before writing code. If reality contradicts it,
   fix the design in the same change - do not let them drift.
 - Keep the two read-only trees pristine; inspection commands only.
-- `test` is the default branch; every push to it deploys to `bar-test`. Never
+- `test` is the default branch; every push to it publishes the image and moves
+  the `test` tag, which `../rjm.bar.lobbies` deploys on its next run. Never
   push or merge to `prod`: the owner squash-merges pull requests from `test` by
   hand.
 - Do not commit automatically. Commit only when asked, and only the change

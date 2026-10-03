@@ -1,0 +1,198 @@
+# Build the reusable rjm-bar-host image and publish it to GHCR:
+# set-env -> build. Nothing is deployed from here: the image runs under plain
+# `docker run`, on a GitHub runner (simulate.yml), or on the cluster, where
+# S3KCentrifugal/rjm.bar.lobbies deploys the lobbies from it.
+#
+#   push test|prod        build if the image changed since the last push, test
+#                         it, publish it
+#   workflow_dispatch     must be run *from* test or prod; builds (or retags)
+#                         this commit's image
+#
+# Branches: `test` is the default branch and publishes on every push. `prod` is
+# updated only by a squash-merged pull request from test, by hand.
+#
+# Image tags: an image is keyed by the commit's *tree* (tree-<hash>): identical
+# source, identical image. A squash merge to prod has a new commit hash but the
+# same tree as the tested test commit, so prod retags the image test ran rather
+# than rebuilding it. <sha> and tree-<hash> tags are written once, never
+# re-pushed. `test` and `prod` always name the newest image of each branch
+# (what rjm.bar.lobbies resolves); prod also writes recoil-<engine> and latest.
+name: publish
+
+on:
+  push:
+    branches: [test, prod]
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: Build this commit's image even if nothing image-related changed (never overwrites an existing <sha> tag)
+        type: boolean
+        default: false
+
+concurrency:
+  # One publish per branch at a time, in order: the `test`/`prod` tag must end
+  # on the newest commit.
+  group: publish-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: rjm-bar-host
+
+jobs:
+  set-env:
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.env.outputs.ref }}
+      tree: ${{ steps.env.outputs.tree }}
+      environment: ${{ steps.env.outputs.environment }}
+      image: ${{ steps.env.outputs.image }}
+      engine_version: ${{ steps.pin.outputs.engine_version }}
+      engine_sha256: ${{ steps.pin.outputs.engine_sha256 }}
+      build_needed: ${{ steps.changed.outputs.build_needed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve environment
+        id: env
+        run: |
+          ENVIRONMENT="${{ github.ref_name }}"
+          if [ "$ENVIRONMENT" != "test" ] && [ "$ENVIRONMENT" != "prod" ]; then
+            echo "::error::refusing to publish from '$ENVIRONMENT': run this from the test or prod branch"
+            exit 1
+          fi
+          # GHCR repository names must be lowercase; the account name is not.
+          OWNER="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          {
+            echo "ref=$(git rev-parse HEAD)"
+            echo "tree=$(git rev-parse 'HEAD^{tree}')"
+            echo "environment=$ENVIRONMENT"
+            echo "image=ghcr.io/$OWNER/$IMAGE_NAME"
+          } >> "$GITHUB_OUTPUT"
+          echo "publishing $(git rev-parse --short HEAD) as $ENVIRONMENT"
+
+      - name: Read the engine pin
+        id: pin
+        run: |
+          set -a; . ./config/engine.pin; set +a
+          echo "engine_version=$ENGINE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "engine_sha256=$ENGINE_SHA256" >> "$GITHUB_OUTPUT"
+          echo "engine recoil_$ENGINE_VERSION"
+
+      - name: Detect image-relevant changes
+        id: changed
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          NEEDED=false
+          case "${{ github.event_name }}" in
+            push)
+              # Everything pushed, not just the last commit.
+              if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+                 || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+                NEEDED=true   # new branch or rewritten history: no base to diff
+              elif git diff --name-only "$BEFORE" HEAD | grep -qE '^(docker/|scripts/|config/engine\.pin)'; then
+                NEEDED=true
+              elif git log --format=%B "$BEFORE..HEAD" | grep -q '\[force-build\]'; then
+                NEEDED=true
+              fi ;;
+            # The build job only builds if this commit has no image yet;
+            # otherwise it retags. Cheap, and it makes a manual run self-healing.
+            workflow_dispatch) NEEDED=true ;;
+          esac
+          echo "build_needed=$NEEDED" >> "$GITHUB_OUTPUT"
+          echo "build needed: $NEEDED"
+
+  build:
+    runs-on: ubuntu-latest
+    needs: set-env
+    if: needs.set-env.outputs.build_needed == 'true'
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ${{ needs.set-env.outputs.image }}
+      SHA: ${{ needs.set-env.outputs.ref }}
+      TREE: tree-${{ needs.set-env.outputs.tree }}
+      ENVIRONMENT: ${{ needs.set-env.outputs.environment }}
+      ENGINE_VERSION: ${{ needs.set-env.outputs.engine_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.set-env.outputs.ref }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Images are keyed by source tree. If this tree already has an image -- a
+      # squash-merge of tested test code into prod, or a rerun -- reuse it
+      # rather than rebuild it.
+      - name: Does this source already have an image?
+        id: exists
+        run: |
+          if docker buildx imagetools inspect "$IMAGE:$TREE" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$IMAGE:$TREE exists; it will be retagged, not rebuilt"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Build once into the runner's daemon and prove it works before anything
+      # is pushed.
+      - name: Build
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/runtime/Dockerfile
+          target: runtime
+          load: true
+          tags: rjm-bar-host:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            ENGINE_VERSION=${{ needs.set-env.outputs.engine_version }}
+            ENGINE_SHA256=${{ needs.set-env.outputs.engine_sha256 }}
+
+      - name: Smoke test
+        if: steps.exists.outputs.exists != 'true'
+        run: scripts/smoke_test.sh rjm-bar-host:ci
+
+      - name: Unit tests
+        if: steps.exists.outputs.exists != 'true'
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          tests/run_unit.sh rjm-bar-host:ci
+
+      - name: Push the source tag
+        if: steps.exists.outputs.exists != 'true'
+        run: |
+          docker tag rjm-bar-host:ci "$IMAGE:$TREE"
+          docker push "$IMAGE:$TREE"
+
+      # Every other tag points at the source's image: this commit's <sha>
+      # (unless it already exists), <env>, and on prod recoil-<engine>, latest.
+      - name: Tag this commit's image
+        run: |
+          TAGS="$ENVIRONMENT"
+          # <sha> is written once: never repoint an existing commit tag.
+          if ! docker buildx imagetools inspect "$IMAGE:$SHA" > /dev/null 2>&1; then
+            TAGS="$SHA $TAGS"
+          fi
+          [ "$ENVIRONMENT" = "prod" ] && TAGS="$TAGS recoil-$ENGINE_VERSION latest"
+          ARGS=""
+          for t in $TAGS; do ARGS="$ARGS -t $IMAGE:$t"; done
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $ARGS "$IMAGE:$TREE"
+          {
+            echo "### Published"
+            echo "- \`$IMAGE:$TREE\`$([ "${{ steps.exists.outputs.exists }}" = true ] && echo ' (existing image for this source, reused)')"
+            for t in $TAGS; do echo "- \`$IMAGE:$t\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"

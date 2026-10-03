@@ -1,5 +1,12 @@
 # Backend setup
 
+> **This repository no longer deploys to the cluster.** `publish.yml` needs no
+> secrets. The cluster deploy, and the setup it needs (WireGuard, kubeconfig,
+> pull token, lobby password, router), moved to
+> [`rjm.bar.lobbies`](https://github.com/S3KCentrifugal/rjm.bar.lobbies)
+> (`docs/setup.md` there). This page is kept as the background those steps
+> refer to, and for the match Job's follow-up deploy; §7 still applies here.
+
 Everything that has to exist outside this repository before `rjm.bar.host`
 can deploy to the cluster and host lobbies: keys, tokens, cluster identities,
 GitHub settings and the router. Do it once, in order. Each step ends with a

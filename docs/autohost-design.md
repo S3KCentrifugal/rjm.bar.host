@@ -549,12 +549,16 @@ never committed; SPADS refuses to start with an empty owner login, because
 
 ## 8. CI/CD pipeline
 
-Three workflows in `.github/workflows/`:
+Four workflows in `.github/workflows/`. **The cluster deploy moved to
+`rjm.bar.lobbies`** (2026-10-03): `publish.yml` is the former `deploy.yml`
+without its deploy job, so the `deploy` description below is historical until
+the match Job's deploy is rebuilt.
 
 | Workflow | Trigger | Does |
 | --- | --- | --- |
 | `ci.yml` | pull requests into `test` or `prod` | shellcheck, Python compile, render both overlays, build the image, smoke test — publishes nothing |
-| `deploy.yml` | push to `test`/`prod`, `workflow_dispatch`, `repository_dispatch: ai-updated` | `set-env → build → deploy`: publish the image, deploy, run a match |
+| `publish.yml` | push to `test`/`prod`, `workflow_dispatch` | `set-env → build`: build, smoke and unit test, publish the image and move the `<env>` tag |
+| `e2e.yml` | schedule, `workflow_dispatch` | the offline lobby end-to-end test |
 | `simulate.yml` | `workflow_call` (reusable), `workflow_dispatch` | run one simulation on a GitHub runner with the image, upload `/bar/out` as an artifact |
 
 **`set-env`** resolves the environment and the commit to deploy. A push deploys
