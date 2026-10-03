@@ -5,12 +5,13 @@ published to GHCR by this repository. It runs under Docker or Kubernetes; the
 cluster's lobbies are deployed from it by
 [`rjm.bar.lobbies`](https://github.com/S3KCentrifugal/rjm.bar.lobbies).
 
-One image, `ghcr.io/s3kcentrifugal/rjm-bar-host`, does three jobs:
+One image, `ghcr.io/s3kcentrifugal/rjm-bar-host`, does four jobs:
 
 | Mode | What it does | Where it runs |
 | --- | --- | --- |
 | `match` | an unattended AI-vs-AI simulation, played to game over at high speed, leaving a replay, logs and `result.json` | any Docker host, a GitHub runner via the reusable `simulate` workflow, or the cluster (a Job; not deployed yet) |
-| `spads` | a [SPADS](https://github.com/Yaribz/SPADS) autohost on BAR's lobby server that hosts Skirmish AI bots in its own process, so people can play with or against custom AIs | the cluster, deployed by `rjm.bar.lobbies` (a Deployment) |
+| `spads` | a [SPADS](https://github.com/Yaribz/SPADS) autohost on BAR's lobby server that hosts Skirmish AI bots in its own process, so people can play with or against custom AIs. Needs inbound UDP | any host that players can reach over UDP |
+| `client` | a headless **lobby client** that takes a room on BAR's own autohosts, adds AI bots it owns, and runs them in its own `spring-headless` as a spectator client of each game. Outbound connections only ([`scripts/lobby_client.py`](scripts/lobby_client.py)) | the cluster, deployed by `rjm.bar.lobbies` |
 | `host` / `join` | a direct-connect (LAN) game between containers, no lobby and no internet: e.g. two AI builds, each in its own container, playing each other ([`docs/lan.md`](docs/lan.md)) | any Docker hosts that can reach each other over UDP |
 
 Both run BAR's **official** Linux engine release (`recoil_2026.07.04`, pinned in
@@ -131,7 +132,8 @@ workflow's own `GITHUB_TOKEN`.
 
 This repository no longer deploys anything. The lobby is deployed from
 [`rjm.bar.lobbies`](https://github.com/S3KCentrifugal/rjm.bar.lobbies)
-(namespace `bar-lobbies-<env>`), which owns its settings, account and
+(namespace `bar-lobbies-<env>`) in `client` mode, which needs no ports or
+router forward. That repository owns the lobby's settings, account and
 pipeline. `k8s/` here is kept as the reference for the match Job and the SPADS
 Deployment, still covered by the static checks, but no pipeline applies it.
 The AI-vs-AI match Job will be deployed in a follow-up.
@@ -157,6 +159,7 @@ SMRTBARb, with a real headless human client, against a fake lobby server. See
 | `tests/` | unit tests, static manifest checks, the lobby and LAN end-to-end tests |
 | `examples/lan/` | a docker compose LAN game: SMRTBARb against BARb from separate containers |
 | `scripts/lan_game.py` | LAN games: host a spec'd game or join one |
+| `scripts/lobby_client.py` | `client` mode: headless lobby client on BAR's own autohosts, runs AI bots |
 | `scripts/run_match.py` | writes the game script, drives the match over the Autohost Protocol, exits at game over |
 | `scripts/install_ai.py` | installs custom AIs into `AI/Skirmish` |
 | `scripts/upload_ai.sh` | copies AI folders onto the cluster's custom-AI volume |

@@ -3,6 +3,9 @@
 #
 #   match           install AIs, fetch content, run one AI-vs-AI simulation (default)
 #   spads           install AIs, fetch content, run a SPADS lobby autohost
+#   client          install AIs, fetch content, run a headless lobby client that
+#                   takes a room on BAR's own autohosts and runs AI bots in it
+#                   (scripts/lobby_client.py; no inbound network needed)
 #   host            install AIs, fetch content, host a direct-connect (LAN) game
 #                   described by BARHOST_LAN_SPEC / BARHOST_LAN_SPEC_FILE
 #   join            install AIs, fetch content, join a LAN game (BARHOST_LAN_HOST,
@@ -119,9 +122,15 @@ cmd_spads() {
 	exec "/opt/rjm-bar-host/spads/run_spads.sh"
 }
 
+cmd_client() {
+	prepare
+	PRD="$PRD" exec python3 "$BIN/lobby_client.py"
+}
+
 case "${1:-match}" in
 	match)         cmd_match ;;
 	spads)         cmd_spads ;;
+	client)        cmd_client ;;
 	host)          cmd_lan host ;;
 	join)          cmd_lan join ;;
 	fetch-content) cmd_fetch_content ;;

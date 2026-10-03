@@ -135,7 +135,7 @@ COPY --from=engine /bar/engine/ /bar/engine/
 COPY --from=spads /opt/spads/ /opt/spads/
 
 COPY docker/runtime/entrypoint.sh /opt/rjm-bar-host/bin/entrypoint.sh
-COPY scripts/run_match.py scripts/lan_game.py scripts/install_ai.py scripts/demo_stats.py /opt/rjm-bar-host/bin/
+COPY scripts/run_match.py scripts/lan_game.py scripts/lobby_client.py scripts/install_ai.py scripts/demo_stats.py /opt/rjm-bar-host/bin/
 COPY docker/spads/ /opt/rjm-bar-host/spads/
 
 # SPADS refuses to start without all nine configuration files. The ones this

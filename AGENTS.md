@@ -11,22 +11,26 @@ A **reusable Beyond All Reason headless host image**,
 `ghcr.io/s3kcentrifugal/rjm-bar-host` (private), built, tested and published to
 GHCR by `.github/workflows/publish.yml`. This repository deploys nothing: the
 cluster's lobbies are deployed from the image by `../rjm.bar.lobbies`
-(namespace `bar-lobbies-<env>`). One image, two modes:
+(namespace `bar-lobbies-<env>`). One image, three modes:
 
 - **`match`** — an unattended AI-vs-AI simulation played to game over, leaving
   a replay, logs and `result.json`. Runs as a Kubernetes Job, under plain
   `docker run`, or on a GitHub runner through the reusable `simulate` workflow.
 - **`spads`** — a SPADS autohost on BAR's lobby server that runs Skirmish AI
   bots inside its own `spring-headless`, so people can play with or against
-  custom AIs. Runs as a Deployment with `hostNetwork`.
+  custom AIs. Needs inbound UDP (`hostNetwork` plus a router forward).
+- **`client`** — a headless lobby client (`scripts/lobby_client.py`) that
+  takes a room on BAR's own autohosts, adds AI bots it owns, and runs them in
+  its own `spring-headless` as a spectator client of each game. Outbound only.
+  This is what `../rjm.bar.lobbies` deploys.
 
 The engine is BAR's **official Linux release** (`config/engine.pin`), and custom
 AIs are installed into `$BAR_ENGINE_DIR/AI/Skirmish` at container start
 (`scripts/install_ai.py`). Other repositories consume the image directly.
 
-**Status: both modes built and verified locally.** The SPADS lobby is
-deployed by `../rjm.bar.lobbies`; the match Job is not deployed anywhere yet
-(a follow-up). `k8s/` here is the reference for both and is still covered by
+**Status: `match` and `spads` built and verified locally; `client` unit
+tested but not yet run against BAR's real lobby server.** `../rjm.bar.lobbies`
+deploys `client`; the match Job is not deployed anywhere yet (a follow-up). `k8s/` here is the reference for both and is still covered by
 the static checks, but no pipeline applies it. The design is
 [`docs/autohost-design.md`](docs/autohost-design.md) - read it before writing
 anything here.
@@ -85,6 +89,7 @@ This project **operates no lobby infrastructure**: SPADS is a lobby *client*.
 | `tests/` | `run_unit.sh` (unit + static manifest checks), `e2e/run.sh` (offline lobby end-to-end) |
 | `scripts/run_match.py` | writes the GameSetup script, drives the match over the Autohost Protocol, exits at game over |
 | `scripts/lan_game.py`, `examples/lan/`, `docs/lan.md` | direct-connect (LAN) games between containers: `host` / `join` entrypoint modes |
+| `scripts/lobby_client.py`, `tests/unit/test_lobby_client.py` | `client` mode: the Spring lobby protocol as Chobby speaks it (login, room choice, `!boss`, `ADDBOT`, start script), as a state machine fed lines and a clock |
 | `scripts/install_ai.py` | installs custom AIs from folders, archives or GitHub releases; refuses Windows builds |
 | `scripts/smoke_test.sh` | the checks CI runs before any image is published |
 | `scripts/demo_stats.py`, `scripts/measure_match.py` | replay statistics; the resource measurements |
