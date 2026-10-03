@@ -61,15 +61,12 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import run_match as rm  # noqa: E402  (shared: Tdf, Autohost, event codes, engine config)
+import barcommon as rm  # noqa: E402  (shared with every mode: Tdf, Autohost, Engine, settings)
 
 NAME_RE = re.compile(r"^[\w\[\]]{1,20}$")
 HOST_ALIAS = "host"
@@ -282,81 +279,25 @@ def host_script(s: dict, autohost_port: int = 53200) -> str:
     return tdf.render()
 
 
-def client_script(host: str, port: int, name: str, password: str) -> str:
-    tdf = rm.Tdf()
-    tdf.open("GAME")
-    tdf.kv("HostIP", host)
-    tdf.kv("HostPort", port)
-    tdf.kv("IsHost", 0)
-    tdf.kv("MyPlayerName", name)
-    tdf.kv("MyPasswd", password)
-    tdf.close()
-    return tdf.render()
-
-
-# --- Running the engine -----------------------------------------------------
-
-
-def engine_paths():
-    engine_dir = rm.env("BAR_ENGINE_DIR")
-    if not engine_dir:
-        raise SystemExit("BAR_ENGINE_DIR is not set")
-    return engine_dir, str(Path(engine_dir) / "spring-headless")
-
-
-def write_settings(write_dir: Path) -> Path:
-    """Engine config: demos recorded, worker threads from the cgroup quota,
-    plus anything in $BARHOST_ENGINE_SETTINGS."""
-    path = write_dir / "springsettings.cfg"
-    rm.write_engine_config(SimpleNamespace(record_demos=True, worker_threads=0), path)
-    extra = rm.parse_kv(rm.env("BARHOST_ENGINE_SETTINGS"))
-    if extra:
-        with path.open("a", encoding="utf-8") as f:
-            for k, v in extra.items():
-                f.write(f"{k} = {v}\n")
-    return path
-
-
-def launch(engine_dir: str, engine: str, write_dir: Path, script: Path, settings: Path):
-    console = (write_dir / "engine-console.log").open("wb")
-    env = dict(os.environ, SPRING_DATADIR=engine_dir)
-    proc = subprocess.Popen(
-        [engine, "--isolation", "--isolation-dir", rm.env("BARHOST_DATA_DIR", "/bar/data"),
-         "--write-dir", str(write_dir), "--config", str(settings), str(script)],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    pump = threading.Thread(target=rm.tee, args=(proc.stdout, console), daemon=True)
-    pump.start()
-    return proc, pump, console
-
-
-def stop(proc, pump, console, grace: float = 30):
-    if proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(grace)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-    pump.join(timeout=10)
-    console.close()
+client_script = rm.client_script
+engine_paths = rm.engine_paths
 
 
 # --- Host -------------------------------------------------------------------
 
 
 def host(s: dict) -> int:
-    engine_dir, engine = engine_paths()
     write_dir = Path(rm.env("BARHOST_WRITE_DIR", "/bar/out/lan/host"))
     write_dir.mkdir(parents=True, exist_ok=True)
     script = write_dir / "script.txt"
     script.write_text(host_script(s), encoding="utf-8")
-    settings = write_settings(write_dir)
+    settings = rm.engine_settings(write_dir)
     expected = {p["name"] for p in s["players"]}
     log(f"hosting {s['map']} on UDP {s['port']} for {', '.join(sorted(expected)) or 'nobody'}"
         f" (observer team: {'on' if s['observerTeam'] else 'off'})")
 
-    ah = rm.Autohost(53200)
-    proc, pump, console = launch(engine_dir, engine, write_dir, script, settings)
+    ah = rm.Autohost(53200, log=log)
+    proc = rm.Engine(write_dir, script, settings)
     started_at = time.monotonic()
     loaded, connected, left = set(), set(), {}
     result = {"started": False, "gameOver": False, "winningAllyTeams": [], "demo": "",
@@ -439,7 +380,7 @@ def host(s: dict) -> int:
                 all_loaded_at = now          # nobody to wait for
     finally:
         ah.close()
-        stop(proc, pump, console)
+        proc.stop()
 
     result.update({
         "engineVersion": rm.env("BAR_ENGINE_VERSION"), "map": s["map"], "game": s["game"],
@@ -460,7 +401,6 @@ def host(s: dict) -> int:
 
 
 def join() -> int:
-    engine_dir, engine = engine_paths()
     host_addr = rm.env("BARHOST_LAN_HOST")
     name = rm.env("BARHOST_LAN_NAME")
     password = rm.env("BARHOST_LAN_PASSWORD")
@@ -472,11 +412,11 @@ def join() -> int:
     write_dir.mkdir(parents=True, exist_ok=True)
     script = write_dir / "script.txt"
     script.write_text(client_script(host_addr, port, name, password), encoding="utf-8")
-    settings = write_settings(write_dir)
+    settings = rm.engine_settings(write_dir)
     log(f"joining {host_addr}:{port} as {name}")
 
     started = time.monotonic()
-    proc, pump, console = launch(engine_dir, engine, write_dir, script, settings)
+    proc = rm.Engine(write_dir, script, settings)
     reason = "engine exited"
     try:
         while proc.poll() is None:
@@ -485,7 +425,7 @@ def join() -> int:
                 break
             time.sleep(1)
     finally:
-        stop(proc, pump, console)
+        proc.stop()
     rc = proc.returncode
     infolog = (write_dir / "infolog.txt")
     text = infolog.read_text(encoding="utf-8", errors="replace") if infolog.exists() else ""

@@ -20,10 +20,10 @@ jobs:
       - name: Python
         run: python3 -m py_compile scripts/*.py docker/spads/spadsctl tests/unit/*.py tests/e2e/*.py tests/static/*.py
 
-      - name: Static manifest checks
+      - name: Static example checks
         run: |
           python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
-          python3 tests/static/check_manifests.py
+          python3 tests/static/check_examples.py
 
   image:
     runs-on: ubuntu-latest

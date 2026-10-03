@@ -26,112 +26,20 @@ Without it a Kubernetes Job hangs forever after the match has finished.
 from __future__ import annotations
 
 import json
-import os
-import socket
-import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# --- Autohost Protocol event codes (AutohostInterface.cpp:36-130) -----------
-
-SERVER_STARTED = 0
-SERVER_QUIT = 1
-SERVER_STARTPLAYING = 2
-SERVER_GAMEOVER = 3
-SERVER_MESSAGE = 4
-SERVER_WARNING = 5
-PLAYER_JOINED = 10
-PLAYER_LEFT = 11
-PLAYER_READY = 12
-
-EVENT_NAMES = {
-    SERVER_STARTED: "SERVER_STARTED",
-    SERVER_QUIT: "SERVER_QUIT",
-    SERVER_STARTPLAYING: "SERVER_STARTPLAYING",
-    SERVER_GAMEOVER: "SERVER_GAMEOVER",
-    SERVER_MESSAGE: "SERVER_MESSAGE",
-    SERVER_WARNING: "SERVER_WARNING",
-    PLAYER_JOINED: "PLAYER_JOINED",
-    PLAYER_LEFT: "PLAYER_LEFT",
-    PLAYER_READY: "PLAYER_READY",
-}
-
-# BAR's two factions, alternated across teams.
-SIDES = ("Armada", "Cortex")
-
-# TeamBase::SetDefaultColor has few distinct colours; supplying our own keeps
-# an 8-team replay readable.
-TEAM_COLORS = (
-    "0.7 0.1 0.1", "0.1 0.3 0.8", "0.1 0.6 0.2", "0.8 0.7 0.1",
-    "0.6 0.2 0.7", "0.9 0.5 0.1", "0.2 0.7 0.7", "0.8 0.4 0.6",
-    "0.5 0.5 0.5", "0.4 0.2 0.1", "0.3 0.9 0.5", "0.9 0.3 0.5",
-    "0.2 0.2 0.6", "0.6 0.8 0.3", "0.9 0.9 0.9", "0.3 0.1 0.3",
+# Shared with the other modes; re-exported here for callers of run_match.
+from barcommon import (  # noqa: F401
+    EVENT_NAMES, PLAYER_JOINED, PLAYER_LEFT, PLAYER_READY, SERVER_GAMEOVER, SERVER_MESSAGE,
+    SERVER_QUIT, SERVER_STARTED, SERVER_STARTPLAYING, SERVER_WARNING, SIDES, TEAM_COLORS,
+    DEFAULT_MODOPTIONS, Autohost, Engine, Tdf, default_modoptions, detect_cpu_quota, env, env_float,
+    env_int, make_log, parse_kv, tee, write_engine_config,
 )
 
-
-def log(msg: str) -> None:
-    print("[run_match] " + msg, flush=True)
-
-
-def env(name: str, default: str = "") -> str:
-    return os.environ.get(name, default).strip()
-
-
-def env_int(name: str, default: int) -> int:
-    raw = env(name)
-    return int(raw) if raw else default
-
-
-def env_float(name: str, default: float) -> float:
-    raw = env(name)
-    return float(raw) if raw else default
-
-
-def parse_kv(raw: str) -> "dict[str, str]":
-    """Parse ``a=1,b=2`` into a dict. An empty string yields an empty dict."""
-    out = {}
-    for item in raw.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        if "=" not in item:
-            raise SystemExit("expected key=value, got " + repr(item))
-        key, value = item.split("=", 1)
-        out[key.strip()] = value.strip()
-    return out
-
-
-
-# Modoptions that differ from BAR's own defaults. Everything not listed here is
-# left alone, so a match matches what people actually play.
-#
-#   experimentallegionfaction  modoptions.lua:1855, bool, default false
-#   draft_mode                 modoptions.lua:224-257, list, default "random";
-#                              "skill" orders start-position picking by skill.
-#                              Only has an effect with StartPosType 2, since
-#                              game_initial_spawn.lua only consults draftMode on
-#                              the choose-in-game path.
-#   coop                       modoptions.lua:690, bool, default false; gives
-#                              id-sharing teams one commander per player. Inert
-#                              in an all-AI match, set for parity with the
-#                              lobby-hosted game.
-DEFAULT_MODOPTIONS = {
-    "experimentallegionfaction": "1",
-    "draft_mode": "skill",
-    "coop": "1",
-}
-
-
-def default_modoptions(raw: str) -> "dict[str, str]":
-    """BAR's defaults, plus Legion, with anything from the environment on top."""
-    opts = dict(DEFAULT_MODOPTIONS)
-    opts.update(parse_kv(raw))
-    # An explicit empty value removes the key, so a run can turn Legion back off
-    # with BARHOST_MODOPTIONS=experimentallegionfaction=
-    return {k: v for k, v in opts.items() if v != ""}
+log = make_log("run_match")
 
 
 # --- Configuration ----------------------------------------------------------
@@ -222,96 +130,6 @@ class Config:
 
 
 # --- GameSetup script generation -------------------------------------------
-
-
-class Tdf:
-    """Minimal TDF writer matching what ``TdfParser`` accepts."""
-
-    def __init__(self) -> None:
-        self._lines = []
-        self._depth = 0
-
-    def _emit(self, text: str) -> None:
-        self._lines.append(("\t" * self._depth) + text)
-
-    def kv(self, key: str, value) -> None:
-        self._emit("%s=%s;" % (key, value))
-
-    def open(self, section: str) -> None:
-        self._emit("[" + section + "]")
-        self._emit("{")
-        self._depth += 1
-
-    def close(self) -> None:
-        self._depth -= 1
-        self._emit("}")
-
-    def render(self) -> str:
-        return "\n".join(self._lines) + "\n"
-
-
-
-
-
-def detect_cpu_quota() -> "float | None":
-    """Cores this process may actually use, from the cgroup, or None.
-
-    This matters more than it looks. The engine sizes its ThreadPool from
-    ``CPUID::GetNumLogicalCores`` (Threading.cpp:348-352, ThreadPool.cpp:115-120)
-    and CircuitAI sizes its worker pool from ``hardware_concurrency()``
-    (Scheduler.cpp:36). Both read the *host's* CPU topology, which in a
-    container is not the same thing as the CPU the container is allowed. On a
-    24-core node with a 6-core limit the process happily starts ~24 workers and
-    then spends its quota being throttled and context-switching.
-
-    Reading the quota lets the engine's pool be sized to the container instead.
-    """
-    # cgroup v2
-    try:
-        raw = Path("/sys/fs/cgroup/cpu.max").read_text().split()
-        if raw and raw[0] != "max":
-            return int(raw[0]) / int(raw[1])
-    except (OSError, ValueError, IndexError):
-        pass
-    # cgroup v1
-    try:
-        quota = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text().strip())
-        period = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text().strip())
-        if quota > 0 and period > 0:
-            return quota / period
-    except (OSError, ValueError):
-        pass
-    return None
-
-
-def write_engine_config(cfg: Config, path: Path) -> "dict[str, str]":
-    """Write the engine config file passed via --config.
-
-    Two settings earn their place:
-
-    ``ServerRecordDemos``  CONFIG(bool, ServerRecordDemos) defaults to *false*
-        and only the dedicated build defaults it true (GameServer.cpp:75). The
-        headless server therefore records nothing unless asked, and
-        SendStartPlaying reports an empty demo name (:2316-2318). Without this
-        there is no replay to look at, which is most of the point of a run.
-
-    ``WorkerThreadCount``  sized to the cgroup quota rather than the host's core
-        count -- see detect_cpu_quota.
-    """
-    settings = {"ServerRecordDemos": "1" if cfg.record_demos else "0"}
-
-    workers = cfg.worker_threads
-    if workers <= 0:
-        quota = detect_cpu_quota()
-        if quota is not None:
-            # Leave the count at least 2; the pool includes the main thread.
-            workers = max(2, int(quota))
-    if workers > 0:
-        settings["WorkerThreadCount"] = str(workers)
-
-    lines = ["%s = %s" % kv for kv in sorted(settings.items())]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return settings
 
 
 def ally_team_of(team_index: int, cfg: Config) -> int:
@@ -520,39 +338,6 @@ class MatchResult:
     warnings: list = field(default_factory=list)
 
 
-class Autohost:
-    """The autohost end of the engine's loopback control channel."""
-
-    def __init__(self, port: int) -> None:
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("127.0.0.1", port))
-        self.sock.settimeout(1.0)
-        self.engine_addr = None
-
-    def command(self, cmd: str) -> None:
-        """Send a server action. GameServer.cpp:861 strips the leading '/'."""
-        if self.engine_addr is None:
-            log("cannot send /%s yet: engine address unknown" % cmd)
-            return
-        self.sock.sendto(("/" + cmd).encode("utf-8"), self.engine_addr)
-        log("-> /" + cmd)
-
-    def poll(self):
-        try:
-            data, addr = self.sock.recvfrom(4096)
-        except socket.timeout:
-            return None
-        # The engine's source port is where it listens for our commands.
-        self.engine_addr = addr
-        if not data:
-            return None
-        return data[0], data
-
-    def close(self) -> None:
-        self.sock.close()
-
-
 def handle_event(event: int, data: bytes, result: MatchResult, cfg: Config,
                  host: Autohost) -> None:
     name = EVENT_NAMES.get(event, "UNKNOWN(%d)" % event)
@@ -591,15 +376,6 @@ def handle_event(event: int, data: bytes, result: MatchResult, cfg: Config,
         log("<- %s player=%s" % (name, data[1] if len(data) > 1 else "?"))
 
 
-def tee(stream, sink) -> None:
-    """Copy the engine console to our stdout and to a file, line by line."""
-    for line in iter(stream.readline, b""):
-        sink.write(line)
-        sink.flush()
-        sys.stdout.buffer.write(line)
-        sys.stdout.buffer.flush()
-
-
 def installed_ai_version(cfg: Config) -> str:
     """The build stamp an AI release carries, if any (e.g. SMRTBARb_VERSION.txt)."""
     base = Path(cfg.engine_dir) / "AI" / "Skirmish" / cfg.ai_shortname / cfg.ai_version
@@ -620,32 +396,10 @@ def run(cfg: Config) -> MatchResult:
     log("wrote " + str(script_path))
 
     engine_config = write_engine_config(cfg, write_dir / "springsettings.cfg")
-    result_config = engine_config
     log("engine config: " + ", ".join("%s=%s" % kv for kv in sorted(engine_config.items())))
 
-    host = Autohost(cfg.autohost_port)
+    host = Autohost(cfg.autohost_port, log=log)
     log("autohost listening on 127.0.0.1:%d" % cfg.autohost_port)
-
-    cmd = [
-        cfg.engine,
-        "--isolation",
-        "--isolation-dir", cfg.data_dir,
-        "--write-dir", cfg.write_dir,
-        "--config", str(write_dir / "springsettings.cfg"),
-        str(script_path),
-    ]
-
-    # Isolation mode (DataDirLocater.cpp:411-417) pins content discovery to one
-    # directory, which would hide the engine's own AI/ and base/ trees. LEVEL 3
-    # of LocateDataDirs (:434-441) still honours SPRING_DATADIR even in
-    # isolation mode, so the engine directory is added back here. AddDirs splits
-    # on colons (:178), so several paths may be joined if needed.
-    child_env = dict(os.environ)
-    if cfg.engine_dir:
-        child_env["SPRING_DATADIR"] = cfg.engine_dir
-
-    log("launching: " + " ".join(cmd))
-    log("SPRING_DATADIR=" + child_env.get("SPRING_DATADIR", "(unset)"))
 
     result = MatchResult()
     result.engine_config = engine_config
@@ -654,11 +408,10 @@ def run(cfg: Config) -> MatchResult:
     # The engine console goes to the pod log *and* to engine-console.log in the
     # run directory, so it survives the pod. It holds what is printed before
     # infolog.txt opens, which is exactly what explains a failed start.
-    console = (write_dir / "engine-console.log").open("wb")
-    proc = subprocess.Popen(cmd, env=child_env, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT)
-    pump = threading.Thread(target=tee, args=(proc.stdout, console), daemon=True)
-    pump.start()
+    proc = Engine(write_dir, script_path, write_dir / "springsettings.cfg", echo=True,
+                  data_dir=cfg.data_dir, engine=cfg.engine, engine_dir=cfg.engine_dir)
+    log("launched: " + " ".join(proc.cmd))
+    log("SPRING_DATADIR=" + (cfg.engine_dir or "(unset)"))
     deadline = started_at + cfg.timeout
     kill_sent_at = None
 
@@ -679,14 +432,8 @@ def run(cfg: Config) -> MatchResult:
                     host.command("kill")
                     kill_sent_at = now
                 elif now - kill_sent_at > 30:
-                    log("engine did not stop after /kill -- SIGTERM")
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=30)
-                    except subprocess.TimeoutExpired:
-                        log("engine ignored SIGTERM -- SIGKILL")
-                        proc.kill()
-                        proc.wait()
+                    log("engine did not stop after /kill -- stopping it")
+                    proc.stop(grace=30)
                     result.engine_returncode = proc.returncode
                     break
 
@@ -701,11 +448,7 @@ def run(cfg: Config) -> MatchResult:
                 handle_event(event[0], event[1], result, cfg, host)
     finally:
         host.close()
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait()
-        pump.join(timeout=10)
-        console.close()
+        proc.stop(grace=0)
 
     result.wallclock_seconds = round(time.monotonic() - started_at, 1)
     return result

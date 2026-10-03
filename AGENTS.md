@@ -9,33 +9,45 @@ override this file.
 
 A **reusable Beyond All Reason headless host image**,
 `ghcr.io/s3kcentrifugal/rjm-bar-host` (private), built, tested and published to
-GHCR by `.github/workflows/publish.yml`. This repository deploys nothing: the
-cluster's lobbies are deployed from the image by `../rjm.bar.lobbies`
-(namespace `bar-lobbies-<env>`). One image, three modes:
+GHCR by `.github/workflows/publish.yml`. It runs under Docker (`examples/`) or
+Kubernetes. **This repository deploys nothing**: cluster deployments, their
+settings, accounts and pipeline live in `../rjm.bar.lobbies`, which pulls this
+image by digest.
 
-- **`match`** — an unattended AI-vs-AI simulation played to game over, leaving
-  a replay, logs and `result.json`. Runs as a Kubernetes Job, under plain
-  `docker run`, or on a GitHub runner through the reusable `simulate` workflow.
-- **`spads`** — a SPADS autohost on BAR's lobby server that runs Skirmish AI
-  bots inside its own `spring-headless`, so people can play with or against
-  custom AIs. Needs inbound UDP (`hostNetwork` plus a router forward).
-- **`client`** — a headless lobby client (`scripts/lobby_client.py`) that
-  takes a room on BAR's own autohosts, adds AI bots it owns, and runs them in
-  its own `spring-headless` as a spectator client of each game. Outbound only.
-  This is what `../rjm.bar.lobbies` deploys.
+One image, every server-side role (README "Use cases"):
 
-The engine is BAR's **official Linux release** (`config/engine.pin`), and custom
-AIs are installed into `$BAR_ENGINE_DIR/AI/Skirmish` at container start
-(`scripts/install_ai.py`). Other repositories consume the image directly.
+- **`client`**: a headless lobby client (`scripts/lobby_client.py`). It takes
+  a room on BAR's own autohosts, adds AI bots it owns, and runs them in its own
+  `spring-headless` as a spectator client of each game. Outbound only.
+- **`spads`**: a SPADS autohost on BAR's lobby server (`docker/spads/`). It
+  runs Skirmish AI bots inside its own `spring-headless`. It needs inbound UDP:
+  host networking plus a router forward.
+- **`match`**: an unattended AI-vs-AI simulation played to game over
+  (`scripts/run_match.py`). It leaves a replay, logs and `result.json`.
+- **`host` / `join`**: direct-connect games between containers with no lobby
+  (`scripts/lan_game.py`).
 
-**Status: `match` and `spads` built and verified locally; `client` unit
-tested but not yet run against BAR's real lobby server.** `../rjm.bar.lobbies`
-deploys `client`; the match Job is not deployed anywhere yet (a follow-up). `k8s/` here is the reference for both and is still covered by
-the static checks, but no pipeline applies it. The design is
-[`docs/autohost-design.md`](docs/autohost-design.md) - read it before writing
-anything here.
+All modes share `scripts/barcommon.py`, which holds settings, start scripts,
+the engine launcher, the Autohost channel and the lobby protocol's encodings.
+They also share `scripts/install_ai.py` and the entrypoint's content fetch.
+**Put anything two modes need in `barcommon.py`, not in one mode's script.**
+Keep it one image: a variant (another engine) is a build-arg tag of the same
+Dockerfile, never a second Dockerfile.
 
-This project **operates no lobby infrastructure**: SPADS is a lobby *client*.
+The engine is BAR's **official Linux release** (`config/engine.pin`). Custom
+AIs are installed into `$BAR_ENGINE_DIR/AI/Skirmish` at container start.
+
+**Status:**
+- `match`, `spads` and `host`/`join` are verified locally, end to end.
+- `client` is unit-tested but not yet run against BAR's real lobby server.
+- `../rjm.bar.lobbies` deploys `client` (app `bar-lobbies`). It also holds
+  `spads` (`bar-spads`) and `match` (`bar-sims`), both disabled.
+
+The design is [`docs/autohost-design.md`](docs/autohost-design.md); read it
+before writing anything here.
+
+This project **operates no lobby infrastructure**: SPADS and the client are
+lobby *clients*.
 
 ### Facts an agent must not get wrong
 
@@ -44,22 +56,27 @@ This project **operates no lobby infrastructure**: SPADS is a lobby *client*.
    `main.cpp` constructs only `CGameServer`. BARb requires
    `springServerType:headless`. Any design that runs AI on the dedicated build
    is wrong.
-2. **The cluster has no UDP path to the internet.** HAProxy ingress is TCP/HTTP
-   on NodePorts 32080/32443. SPADS's players need inbound UDP (8452), so the
-   SPADS pod uses `hostNetwork: true`, and internet players additionally need a
-   **router UDP forward to `mcgill-data`** - configuration outside this
-   repository. The match Job needs none of this: both its sockets are loopback.
-   Do not add host networking to a workload that has no human players.
+2. **Only `spads` needs inbound networking.** Its players connect to it over
+   UDP (`SPADS_GAME_PORT`), so it needs host networking and a router UDP
+   forward. `client`, `match` and `join` only connect out; `host` needs UDP
+   from its participants only. The cluster has no inbound UDP path (HAProxy
+   ingress is TCP/HTTP), which is why `../rjm.bar.lobbies` prefers `client`.
+   Do not add host networking to a mode that has no human players connecting
+   in.
 3. **Never modify the BAR game archive to make something work here.** Changing
    `../Beyond-All-Reason` alters the archive checksum, so stock clients can no
    longer join. That rules it out for public hosting regardless of merit.
-4. **Never interrupt a running game.** A match is a `Job`: never replace one
-   while it is active (a Job's pod template is immutable). SPADS is a
-   `Recreate` Deployment with no liveness probe, and whatever deploys it
-   (today `../rjm.bar.lobbies`) must refuse to restart it while a
-   `spring-headless` process (a lobby game) is running in it.
-5. **Secrets never enter git.** Lobby credentials, `rclone` tokens, kubeconfigs
-   and WireGuard keys are gitignored. Templates end in `.example` or `.sample`.
+4. **Never interrupt a running game.** A running `spring-headless` in a
+   container means a game is in progress (in `client` mode, the bots' engine).
+   Deployers must not restart or replace it then. `../rjm.bar.lobbies`'s
+   `scripts/deploy_app.sh` enforces this, so keep `spring-headless` as the
+   process name.
+5. **Secrets never enter git.** Lobby passwords go in `examples/<mode>/*.secrets.env`
+   (gitignored) or a Kubernetes Secret. Templates end in `.example` or
+   `.sample`.
+6. **`client` must match BAR's engine.** It only takes rooms whose engine
+   version contains `BAR_ENGINE_VERSION`. When BAR's autohosts move engine,
+   `config/engine.pin` must follow, or the client finds no room.
 
 ### Open questions
 
@@ -72,21 +89,26 @@ This project **operates no lobby infrastructure**: SPADS is a lobby *client*.
 - **SPADS against BAR's real lobby server is unverified**: TLS, login flags,
   bot flag, and whether it accepts bots added by a spectating host. The rest of
   the lobby flow is proven offline by `tests/e2e/run.sh`; run it after any
-  change to `docker/spads/` or `k8s/base/spads.env`.
+  change to `docker/spads/` or `examples/spads/spads.env`.
+- **`client` against BAR's real lobby server is unverified**: whether BAR's
+  autohost keeps bots whose owner spectates, and BAR's rules for automated
+  accounts. The protocol is unit-tested (`tests/unit/test_lobby_client.py`).
 
 ## Repository map
 
 | Path | Content |
 | --- | --- |
-| `docs/autohost-design.md` | the design: engine choice, AI install, both modes, k8s, pipeline, risks |
-| `docs/setup.md` | backend setup: WireGuard peer, deploy identity, tokens, lobby credentials, router |
+| `docs/autohost-design.md` | the design: engine choice, AI install, the modes, resources, risks (its cluster sections are history: deployments moved to `../rjm.bar.lobbies`) |
+| `docs/setup.md` | GitHub settings, package access, WireGuard peer generation, lobby accounts, router forward |
 | `docs/lobby.md` | the automated lobby: lifecycle, `spadsctl` control socket, settings |
 | `docs/testing.md` | the test suites and what each proves |
 | `docs/mcp-server-design.md` | design (not built): an MCP server that runs simulations and lobbies in one namespace |
 | `docker/runtime/Dockerfile` | engine release (sha256-verified) + SPADS (pinned commits) -> runtime image |
-| `docker/runtime/entrypoint.sh` | `match`, `spads`, `install-ai`, `list-ais`, `fetch-content` |
+| `docker/runtime/entrypoint.sh` | mode dispatch: `client`, `spads`, `match`, `host`, `join`, `fetch-content`, `install-ai`, `list-ais` |
+| `scripts/barcommon.py` | shared by every mode: settings, mod-option defaults, `Tdf`, `client_script`, `Engine`, `engine_settings`, `Autohost`, lobby `password_hash` / `battle_status` |
 | `docker/spads/` | SPADS config (`etc/`), `run_spads.sh` (incl. `--check`), `plugins/Autopilot.pm` (bot bonus, auto-start, control socket), `spadsctl`, `archive_game.sh`, `ready.sh` |
-| `tests/` | `run_unit.sh` (unit + static manifest checks), `e2e/run.sh` (offline lobby end-to-end) |
+| `examples/<mode>/` | per mode: `<mode>.env` (every setting: the reference), `*.secrets.env.example`, `docker-compose.yml` |
+| `tests/` | `run_unit.sh` (unit tests + `static/check_examples.py`), `lan/run.sh`, `e2e/run.sh` (offline end-to-end) |
 | `scripts/run_match.py` | writes the GameSetup script, drives the match over the Autohost Protocol, exits at game over |
 | `scripts/lan_game.py`, `examples/lan/`, `docs/lan.md` | direct-connect (LAN) games between containers: `host` / `join` entrypoint modes |
 | `scripts/lobby_client.py`, `tests/unit/test_lobby_client.py` | `client` mode: the Spring lobby protocol as Chobby speaks it (login, room choice, `!boss`, `ADDBOT`, start script), as a state machine fed lines and a clock |
@@ -94,8 +116,6 @@ This project **operates no lobby infrastructure**: SPADS is a lobby *client*.
 | `scripts/smoke_test.sh` | the checks CI runs before any image is published |
 | `scripts/demo_stats.py`, `scripts/measure_match.py` | replay statistics; the resource measurements |
 | `config/engine.pin` | engine release version and archive sha256 |
-| `k8s/base/` | rbac, network policy, pvcs, match Job, SPADS Deployment, `match.env`, `spads.env`, `secrets.yaml.example` |
-| `k8s/overlays/{test,prod}/` | namespace, persistent volumes, image tag |
 | `.github/workflows/` | `publish.yml` (build, test, publish to GHCR), `ci.yml` (checks), `e2e.yml` (lobby end-to-end), `simulate.yml` (reusable simulation) |
 
 **Engine and AI must be interface-compatible.** A `libSkirmishAI.so` built
@@ -107,26 +127,20 @@ come from their own repositories' release builds (SMRTBARb:
 `config/engine.pin` requires checking the AI still loads - the smoke test does.
 Never ship a Windows build (`SkirmishAI.dll`) into the image or a volume.
 
-Match settings (`k8s/base/match.env`) and lobby settings (`k8s/base/spads.env`)
-are **ConfigMaps**, not build inputs. `config/engine.pin` is the opposite - a
-build input whose change must be a reviewed diff.
+Mode settings (`examples/<mode>/<mode>.env`) are **runtime environment**, not
+build inputs: a deployment copies and adjusts them (a ConfigMap in
+`../rjm.bar.lobbies`). `tests/static/check_examples.py` fails when a mode reads
+a setting its example does not document, or an example documents one nothing
+reads. When adding a setting, document it there. `config/engine.pin` is the
+opposite: a build input whose change must be a reviewed diff.
 
 ## Skills that govern this project
 
-Deployment work here follows the user's cluster skills. Load the relevant one
-before authoring infrastructure rather than inventing conventions:
-
 | Skill | Use for |
 | --- | --- |
-| `author-k8s-manifests` | Deployments, Services, PVs/PVCs, RBAC, Kustomize base/overlay |
-| `convention-kustomize` | manifest naming, labels, claimRef binding, validation |
-| `configure-k8s-pipeline` | `.github/workflows/publish.yml` (set-env and build jobs); the deploy half lives in `../rjm.bar.lobbies` |
-| `convention-deployment` | Dockerfiles, image tagging, health checks, observability |
-| `troubleshoot-k8s` | ImagePullBackOff, CrashLoopBackOff, Released PVs, 503s |
-| `scaffold-k8s-project` | the new-project checklist, if starting a component from scratch |
-
-Documented deviations from those standards are in the design, §9. Keep that
-table current: a deviation that is not written down reads as a mistake.
+| `convention-deployment` | the Dockerfile, image tagging, health checks |
+| `configure-k8s-pipeline` | `.github/workflows/publish.yml` (its set-env and build jobs); the deploy half lives in `../rjm.bar.lobbies` |
+| `author-k8s-manifests`, `convention-kustomize`, `troubleshoot-k8s` | only in `../rjm.bar.lobbies`: no manifests live here |
 
 ## Workspace
 
@@ -136,7 +150,7 @@ this repository's parent.
 | Project | Path | What it is | Write policy |
 | --- | --- | --- | --- |
 | **rjm.bar.host** | `.` | this repository - reusable BAR headless host image | writable |
-| **rjm.bar.lobbies** | `../rjm.bar.lobbies` | lobby configuration and the cluster deploy pipeline that runs this image | writable |
+| **rjm.bar.lobbies** | `../rjm.bar.lobbies` | configuration and CI/CD for everything deployed to the cluster, including every deployment of this image (`apps/bar-lobbies`, `bar-spads`, `bar-sims`) | writable |
 | **rjm.bar.rustai** | `../rjm.bar.rustai` | Rust BAR Skirmish AI (`libSkirmishAI.so` over the C interface) - a consumer of this image | writable |
 | **rjm.bar.telemetry** | `../rjm.bar.telemetry` | replay (`.sdfz`) telemetry into Postgres - can consume this image's replays | writable |
 | **rjm.bar.docs** | `../rjm.bar.docs` | central game knowledge base for BAR + Recoil, shared by all projects | writable; **game facts only** |

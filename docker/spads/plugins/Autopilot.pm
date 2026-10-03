@@ -16,7 +16,7 @@
 #                    the container, not a port: with hostNetwork a loopback port
 #                    would be reachable from the whole node.
 #
-# Configuration is read from the environment (k8s/base/spads.env):
+# Configuration is read from the environment (examples/spads/spads.env):
 #   AUTOPILOT_BOT_BONUS       0-100, default 0
 #   AUTOPILOT_MIN_HUMANS      humans needed before auto-start, default 1; 0 disables auto-start
 #   AUTOPILOT_START_DELAY     countdown in seconds once conditions hold, default 20

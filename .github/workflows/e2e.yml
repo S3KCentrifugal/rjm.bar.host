@@ -25,7 +25,7 @@ on:
       - docker/**
       - scripts/install_ai.py
       - tests/e2e/**
-      - k8s/base/spads.env
+      - examples/spads/spads.env
       - config/engine.pin
 
 jobs:

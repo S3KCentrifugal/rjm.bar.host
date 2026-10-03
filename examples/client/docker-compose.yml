@@ -1,0 +1,22 @@
+# A headless lobby client on BAR's own autohosts (`client` mode): takes an
+# empty room, sets it up, adds AI bots it owns, and runs them in its own engine
+# when a game starts. Outbound connections only: no ports, no router changes.
+#
+#   cp examples/client/client.secrets.env.example examples/client/client.secrets.env   # add the password
+#   docker compose -f examples/client/docker-compose.yml up
+#
+# Settings: client.env. Watch it: docker compose ... exec client cat /tmp/lobby-client-status.json
+name: rjm-bar-client
+
+services:
+  client:
+    image: ghcr.io/s3kcentrifugal/rjm-bar-host:test
+    command: ["client"]
+    env_file: [client.env, client.secrets.env]
+    volumes:
+      - bar-data:/bar/data
+      - ./out:/bar/out
+    restart: unless-stopped
+
+volumes:
+  bar-data:

@@ -7,7 +7,7 @@ from GitHub.
 | Suite | Command | Needs | Time | Runs in CI |
 | --- | --- | --- | --- | --- |
 | Smoke | `scripts/smoke_test.sh <image>` | the image | ~1 min | every build (`ci`, `publish`) |
-| Unit + static | `tests/run_unit.sh <image>` | the image, `kubectl`, PyYAML | ~1 min | every build (`ci`, `publish`) |
+| Unit + static | `tests/run_unit.sh <image>` | the image, PyYAML | ~1 min | every build (`ci`, `publish`) |
 | LAN end-to-end | `tests/lan/run.sh <image>` | the image, the content volume, ~12 GB | ~5 min | no: three engines exceed CI's 7 GB runner |
 | Lobby end-to-end | `tests/e2e/run.sh <image>` | the image, ~2 GB content volume | ~10 min | `e2e` workflow: weekly, on demand, on PRs touching the lobby host |
 
@@ -36,16 +36,31 @@ Python `unittest` suites run inside the image against the installed code
 | `test_lan_game.py` | LAN game spec validation (players, teams, AI hosts, names, passwords, allyteams, observer rules) and the host and client start scripts |
 | `test_spads_scripts.py` | `run_spads.sh --check` (config loads, prod ports, owner required, owner-name validation, password file, missing credentials), `archive_game.sh` (archiving, hostile arguments), `ready.sh` (the probe follows *this* SPADS process's lobby socket and ignores other processes'), `spadsctl` error handling |
 
-`tests/static/check_manifests.py` renders both overlays and checks:
-- namespaces;
-- every volume pre-bound to its own environment's claim;
-- image name and tag placeholder;
-- security contexts, resources and pull secrets;
-- the Job with no host networking;
-- SPADS with host networking, `Recreate` and no liveness probe;
-- the pipeline markers are intact;
-- test and prod SPADS on different host ports;
-- no credentials in ConfigMaps and no rendered Secrets.
+`test_lobby_client.py` drives the `client` mode's protocol state machine
+with lobby lines and a fake clock. It covers:
+- the login line and password hash;
+- refusal on DENIED or an unaccepted agreement;
+- room choice: cluster autohost, region, engine version, empty, unlocked, not
+  in game;
+- boss, setup commands, bots on their ally team with distinct teams and
+  cycled sides, then spectating;
+- flood spacing;
+- setup without a boss confirmation;
+- the countdown, its cancellation, and no start before content is ready or
+  with unsynced players;
+- the engine launch with the battle's address and script password;
+- the post-game cooldown;
+- taking another room when kicked, and leaving on a failed download.
+
+`tests/static/check_examples.py` keeps `examples/` the truthful reference for
+every mode. It checks that:
+- every documented key is read by the image;
+- every setting SPADS or the lobby client reads is documented;
+- every compose file runs this image and names env files that exist, with a
+  template for each secrets file.
+
+The cluster manifests, and their checks, live in `rjm.bar.lobbies`
+(`scripts/check_manifests.py`).
 
 ## Lobby end-to-end — `tests/e2e/run.sh`
 

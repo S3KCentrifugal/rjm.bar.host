@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fast offline tests, no game content and no network:
 #   1. unit tests, run inside the image (the code under test is the installed copy)
-#   2. static checks of the Kustomize output, run here (needs kubectl + python3-yaml)
+#   2. static checks of examples/ against what the image reads, run here (python3-yaml)
 #
 #   tests/run_unit.sh [image]        default image: rjm-bar-host:dev
 set -euo pipefail
@@ -19,5 +19,5 @@ docker cp "$HERE/unit" "$C:/tmp/"
 docker start -a "$C"
 
 echo "[unit] static manifest checks"
-python3 "$HERE/static/check_manifests.py"
+python3 "$HERE/static/check_examples.py"
 echo "[unit] PASS"

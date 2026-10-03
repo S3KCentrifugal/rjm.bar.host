@@ -12,7 +12,7 @@
 #
 # Required:  SPADS_LOBBY_LOGIN  SPADS_LOBBY_PASSWORD (or SPADS_LOBBY_PASSWORD_FILE)
 #            SPADS_OWNER_LOBBY_LOGIN
-# Optional:  see k8s/base/spads.env for every setting and its default.
+# Optional:  see examples/spads/spads.env for every setting and its default.
 #
 # Output (all under $BARHOST_OUT_DIR/spads, so one volume captures it):
 #   log/spads.log, log/chat/, log/spring-headless.log   SPADS and engine console

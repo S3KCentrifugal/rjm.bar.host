@@ -1,0 +1,28 @@
+# Your own SPADS autohost (`spads` mode): a room on BAR's lobby server whose
+# game server runs here, with Skirmish AI bots in its own engine. Players
+# connect to this host over UDP SPADS_GAME_PORT, so it uses the host's network,
+# and internet players need a router UDP forward of that port to this host.
+#
+#   cp examples/spads/spads.secrets.env.example examples/spads/spads.secrets.env   # add the password
+#   docker compose -f examples/spads/docker-compose.yml up
+#
+# Settings: spads.env. Control it: docker compose ... exec spads spadsctl status
+name: rjm-bar-spads
+
+services:
+  spads:
+    image: ghcr.io/s3kcentrifugal/rjm-bar-host:test
+    command: ["spads"]
+    env_file: [spads.env, spads.secrets.env]
+    network_mode: host
+    volumes:
+      - bar-data:/bar/data
+      - ./out:/bar/out
+      # Custom AI folders (<Name>/<version>/ with a Linux libSkirmishAI.so).
+      # - ./custom-ai:/bar/custom-ai:ro
+    # SPADS saves its state on SIGTERM; give a game time to be recorded.
+    stop_grace_period: 2m
+    restart: unless-stopped
+
+volumes:
+  bar-data:

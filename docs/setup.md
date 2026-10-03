@@ -1,11 +1,13 @@
 # Backend setup
 
 > **This repository no longer deploys to the cluster.** `publish.yml` needs no
-> secrets. The cluster deploy, and the setup it needs (WireGuard, kubeconfig,
-> pull token, lobby password, router), moved to
+> secrets. Cluster deployments, and the setup they need (WireGuard, kubeconfig,
+> pull token, lobby passwords, the deployer's RBAC), are in
 > [`rjm.bar.lobbies`](https://github.com/S3KCentrifugal/rjm.bar.lobbies)
-> (`docs/setup.md` there). This page is kept as the background those steps
-> refer to, and for the match Job's follow-up deploy; §7 still applies here.
+> (`docs/setup.md` there). Still current here: §1 GitHub settings, §2.1
+> generating a WireGuard key pair, §5 the lobby account itself, §6 the router
+> forward (`spads` mode only), §7 package access. §3, §4 and §8 describe the
+> retired host-side deploy and are kept as history.
 
 Everything that has to exist outside this repository before `rjm.bar.host`
 can deploy to the cluster and host lobbies: keys, tokens, cluster identities,
@@ -503,8 +505,7 @@ kubectl describe node mcgill-data | sed -n '/Allocatable/,/Events/p'
 ```
 
 If 4 CPU / 16 GiB of requests will not fit next to what is already requested,
-lower the requests in `k8s/base/match-job.yaml` and
-`k8s/base/spads-deployment.yaml` before deploying.
+lower the requests in the app's manifests in `rjm.bar.lobbies` before deploying.
 
 ### 8.3 Deploy
 
@@ -536,7 +537,7 @@ Expect:
 Linux builds only:
 
 ```bash
-scripts/upload_ai.sh test ./SMRTBARb
+scripts/upload_ai.sh bar-sims test ./SMRTBARb   # in rjm.bar.lobbies
 ```
 
 Used by the next match, and by SPADS after its next restart.

@@ -1,0 +1,22 @@
+# One unattended AI-vs-AI simulation (`match` mode), played to game over at
+# high speed. Leaves a replay, logs and result.json under ./out/matches/.
+# No lobby and no network during the game.
+#
+#   docker compose -f examples/match/docker-compose.yml up
+#
+# Settings: match.env (map, AI, team layout, speed, mod options, ...).
+name: rjm-bar-match
+
+services:
+  match:
+    image: ghcr.io/s3kcentrifugal/rjm-bar-host:test
+    command: ["match"]
+    env_file: [match.env]
+    volumes:
+      - bar-data:/bar/data
+      - ./out:/bar/out
+      # Custom AI folders (<Name>/<version>/ with a Linux libSkirmishAI.so).
+      # - ./custom-ai:/bar/custom-ai:ro
+
+volumes:
+  bar-data:

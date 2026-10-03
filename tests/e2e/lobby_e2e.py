@@ -47,12 +47,9 @@ control socket against a live room.
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -95,18 +92,9 @@ CLIENT_SENTENCE_POS = {
 }
 
 
-def battle_status(ready=0, id_=0, team=0, mode=0, bonus=0, sync=0, side=0) -> int:
-    return (ready << 1) + ((id_ & 15) << 2) + ((team & 15) << 6) + (mode << 10) \
-        + (bonus << 11) + (sync << 22) + (side << 24)
-
-
-def unpack_battle_status(v: int) -> dict:
-    v = int(v)
-    if v < 0:
-        v += 1 << 32
-    return {"ready": (v >> 1) & 1, "id": (v >> 2) & 15, "team": (v >> 6) & 15,
-            "mode": (v >> 10) & 1, "bonus": (v >> 11) & 127, "sync": (v >> 22) & 3,
-            "side": (v >> 24) & 15}
+# The lobby protocol's encodings are shared with the image's lobby client.
+sys.path.insert(0, os.environ.get("RJM_BIN", "/opt/rjm-bar-host/bin"))
+from barcommon import Engine, battle_status, client_script, password_hash, unpack_battle_status  # noqa: E402
 
 
 def marshall(words: list) -> bytes:
@@ -224,7 +212,7 @@ class FakeLobby:
 
     def c_LOGIN(self, w):
         user, passwd = w[1], w[2]
-        expected = base64.b64encode(hashlib.md5(PASSWORD.encode()).digest()).decode()
+        expected = password_hash(PASSWORD)
         if user != LOGIN or passwd != expected:
             self.login_ok = False
             self.send("DENIED", "Invalid username or password")
@@ -318,10 +306,10 @@ class FakeLobby:
         self.log("==", f"join denied for {w[1]}: {w[2:] }")
 
     def c_FORCETEAMNO(self, w):
-        self._force(w[1], "id", int(w[2]))
+        self._force(w[1], "team", int(w[2]))
 
     def c_FORCEALLYNO(self, w):
-        self._force(w[1], "team", int(w[2]))
+        self._force(w[1], "ally", int(w[2]))
 
     def c_FORCESPECTATORMODE(self, w):
         self._force(w[1], "mode", 0)
@@ -340,7 +328,7 @@ class FakeLobby:
             return
         st = unpack_battle_status(m["status"])
         st[field] = value
-        m["status"] = battle_status(st["ready"], st["id"], st["team"], st["mode"], st["bonus"], st["sync"], st["side"])
+        m["status"] = battle_status(**st)
         self.send("CLIENTBATTLESTATUS", name, m["status"], m["color"])
 
     def c_KICKFROMBATTLE(self, w):
@@ -401,24 +389,14 @@ class HumanEngine:
         self.dir = OUT_DIR / f"human-game-{run}"
         self.dir.mkdir(parents=True, exist_ok=True)
         script = self.dir / "script.txt"
-        script.write_text(
-            "[GAME]\n{\n"
-            f"\tHostIP={host};\n\tHostPort={port};\n\tIsHost=0;\n"
-            f"\tMyPlayerName={HUMAN};\n\tMyPasswd={HUMAN_SCRIPT_PASSWORD};\n"
-            "}\n", encoding="utf-8")
-        engine_dir = os.environ["BAR_ENGINE_DIR"]
-        env = dict(os.environ, SPRING_DATADIR=engine_dir)
-        self.log = open(self.dir / "engine-console.log", "wb")
-        self.proc = subprocess.Popen(
-            [f"{engine_dir}/spring-headless", "--isolation", "--isolation-dir", "/bar/data",
-             "--write-dir", str(self.dir), *self.config_args(), str(script)],
-            env=env, stdout=self.log, stderr=subprocess.STDOUT)
+        script.write_text(client_script(host, port, HUMAN, HUMAN_SCRIPT_PASSWORD), encoding="utf-8")
+        self.engine = Engine(self.dir, script, self.config(), echo=False)
 
     @staticmethod
-    def config_args() -> list:
+    def config():
         """The same long network timeouts run.sh gives the host (slow CI runners)."""
         cfg = Path("/tmp/e2e-springsettings.cfg")
-        return ["--config", str(cfg)] if cfg.exists() else []
+        return cfg if cfg.exists() else None
 
     def infolog(self) -> str:
         p = self.dir / "infolog.txt"
@@ -429,13 +407,7 @@ class HumanEngine:
         return int(frames[-1]) if frames else -1
 
     def stop(self):
-        if self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(20)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-        self.log.close()
+        self.engine.stop(grace=20)
 
 
 async def scenario(lobby: FakeLobby) -> dict:
@@ -534,13 +506,13 @@ async def scenario(lobby: FakeLobby) -> dict:
             lobby.user_online(HUMAN)
             lobby.user_join(HUMAN, HUMAN_SCRIPT_PASSWORD)
             await lobby.wait_for(f"{HUMAN} in the room", lambda: lobby.members.get(HUMAN, {}).get("joined"), 20)
-        lobby.user_status(HUMAN, ready=1, team=0, id_=0, mode=1, sync=1, side=0)
+        lobby.user_status(HUMAN, ready=1, ally=0, team=0, mode=1, sync=1, side=0)
         await lobby.wait_for("autohost in-game", lambda: lobby.founder_ingame, 120)
 
         if run == 1:
             step("balance: every bot on the bot team, the human on the other")
-            teams = {s["team"] for s in lobby.bot_statuses().values()}
-            human_team = unpack_battle_status(lobby.members[HUMAN]["status"])["team"]
+            teams = {s["ally"] for s in lobby.bot_statuses().values()}
+            human_team = unpack_battle_status(lobby.members[HUMAN]["status"])["ally"]
             if len(teams) != 1 or human_team in teams:
                 raise StepFailed(f"bots on teams {sorted(teams)}, human on team {human_team}")
             print(f"  ok   bots on team {teams.pop()}, {HUMAN} on team {human_team}", flush=True)
@@ -578,7 +550,7 @@ async def scenario(lobby: FakeLobby) -> dict:
             if not lobby.founder_ingame:
                 raise StepFailed(f"the game ended after {time.monotonic() - started:.0f}s, before {window}s "
                                  f"-- a team collapse? (see {engine.dir})")
-            if engine.proc.poll() is not None:
+            if engine.engine.poll() is not None:
                 raise StepFailed(f"{HUMAN}'s engine exited early (see {engine.dir}/engine-console.log)")
             await asyncio.sleep(2)
         print(f"  ok   game still running after {window}s", flush=True)
@@ -587,7 +559,7 @@ async def scenario(lobby: FakeLobby) -> dict:
         lobby.user_say_private(OWNER, "!stop")
         await lobby.wait_for("autohost back in the lobby", lambda: not lobby.founder_ingame, 120)
         # The server is gone; the client quits by itself and flushes its log.
-        await lobby.wait_for(f"{HUMAN}'s engine exited", lambda: engine.proc.poll() is not None, 90)
+        await lobby.wait_for(f"{HUMAN}'s engine exited", lambda: engine.engine.poll() is not None, 90)
         engine.stop()
 
         frame = engine.frame()

@@ -2,7 +2,7 @@
 .env
 .env.*
 !.env.sample
-k8s/**/secrets.yaml
+examples/**/*.secrets.env
 *.kubeconfig
 kubeconfig
 wg0.conf

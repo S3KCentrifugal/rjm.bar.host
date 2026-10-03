@@ -41,17 +41,20 @@ Settings (environment):
                           (/tmp/lobby-client-status.json)
 """
 import asyncio
-import base64
 import datetime as dt
 import hashlib
 import json
 import os
 import random
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from barcommon import (  # noqa: E402
+    Engine, battle_status, client_script, engine_settings, make_log, password_hash, unpack_battle_status,
+)
 
 VERSION = "rjm-bar-host-client:1"
 FOUNDER_RE = re.compile(r"^Host\[([A-Za-z]+)(\d+)\]\[\d+\]$")
@@ -60,35 +63,11 @@ FOUNDER_RE = re.compile(r"^Host\[([A-Za-z]+)(\d+)\]\[\d+\]$")
 COMMAND_SPACING = 1.5
 
 
-def log(msg: str) -> None:
-    print("[lobby-client] %s %s" % (dt.datetime.now().strftime("%H:%M:%S"), msg), flush=True)
+log = make_log("lobby-client")
 
 
 def env(name: str, default: str = "") -> str:
     return os.environ.get(name, "").strip() or default
-
-
-def password_hash(password: str) -> str:
-    """The lobby protocol's password form: base64(md5(password))."""
-    return base64.b64encode(hashlib.md5(password.encode("utf-8")).digest()).decode("ascii")
-
-
-def battle_status(ready=0, team=0, ally=0, mode=0, bonus=0, sync=0, side=0) -> int:
-    v = ((ready & 1) << 1) | ((team & 15) << 2) | ((ally & 15) << 6) | ((mode & 1) << 10) \
-        | ((bonus & 127) << 11) | (((team >> 4) & 15) << 18) | ((sync & 3) << 22) \
-        | ((side & 15) << 24) | (((ally >> 4) & 15) << 28)
-    return v - (1 << 32) if v >= 1 << 31 else v
-
-
-def unpack_battle_status(v) -> dict:
-    v = int(v)
-    if v < 0:
-        v += 1 << 32
-    return {"ready": (v >> 1) & 1,
-            "team": ((v >> 2) & 15) | (((v >> 18) & 15) << 4),
-            "ally": ((v >> 6) & 15) | (((v >> 28) & 15) << 4),
-            "mode": (v >> 10) & 1, "bonus": (v >> 11) & 127,
-            "sync": (v >> 22) & 3, "side": (v >> 24) & 15}
 
 
 class Settings:
@@ -478,6 +457,8 @@ class LobbyClient:
                 return
             if self.battle and self.users.get(self.battle.founder, 0) & 1:
                 return     # our engine ended but the game goes on: wait it out
+            if self.game_proc is not None and hasattr(self.game_proc, "close"):
+                self.game_proc.close()
             self.game_proc = None
             self.state = "waiting" if self.battle else "lobby"
             self.quiet_until = now + self.s.postgame_delay
@@ -533,27 +514,17 @@ async def fetch_content(c: LobbyClient, b: Battle):
 
 def launch_engine(s: Settings):
     def launch(b: Battle, script_password: str):
-        engine_dir = os.environ["BAR_ENGINE_DIR"]
-        data = os.environ.get("BARHOST_DATA_DIR", "/bar/data")
         run = "%s-%s" % (dt.datetime.now().strftime("%Y%m%d-%H%M%S"), b.id)
         d = s.out_dir / "games" / run
         d.mkdir(parents=True, exist_ok=True)
         script = d / "script.txt"
-        script.write_text(
-            "[GAME]\n{\n"
-            "\tHostIP=%s;\n\tHostPort=%d;\n\tSourcePort=0;\n\tIsHost=0;\n"
-            "\tMyPlayerName=%s;\n\tMyPasswd=%s;\n}\n" % (b.ip, b.port, s.login, script_password),
-            encoding="utf-8")
+        script.write_text(client_script(b.ip, b.port, s.login, script_password, source_port=0), encoding="utf-8")
         (d / "game.json").write_text(json.dumps(
             {"battle": b.id, "founder": b.founder, "title": b.title, "map": b.map, "game": b.game,
              "engine": b.engine_version, "started": dt.datetime.now().isoformat()}, indent=2))
-        console = open(d / "engine-console.log", "wb")
         log("engine: writing to %s" % d)
-        return subprocess.Popen(
-            [str(Path(engine_dir) / "spring-headless"), "--isolation", "--isolation-dir", data,
-             "--write-dir", str(d), str(script)],
-            env=dict(os.environ, SPRING_DATADIR=engine_dir),
-            stdout=console, stderr=subprocess.STDOUT)
+        # The console stays in the run directory: the pod log is the client's.
+        return Engine(d, script, engine_settings(d), echo=False)
     return launch
 
 

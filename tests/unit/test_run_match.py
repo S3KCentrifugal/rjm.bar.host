@@ -122,7 +122,7 @@ class Validation(unittest.TestCase):
 class EngineConfig(unittest.TestCase):
     def test_demos_recorded_and_workers_from_quota(self):
         out = Path(tempfile.mkdtemp()) / "springsettings.cfg"
-        with mock.patch.object(run_match, "detect_cpu_quota", return_value=3.0):
+        with mock.patch("barcommon.detect_cpu_quota", return_value=3.0):
             settings = run_match.write_engine_config(cfg(), out)
         self.assertEqual(settings["ServerRecordDemos"], "1")
         self.assertEqual(settings["WorkerThreadCount"], "3")

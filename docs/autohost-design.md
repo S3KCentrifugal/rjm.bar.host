@@ -341,6 +341,14 @@ cannot rely on unitsync finding the engine's `base/` beside itself — measured:
 
 ## 7. Kubernetes design
 
+> **Moved (2026-10-03).** The manifests below now live in
+> [`rjm.bar.lobbies`](https://github.com/S3KCentrifugal/rjm.bar.lobbies) as
+> apps `bar-sims` (the match Job), `bar-spads` (the SPADS Deployment) and
+> `bar-lobbies` (the `client` mode lobby), with one namespace per app
+> (`<app>-<env>`), deployed by its `scripts/deploy_app.sh`. The reasoning in
+> this section (Job vs Deployment, probes, storage, sizing) still holds; the
+> names and paths are those of the original host-side layout.
+
 Kustomize base + `test`/`prod` overlays, manual PVs with `claimRef`,
 `mcgill-k8s-pull-2026` pull secret.
 

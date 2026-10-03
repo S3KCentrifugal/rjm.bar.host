@@ -13,7 +13,7 @@ background is in [`autohost-design.md`](autohost-design.md) §10.
 
 | Part | Where | Role |
 | --- | --- | --- |
-| SPADS | pod `rjm-bar-host-spads`, container `spads` | logs in as the autohost account, owns the room, runs every command and vote |
+| SPADS | container `spads` (on the cluster: Deployment `bar-spads`, app `bar-spads` in `rjm.bar.lobbies`) | logs in as the autohost account, owns the room, runs every command and vote |
 | Autopilot plugin | inside SPADS | bot bonus, auto-start, pre-game force start, control socket |
 | `spring-headless` | same container, one per game | game server + a spectator client that runs **all the bots** |
 | `spadsctl` | same container | command-line client for the control socket |
@@ -94,8 +94,9 @@ uses the node's network: a loopback port would be reachable from the whole
 node. Reach it with `kubectl exec`:
 
 ```bash
-NS=bar-test
-ctl() { kubectl exec -n "$NS" deploy/rjm-bar-host-spads -c spads -- spadsctl "$@"; }
+# Docker: docker compose -f examples/spads/docker-compose.yml exec spads spadsctl ...
+NS=bar-spads-test
+ctl() { kubectl exec -n "$NS" deploy/bar-spads -c spads -- spadsctl "$@"; }
 
 ctl status                                   # room, players, bots, game state (JSON)
 ctl spads map Comet Catcher Remake 1.8       # any SPADS command, with the autohost's authority
@@ -134,7 +135,7 @@ e.g. `!map …`, `!forceStart`, from Chobby or any lobby client.
 
 ## 5. Configuration reference
 
-All in [`k8s/base/spads.env`](../k8s/base/spads.env) (a ConfigMap; prod
+All in [`examples/spads/spads.env`](../examples/spads/spads.env) (on the cluster, a ConfigMap in `rjm.bar.lobbies` `apps/bar-spads`; prod
 overrides ports in its overlay). A change redeploys SPADS — between games
 only.
 
@@ -177,8 +178,8 @@ the room preset (humans-vs-bots, balance, votes, flood limits) in
 | per game: infolog, start script, result, replay link | `spads/games/<time>-<gameId>/` |
 | replays | `spads/var/demos*/` |
 
-On the node: `/mnt/data2/k8s-volumes/rjm-bar-host/<env>/out/`. From anywhere:
-`kubectl logs -n bar-test deploy/rjm-bar-host-spads -c spads`.
+Under `/bar/out/spads/` (on the cluster: `/mnt/data2/k8s-volumes/rjm-bar-spads/<env>/out/` on `mcgill-data`). From anywhere:
+`kubectl logs -n bar-spads-test deploy/bar-spads -c spads`.
 
 ## 7. How it is tested
 
