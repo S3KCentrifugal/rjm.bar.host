@@ -244,5 +244,118 @@ class Recovery(Harness):
         self.assertIsNone(self.c.battle)
 
 
+OWNER = "[SMRT]Centrifugal"
+
+
+class Follow(Harness):
+    """follow mode: the owner hosts; the client brings the bots."""
+
+    def setUp(self):
+        super().setUp()
+        s = lc.Settings({"BARHOST_LOBBY_LOGIN": ME, "BARHOST_LOBBY_PASSWORD": "secret",
+                         "BAR_ENGINE_VERSION": ENGINE, "BARHOST_CLIENT_MODE": "follow",
+                         "BARHOST_FOLLOW": OWNER, "BARHOST_STATUS_FILE": "/tmp/test-lobby-status.json"})
+        self.c = lc.LobbyClient(s, now=self.clock, launch=self.launch)
+
+    def owner_in_room(self, bid="12", passworded=0, engine=ENGINE):
+        self.feed("TASSERVER 0.38 * 8201 0", "ACCEPTED " + ME, "ADDUSER %s XX 0 1" % HOST,
+                  "ADDUSER %s XX 0 2" % OWNER, opened(bid, passworded=passworded, engine=engine),
+                  "JOINEDBATTLE %s %s" % (bid, OWNER),
+                  "CLIENTBATTLESTATUS %s %d 0" % (OWNER, lc.battle_status(team=0, ally=0, mode=1, sync=1)))
+        self.take()
+
+    def joined(self):
+        self.owner_in_room()
+        sent = self.run_for(1)
+        join = [x for x in sent if x.startswith("JOINBATTLE")]
+        self.assertEqual(len(join), 1, sent)
+        self.feed("JOINBATTLE 12 hash", "JOINEDBATTLE 12 %s %s" % (ME, join[0].split(" ")[3]))
+        sent = self.run_for(30)
+        for x in sent:      # the server echoes the bots
+            if x.startswith("ADDBOT "):
+                w = x.split(" ")
+                self.feed("ADDBOT 12 %s %s %s 0 %s" % (w[1], ME, w[2], w[4]))
+        return sent
+
+    def pm(self, text, user=OWNER):
+        self.feed("SAIDPRIVATE %s %s" % (user, text))
+        return self.run_for(30)      # commands go out 1.5 s apart
+
+    def test_joins_the_owners_room_and_brings_8_bots_as_a_spectator(self):
+        sent = self.joined()
+        bots = [lc.unpack_battle_status(x.split(" ")[2]) for x in sent if x.startswith("ADDBOT")]
+        self.assertEqual(len(bots), 8)
+        self.assertNotIn(0, {b["team"] for b in bots})            # the owner's team
+        self.assertEqual({b["ally"] for b in bots}, {1})
+        mine = [lc.unpack_battle_status(x.split(" ")[1]) for x in sent if x.startswith("MYBATTLESTATUS")]
+        self.assertEqual(mine[0]["mode"], 0)
+        self.assertFalse([x for x in sent if "!boss" in x or "!preset" in x or "!cv" in x], sent)
+
+    def test_never_starts_the_game_itself(self):
+        self.joined()
+        self.c.fetched(self.c.battle, True)
+        self.feed("CLIENTBATTLESTATUS %s %d 0" % (OWNER, lc.battle_status(ready=1, team=0, mode=1, sync=1)))
+        self.assertFalse([x for x in self.run_for(120) if "!cv start" in x])
+
+    def test_bots_command_changes_the_count(self):
+        self.joined()
+        sent = self.pm("!bots 3")
+        self.assertEqual(len([x for x in sent if x.startswith("REMOVEBOT")]), 5)
+        self.assertTrue([x for x in sent if x.startswith("SAYPRIVATE %s OK: 3 BARb" % OWNER)], sent)
+        self.assertEqual(self.c.want_bots, 3)
+
+    def test_bots_command_can_switch_ai(self):
+        self.joined()
+        sent = self.pm("!bots 2 SMRTBARb")
+        self.assertEqual(len([x for x in sent if x.startswith("REMOVEBOT")]), 8)
+        self.assertEqual([x.split(" ")[4] for x in sent if x.startswith("ADDBOT")], ["SMRTBARb", "SMRTBARb"])
+
+    def test_ignores_strangers(self):
+        self.joined()
+        self.assertEqual(self.pm("!bots 0", user="Stranger"), [])
+        self.assertEqual(self.c.want_bots, 8)
+
+    def test_leaves_with_its_bots_when_the_owner_leaves(self):
+        self.joined()
+        self.feed("LEFTBATTLE 12 " + OWNER)
+        sent = self.run_for(20)
+        self.assertEqual(len([x for x in sent if x.startswith("REMOVEBOT")]), 8)
+        self.assertIn("LEAVEBATTLE", sent)
+        self.assertIsNone(self.c.battle)
+
+    def test_follows_the_owner_to_a_new_room(self):
+        self.joined()
+        self.feed("LEFTBATTLE 12 " + OWNER, opened("13"), "JOINEDBATTLE 13 " + OWNER)
+        sent = self.run_for(30)
+        self.assertIn("13", [x.split(" ")[1] for x in sent if x.startswith("JOINBATTLE")])
+
+    def test_passworded_room_needs_the_password(self):
+        self.owner_in_room(passworded=1)
+        sent = self.run_for(10)
+        self.assertFalse([x for x in sent if x.startswith("JOINBATTLE")])
+        self.assertEqual(len([x for x in sent if x.startswith("SAYPRIVATE %s Your room has a password" % OWNER)]), 1)
+        sent = self.pm("!join hunter2")
+        self.assertEqual([x.split(" ")[:3] for x in sent if x.startswith("JOINBATTLE")], [["JOINBATTLE", "12", "hunter2"]])
+
+    def test_explains_an_engine_mismatch(self):
+        self.owner_in_room(engine="2025.06.12")
+        sent = self.run_for(10)
+        self.assertFalse([x for x in sent if x.startswith("JOINBATTLE")])
+        self.assertTrue([x for x in sent if "engine 2025.06.12" in x])
+
+    def test_leave_command_stays_away_until_join(self):
+        self.joined()
+        sent = self.pm("!leave")
+        self.assertIn("LEAVEBATTLE", sent)
+        self.assertFalse([x for x in self.run_for(30) if x.startswith("JOINBATTLE")])
+        self.assertTrue([x for x in self.pm("!join") if x.startswith("JOINBATTLE")])
+
+    def test_runs_the_bots_when_the_game_starts(self):
+        self.joined()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.assertEqual(len(self.launched), 1)
+        self.assertEqual(self.c.state, "ingame")
+
+
 if __name__ == "__main__":
     unittest.main()

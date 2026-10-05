@@ -18,7 +18,7 @@ reference and a compose file under `examples/<mode>/`.
 
 | Mode | Use case | Game server | Bots run in | Lobby server | Inbound network | Account | Example |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `client` | an always-open room against server-side bots, with no router changes | BAR's autohost | this container | yes | **none** | one per room | [`examples/client`](examples/client) |
+| `client` | server-side bots in BAR rooms with no router changes: **follow** a person into the room they host and bring the bots, or run a **room** alone | BAR's autohost | this container | yes | **none** | one per room | [`examples/client`](examples/client) |
 | `spads` | your own room with full control (presets, vote rules, takeover protection) | this container | this container | yes | **UDP game port**, router forward | one per room (bot flag for more than 8 players) | [`examples/spads`](examples/spads) |
 | `match` | testing AIs: unattended AI-vs-AI to game over at high speed; replay, logs, `result.json` | this container | this container | no | none | none | [`examples/match`](examples/match) |
 | `host` / `join` | AI builds in separate containers playing each other, or LAN play with no lobby | the `host` container | each AI's named container | no | between the containers | none | [`examples/lan`](examples/lan) |
@@ -42,8 +42,16 @@ The table leaves out two cases:
 
 ### How each mode works
 
-- **`client`** ([`scripts/lobby_client.py`](scripts/lobby_client.py))
-  1. Logs in as Chobby does and takes an empty room on a `Host[XXn][k]`
+- **`client`, follow mode** ([`scripts/lobby_client.py`](scripts/lobby_client.py))
+  1. Logs in as Chobby does and waits. When a user in `BARHOST_FOLLOW` is in a
+     room, joins it as a spectator and adds `BARHOST_BOT_COUNT` bots it owns.
+  2. That user stays boss and starts the game, and can PM the client
+     `!bots <n> [AI]`, `!join [password]` (for a passworded room), `!leave` or
+     `!status`.
+  3. When the game starts, runs `spring-headless` as a spectator client, which
+     runs the bots. When the user leaves the room, removes them and leaves.
+- **`client`, room mode**
+  1. Logs in and takes an empty room on a `Host[XXn][k]`
      autohost.
   2. Makes itself boss, sends the room setup commands
      (`BARHOST_ROOM_SETUP`, e.g. `!bSet experimentallegionfaction 1`), adds
