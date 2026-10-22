@@ -525,6 +525,216 @@ class Guard(Harness):
         self.assertIn("SAYBATTLE !boss " + OWNER, self.run_for(10))
 
 
+class RingHint(Harness):
+    """A ring in the room gets one line on how to vote an away player to
+    spectator; the client takes no action itself."""
+
+    def hints(self, sent):
+        return [x for x in sent if x.startswith("SAYBATTLE If ")]
+
+    def test_a_ring_gets_the_vote_spec_hint(self):
+        self.boss_and_setup()
+        self.feed("SAIDBATTLE Alice !ring Bob")
+        sent = self.run_for(3)
+        self.assertEqual(self.hints(sent), ["SAYBATTLE If Bob is away: vote them to spectator with !cv spec Bob, "
+                                            "then !vote y."])
+        self.assertFalse([x for x in sent if x.startswith("SAYBATTLE !spec") or x.startswith("SAYBATTLE !cv")])
+
+    def test_at_most_once_a_minute(self):
+        self.boss_and_setup()
+        self.feed("SAIDBATTLE Alice !ring Bob", "SAIDBATTLE Carol !RING Bob")
+        self.assertEqual(len(self.hints(self.run_for(30))), 1)
+        self.feed("SAIDBATTLE Alice !ring Dave")
+        self.assertEqual(len(self.hints(self.run_for(3))), 0)
+        self.run_for(30)
+        self.feed("SAIDBATTLE Alice !ring Dave")
+        self.assertEqual(len(self.hints(self.run_for(3))), 1)
+
+    def test_ignores_the_autohost_and_itself_and_other_chat(self):
+        self.boss_and_setup()
+        self.feed("SAIDBATTLEEX %s * !ring Bob" % HOST, "SAIDBATTLE %s !ring Bob" % ME,
+                  "SAIDBATTLE Alice ring the bell", "SAIDBATTLE Alice !ringer")
+        self.assertEqual(self.hints(self.run_for(3)), [])
+
+
+class Welcome(Harness):
+    """BARHOST_WELCOME is said privately, in the room, to each joiner."""
+
+    TEXT = "Welcome to the room. Clyde is the auto host bot."
+
+    def test_each_joiner_is_welcomed_privately(self):
+        self.c = self.client(BARHOST_WELCOME=self.TEXT)
+        self.boss_and_setup()
+        self.feed("JOINEDBATTLE 12 Alice", "JOINEDBATTLE 12 Bob")
+        sent = self.run_for(5)
+        self.assertIn("SAYBATTLEPRIVATEEX Alice " + self.TEXT, sent)
+        self.assertIn("SAYBATTLEPRIVATEEX Bob " + self.TEXT, sent)
+        self.assertFalse([x for x in sent if x.startswith("SAYBATTLE ") and self.TEXT in x])
+
+    def test_not_itself_nor_the_autohost_nor_other_rooms(self):
+        self.c = self.client(BARHOST_WELCOME=self.TEXT)
+        self.join()
+        self.feed(opened("13"), "JOINEDBATTLE 13 Carol", "JOINEDBATTLE 12 " + HOST)
+        self.assertFalse([x for x in self.run_for(5) if x.startswith("SAYBATTLEPRIVATEEX")])
+
+    def test_unset_says_nothing(self):
+        self.boss_and_setup()
+        self.feed("JOINEDBATTLE 12 Alice")
+        self.assertFalse([x for x in self.run_for(5) if x.startswith("SAYBATTLEPRIVATEEX")])
+
+
+class SwitchAI(Harness):
+    """!barb / !smrt: the bots' AI, remembered; switched as a player."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_FOLLOW=OWNER)
+
+    def pm(self, text):
+        self.feed("SAIDPRIVATE %s %s" % (OWNER, text))
+        return self.run_for(30)
+
+    def echo_bots(self, sent):
+        for x in sent:
+            if x.startswith("ADDBOT "):
+                w = x.split(" ")
+                self.feed("ADDBOT 12 %s %s %s 0 %s" % (w[1], ME, w[2], w[4]))
+
+    def test_switching_replaces_the_bots_as_a_player(self):
+        self.echo_bots(self.boss_and_setup())
+        self.c.set_seat(False, "test")                       # a spectator, as with 8 humans
+        self.run_for(2)
+        sent = self.pm("!smrt")
+        self.assertTrue([x for x in sent if "switching the bots to SMRTBARb" in x], sent)
+        self.assertEqual(len([x for x in sent if x.startswith("REMOVEBOT")]), 8)
+        adds = [i for i, x in enumerate(sent) if x.startswith("ADDBOT")]
+        self.assertEqual({sent[i].split(" ")[4] for i in adds}, {"SMRTBARb"})
+        self.assertEqual(len(adds), 8)
+        self.assertEqual(my_modes(sent)[0], 1)                # a player first
+        mine = [i for i, x in enumerate(sent) if x.startswith("MYBATTLESTATUS")]
+        self.assertLess(mine[0], adds[0])
+
+    def test_the_choice_is_remembered(self):
+        self.boss_and_setup()
+        self.pm("!smrt")
+        self.assertEqual(self.client(BARHOST_FOLLOW=OWNER).bot_ai, "SMRTBARb")
+        self.pm("!barb")
+        self.assertEqual(self.client(BARHOST_FOLLOW=OWNER, BARHOST_BOT_AI="SMRTBARb").bot_ai, "BARb")
+
+    def test_same_ai_is_said_not_redone(self):
+        self.boss_and_setup()
+        sent = self.pm("!barb")
+        self.assertTrue([x for x in sent if "already run BARb" in x])
+        self.assertFalse([x for x in sent if x.startswith("REMOVEBOT")])
+
+    def test_during_a_game_it_waits_for_the_game_to_end(self):
+        self.echo_bots(self.boss_and_setup())
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        sent = self.pm("!smrt")
+        self.assertTrue([x for x in sent if "after this game" in x], sent)
+        self.assertFalse([x for x in sent if x.startswith("REMOVEBOT") or x.startswith("ADDBOT")])
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        sent = self.run_for(30)
+        self.assertEqual({x.split(" ")[4] for x in sent if x.startswith("ADDBOT")}, {"SMRTBARb"})
+
+    def test_strangers_cannot_switch(self):
+        self.boss_and_setup()
+        self.feed("SAIDPRIVATE Troll !smrt")
+        self.run_for(5)
+        self.assertEqual(self.c.bot_ai, "BARb")
+
+
+class AIUpdate(Harness):
+    """New AI releases are checked and installed only between games."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_FOLLOW=OWNER, BARHOST_AI_UPDATE_EVERY="900")
+
+    def test_checked_after_each_game_and_no_start_until_done(self):
+        self.boss_and_setup()
+        self.c.need_ai_update = self.c.ai_updating = False
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.clock.t += 2000
+        self.run_for(5)
+        self.assertFalse(self.c.need_ai_update)                         # never during a game
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        self.run_for(1)
+        self.assertTrue(self.c.need_ai_update)                          # right after it
+        self.feed("JOINEDBATTLE 12 Alice",
+                  "CLIENTBATTLESTATUS Alice %d 0" % lc.battle_status(ready=1, mode=1, sync=1))
+        self.assertFalse([x for x in self.run_for(70) if "starting in" in x])   # updating
+        self.c.ai_updated(["github:o/r@latest: v1.958-prod -> v1.960-prod"], [])
+        sent = self.run_for(5)
+        self.assertTrue([x for x in sent if x.startswith("SAYPRIVATE %s AI release updated (v1.958-prod -> "
+                                                         "v1.960-prod)" % OWNER)], sent)
+        self.assertTrue([x for x in sent if "starting in" in x])
+
+    def test_checked_every_interval_while_idle(self):
+        self.boss_and_setup()                                  # waiting in its room, no game
+        self.c.need_ai_update = self.c.ai_updating = False
+        self.c.next_ai_check = self.clock.t + 900
+        self.clock.t += 899
+        self.c.tick()
+        self.assertFalse(self.c.need_ai_update)
+        self.clock.t += 2
+        self.c.tick()
+        self.assertTrue(self.c.need_ai_update)
+
+    def test_a_failed_check_changes_nothing(self):
+        self.c.ai_updating = True
+        self.c.ai_updated([], ["github:o/r@latest: HTTP 403"])
+        self.assertFalse(self.c.ai_updating)
+        self.assertFalse([x for x in self.take() if x.startswith("SAYPRIVATE")])
+
+    def test_zero_turns_it_off(self):
+        self.c = self.client(BARHOST_AI_UPDATE_EVERY="0")
+        self.log_in()
+        self.clock.t += 100000
+        self.c.tick()
+        self.assertFalse(self.c.need_ai_update)
+
+
+class EngineExit(Harness):
+    """The engine's exit is reported in the client's (the pod's) log, with its
+    console's tail when the exit looks wrong."""
+
+    def started(self):
+        self.boss_and_setup()
+        self.proc.write_dir = __import__("pathlib").Path(self.tmp.name)
+        (self.proc.write_dir / "engine-console.log").write_text("line a\nError: no map\n")
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+
+    def logged(self, fn):
+        out = []
+        old = lc.log
+        lc.log = out.append
+        try:
+            fn()
+        finally:
+            lc.log = old
+        return out
+
+    def test_a_clean_exit_after_the_game_is_one_line(self):
+        self.started()
+        self.clock.t += 600
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        out = self.logged(lambda: self.run_for(2))
+        self.assertTrue([x for x in out if x.startswith("engine exited with code 0 after 60") and x.endswith(" s")], out)
+        self.assertFalse([x for x in out if "engine: " in x])
+
+    def test_a_crash_mid_game_brings_the_console_tail(self):
+        self.started()
+        self.proc.code = 1                                    # the game goes on
+        out = self.logged(lambda: self.run_for(2))
+        self.assertTrue([x for x in out if x.startswith("engine exited with code 1") and "goes on" in x], out)
+        self.assertIn("  engine: Error: no map", out)
+        self.assertEqual(len([x for x in self.logged(lambda: self.run_for(5)) if "engine exited" in x]), 0)
+
+
 class Recovery(Harness):
     def test_kicked_takes_another_room(self):
         self.boss_and_setup()

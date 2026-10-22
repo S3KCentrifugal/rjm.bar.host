@@ -32,6 +32,11 @@ A custom AI with the same name as a stock one (e.g. ``BARb``) replaces it.
 
 Exit status is non-zero if any source failed, so a misconfigured AI stops the
 container before a match or lobby starts.
+
+The release tag each ``github:`` source installed is kept in
+``AI/Skirmish/.rjm-releases.json``. ``update()`` (also ``install_ai.py
+--update``) reinstalls a source on a moving tag (``latest`` / ``newest``) when
+it now resolves to another release; the lobby client calls it between games.
 """
 
 from __future__ import annotations
@@ -115,6 +120,11 @@ def install_mounted(root: Path, dest: Path) -> "list[str]":
 
 
 def github_asset_url(spec: str) -> str:
+    return github_release(spec)[1]
+
+
+def github_release(spec: str) -> "tuple[str, str]":
+    """(release tag, asset URL) that a ``github:`` spec resolves to now."""
     body = spec[len("github:"):]
     pattern = "*-linux.tar.gz"
     if "#" in body:
@@ -149,7 +159,8 @@ def github_asset_url(spec: str) -> str:
     log("%s resolved to %s %s" % (spec, release.get("tag_name"), matches[0]["name"]))
     # The API URL works for private repositories with a token; the browser URL
     # only for public ones.
-    return matches[0]["url"] if os.environ.get("GITHUB_TOKEN") else matches[0]["browser_download_url"]
+    url = matches[0]["url"] if os.environ.get("GITHUB_TOKEN") else matches[0]["browser_download_url"]
+    return release.get("tag_name") or "", url
 
 
 def fetch(url: str, accept: str = "") -> bytes:
@@ -195,9 +206,45 @@ def ai_dirs_in(tree: Path) -> "list[Path]":
     return found
 
 
-def install_archive(source: str, dest: Path, work: Path) -> "list[str]":
+RELEASES_FILE = ".rjm-releases.json"   # in AI/Skirmish: github spec -> installed tag
+
+
+def installed_releases(dest: Path) -> dict:
+    try:
+        data = json.loads((dest / RELEASES_FILE).read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def record_release(dest: Path, spec: str, tag: str) -> None:
+    data = installed_releases(dest)
+    data[spec] = tag
+    tmp = dest / (RELEASES_FILE + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(dest / RELEASES_FILE)
+
+
+def swap_in(target: Path, src: Path) -> None:
+    """Copy `src` next to `target`, then swap it in, so the AI is missing for
+    two renames rather than for a whole copy."""
+    new = target.with_name("." + target.name + ".new")
+    old = target.with_name("." + target.name + ".old")
+    for p in (new, old):
+        if p.exists() or p.is_symlink():
+            replace_with(p, lambda _: None)
+    shutil.copytree(src, new)
+    if target.exists() or target.is_symlink():
+        target.rename(old)
+    new.rename(target)
+    if old.exists() or old.is_symlink():
+        replace_with(old, lambda _: None)
+
+
+def install_archive(source: str, dest: Path, work: Path, resolved: "tuple[str, str] | None" = None) -> "list[str]":
+    tag = None
     if source.startswith("github:"):
-        url = github_asset_url(source)
+        tag, url = resolved or github_release(source)
         filename = source.split("#", 1)[-1] if "#" in source else "ai.tar.gz"
         filename = "ai.zip" if filename.endswith(".zip") else "ai.tar.gz"
     elif source.startswith(("https://", "http://")):
@@ -229,9 +276,41 @@ def install_archive(source: str, dest: Path, work: Path) -> "list[str]":
             continue
         target = dest / ai.name
         existed = target.exists() or target.is_symlink()
-        replace_with(target, lambda t: shutil.copytree(ai, t))
-        log("%s %s from %s" % ("replaced" if existed else "installed", target, source))
+        swap_in(target, ai)
+        log("%s %s from %s%s" % ("replaced" if existed else "installed", target, source,
+                                 (" (%s)" % tag) if tag else ""))
+    if tag is not None and not errors:
+        record_release(dest, source, tag)
     return errors
+
+
+def update() -> "tuple[list[str], list[str]]":
+    """Reinstall each ``github:`` source on a moving tag (``latest`` or
+    ``newest``) whose release changed since it was installed. Returns
+    (changes as "<spec>: <old> -> <new>", errors). Run between games: the
+    engine loads an AI's library when a game starts."""
+    dest = skirmish_dir()
+    sources = os.environ.get("BARHOST_AI_ARCHIVES", "").replace(";", " ").split()
+    moving = [s for s in sources if s.startswith("github:")
+              and s.split("#", 1)[0].rsplit("@", 1)[-1] in ("latest", "newest")]
+    changes, errors = [], []
+    with tempfile.TemporaryDirectory(prefix="install_ai.") as tmp:
+        for i, spec in enumerate(moving):
+            try:
+                tag, url = github_release(spec)
+                old = installed_releases(dest).get(spec)
+                if tag == old:
+                    continue
+                work = Path(tmp) / str(i)
+                work.mkdir()
+                problems = install_archive(spec, dest, work, resolved=(tag, url))
+                if problems:
+                    errors.extend(problems)
+                else:
+                    changes.append("%s: %s -> %s" % (spec, old or "unknown", tag))
+            except Exception as exc:  # a failed check keeps what is installed
+                errors.append("%s: %s" % (spec, exc))
+    return changes, errors
 
 
 def main() -> int:
@@ -259,5 +338,14 @@ def main() -> int:
     return 1 if errors else 0
 
 
+def main_update() -> int:
+    changes, errors = update()
+    for c in changes:
+        log("updated " + c)
+    for err in errors:
+        log("ERROR: " + err)
+    return 1 if errors else 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main_update() if "--update" in sys.argv[1:] else main())

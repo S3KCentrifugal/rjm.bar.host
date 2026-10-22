@@ -48,6 +48,22 @@ with lobby lines and a fake clock. It covers:
   everyone, or an authorised user (any case), not for other votes, not for
   vote text said by anyone but the autohost, and not before being boss;
   authorised users made boss when they join, or once boss if already in;
+- AI release updates (`AIUpdate`): checked after each game and on the
+  interval while idle, never during a game, no countdown while updating, the
+  authorised users told, a failed check changing nothing, 0 turning it off
+  (`test_install_ai.py` `Update`: the installed tag recorded, an unchanged
+  release not downloaded, a new one swapped in, a broken one leaving the
+  installed version, a fixed tag never checked);
+- `!barb` / `!smrt` (`SwitchAI`): the bots replaced as a player, the choice
+  kept across a restart, the same AI not redone, a switch during a game done
+  after it, strangers refused;
+- the welcome (`Welcome`): said privately (SAYBATTLEPRIVATEEX) to each
+  joiner, not to itself, the autohost or other rooms, nothing when unset;
+- the ring hint (`RingHint`): one line on voting an away player to
+  spectator after a `!ring`, no command of its own, at most once a minute,
+  not for the autohost, itself, or text that is not a ring;
+- the engine's exit in the client log (`EngineExit`): one line for a clean
+  exit, the console's tail for a crash while the game goes on, once per game;
 - the map rotation (`MapRotation`): the first map once boss, no countdown
   until the autohost has switched and the map is downloaded, the next map
   after each game with the place kept across a restart, wrapping around, and

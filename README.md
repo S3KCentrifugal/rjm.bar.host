@@ -73,6 +73,16 @@ The table leaves out two cases:
      (`BARHOST_SEAT_SPECTATE_AT`, `BARHOST_SEAT_PLAY_BELOW`).
   3. While boss, gives boss to `BARHOST_FOLLOW` users as they join, and ends
      (`!ev`) any vote to unboss everyone, the client, or one of those users.
+     An AI from `BARHOST_AI_ARCHIVES` on a moving tag (`@latest`, `@newest`)
+     is updated between games: checked after every game and every
+     `BARHOST_AI_UPDATE_EVERY` seconds, installed only when no game runs, and
+     no countdown starts until it is done.
+     Those users switch the bots' AI with `!barb` / `!smrt`, kept across
+     restarts and done as a player (after the game if one is running). Each
+     player who joins gets `BARHOST_WELCOME` privately in the room chat.
+     When a player rings another, says once how to vote an away player to
+     spectator (`!cv spec <name>`), leaving it to the room. Reports its
+     engine's exit in its own log, with the engine's last lines if it failed.
      With `BARHOST_MAP_ROTATION`, sends `!map <next>` once boss and after
      every game, keeping its place across restarts, and skips a map the
      autohost will not take or that cannot be downloaded. Any map change is

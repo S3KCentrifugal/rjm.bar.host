@@ -195,5 +195,77 @@ class GithubSpecs(Env):
             install_ai.github_asset_url("github:o/r")
 
 
+class Update(Env):
+    """update(): reinstall a moving-tag release when its tag changes."""
+
+    SPEC = "github:o/r@latest"
+
+    def build(self, tag):
+        """A release archive whose AI records its tag."""
+        built = self.tmp / ("SMRTBARb-%s-linux.tar.gz" % tag)
+        if built.exists():
+            return built.read_bytes()
+        src = self.tmp / ("src-" + tag)
+        make_ai(src, "SMRTBARb")
+        (src / "SMRTBARb" / "stable" / "release.txt").write_text(tag)
+        return tar_of(src, ["SMRTBARb"], self.tmp / ("SMRTBARb-%s-linux.tar.gz" % tag)).read_bytes()
+
+    def serve(self, tag, broken=False):
+        api = "https://api.github.com/repos/o/r/releases/latest"
+        asset = "SMRTBARb-%s-linux.tar.gz" % tag
+        body = b"not a tarball" if broken else self.build(tag)
+        self.fetched = []
+
+        def fetch(url, accept=""):
+            self.fetched.append(url)
+            if url == api:
+                return json.dumps(release(tag, [asset, "SMRTBARb-%s-linux-dbg.tar.gz" % tag])).encode()
+            if url == "https://github.com/dl/" + asset:
+                return body
+            raise AssertionError("unexpected URL " + url)
+        return mock.patch.object(install_ai, "fetch", side_effect=fetch)
+
+    def installed(self):
+        return (self.skirmish / "SMRTBARb" / "stable" / "release.txt").read_text()
+
+    def setUp(self):
+        super().setUp()
+        os.environ["BARHOST_AI_ARCHIVES"] = self.SPEC
+        with self.serve("v1.958-prod"):
+            self.assertEqual(install_ai.main(), 0)
+
+    def test_start_records_the_installed_tag(self):
+        self.assertEqual(install_ai.installed_releases(self.skirmish), {self.SPEC: "v1.958-prod"})
+        self.assertEqual(self.installed(), "v1.958-prod")
+
+    def test_same_release_is_not_downloaded_again(self):
+        with self.serve("v1.958-prod"):
+            self.assertEqual(install_ai.update(), ([], []))
+        self.assertEqual(len(self.fetched), 1)                 # only the release lookup
+
+    def test_a_new_release_replaces_the_installed_one(self):
+        with self.serve("v1.960-prod"):
+            changes, errors = install_ai.update()
+        self.assertEqual(errors, [])
+        self.assertEqual(changes, ["%s: v1.958-prod -> v1.960-prod" % self.SPEC])
+        self.assertEqual(self.installed(), "v1.960-prod")
+        self.assertEqual(install_ai.installed_releases(self.skirmish)[self.SPEC], "v1.960-prod")
+        self.assertFalse([p for p in self.skirmish.iterdir() if p.name.startswith(".SMRTBARb")])
+
+    def test_a_broken_release_keeps_the_installed_one(self):
+        with self.serve("v1.961-prod", broken=True):
+            changes, errors = install_ai.update()
+        self.assertEqual(changes, [])
+        self.assertTrue(errors)
+        self.assertEqual(self.installed(), "v1.958-prod")
+        self.assertEqual(install_ai.installed_releases(self.skirmish)[self.SPEC], "v1.958-prod")
+
+    def test_a_fixed_tag_is_never_checked(self):
+        os.environ["BARHOST_AI_ARCHIVES"] = "github:o/r@v1.958-prod"
+        with self.serve("v1.960-prod"):
+            self.assertEqual(install_ai.update(), ([], []))
+        self.assertEqual(self.fetched, [])
+
+
 if __name__ == "__main__":
     unittest.main()

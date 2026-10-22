@@ -35,7 +35,12 @@ room (the client hosts by itself)
      to a game begins.
   4. While boss, give boss to BARHOST_FOLLOW users as they join (`!boss`),
      and end at once (`!ev`) any vote to unboss everyone, this client, or a
-     BARHOST_FOLLOW user.
+     BARHOST_FOLLOW user. A BARHOST_FOLLOW user switches the bots' AI with
+     `!barb` / `!smrt` (kept across restarts; done as a player, after the
+     game if one is on). Each joiner gets BARHOST_WELCOME privately.
+     When a player rings another (`!ring <name>`), say
+     how to vote an away player to spectator, at most once a minute; the room
+     decides.
   5. When enough humans are in, ready and synced, count down and `!cv start`.
   6. When the autohost's game starts, launch spring-headless as a spectator
      client of it. The engine runs the bots, because this client owns them.
@@ -61,6 +66,10 @@ Settings (environment):
   BARHOST_MAP_ROTATION    room mode: ';'-separated maps, one per game, in order
                           (its place is kept in BARHOST_STATE_FILE)
   BARHOST_ROOM_NAME       room title, set with !rename (optional)
+  BARHOST_WELCOME         room mode: said privately in the room to each joiner
+  BARHOST_AI_UPDATE_EVERY seconds between checks for a new release of a
+                          BARHOST_AI_ARCHIVES moving tag, only between games,
+                          and after every game (900; 0 = never)
   BARHOST_ROOM_SETUP      ';'-separated chat commands sent once boss
                           (default "!preset custom;!bSet experimentallegionfaction 1")
   BARHOST_BOT_AI          AI short name (BARb)
@@ -100,6 +109,14 @@ MANAGER_RE = re.compile(r"^Host\[([A-Za-z]+)\d+\]$")
 PRIVATE_WAIT = 30           # seconds to wait for the private room to appear
 MAP_WAIT = 20               # seconds for the autohost to switch to a !map before skipping it
 VOTE_RE = re.compile(r'called a vote for command "([^"]*)"')
+# A player ringing another (Chobby's "Ring" sends `!ring <name>`): answer with
+# how the room can vote an away player to spectator (Chobby's "Force
+# Spectator" is `!spec <name>`); the room decides. At most once a minute.
+RING_RE = re.compile(r"^!ring(?=\s|$)\s*(\S+)?", re.IGNORECASE)
+RING_HINT = "If %s is away: vote them to spectator with !cv spec %s, then !vote y."
+RING_HINT_EVERY = 60
+# Authorised users switch the bots' AI by PM; the choice is kept.
+AI_COMMANDS = {"!barb": "BARb", "!smrt": "SMRTBARb"}
 
 # SPADS kicks clients that talk too fast: at most one command per this many s.
 COMMAND_SPACING = 1.5
@@ -141,6 +158,8 @@ class Settings:
         if self.mode == "follow" and not self.follow:
             raise SystemExit("follow mode needs BARHOST_FOLLOW (the users to follow)")
         self.room_name = g("BARHOST_ROOM_NAME")
+        # Room mode: said privately in the room to each player who joins.
+        self.welcome = g("BARHOST_WELCOME")
         self.setup = [c.strip() for c in
                       g("BARHOST_ROOM_SETUP", "!preset custom;!bSet experimentallegionfaction 1").split(";")
                       if c.strip()]
@@ -159,6 +178,10 @@ class Settings:
         # Room mode: maps to cycle through, one per game (';'-separated names as
         # the autohost's !map takes them; a part of a name is enough if unique).
         self.map_rotation = [m.strip() for m in g("BARHOST_MAP_ROTATION").split(";") if m.strip()]
+        # Seconds between checks for a new release of a BARHOST_AI_ARCHIVES
+        # source on a moving tag (@latest / @newest), only between games; also
+        # checked after every game. 0 = never.
+        self.ai_update_every = int(g("BARHOST_AI_UPDATE_EVERY", "900"))
         self.min_humans = int(g("BARHOST_MIN_HUMANS", "1"))
         self.start_delay = int(g("BARHOST_START_DELAY", "20"))
         self.postgame_delay = int(g("BARHOST_POSTGAME_DELAY", "60"))
@@ -196,6 +219,13 @@ class LobbyClient:
         self.privacy = state.get("privacy", s.privacy)
         # Room mode: the next map of BARHOST_MAP_ROTATION; also kept.
         self.map_index = state.get("map_index", 0)
+        # The bots' AI, as last chosen by !barb / !smrt (or !bots n AI); kept.
+        self.bot_ai = state.get("bot_ai", s.bot_ai)
+        self.ai_switch_due = False  # a switch asked during a game, done after it
+        # New AI releases: checked between games by the I/O layer (install_ai.update).
+        self.next_ai_check = self.now() + s.ai_update_every
+        self.need_ai_update = False
+        self.ai_updating = False
         self.reset()
 
     def load_state(self) -> dict:
@@ -210,13 +240,16 @@ class LobbyClient:
             out["privacy"] = st["privacy"]
         if isinstance(st.get("map_index"), int) and st["map_index"] >= 0:
             out["map_index"] = st["map_index"]
+        if isinstance(st.get("bot_ai"), str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", st["bot_ai"]):
+            out["bot_ai"] = st["bot_ai"]
         return out
 
     def save_state(self):
         try:
             self.s.state_file.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.s.state_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"privacy": self.privacy, "map_index": self.map_index}))
+            tmp.write_text(json.dumps({"privacy": self.privacy, "map_index": self.map_index,
+                                       "bot_ai": self.bot_ai}))
             tmp.replace(self.s.state_file)
         except OSError as e:
             log("could not save %s: %s" % (self.s.state_file, e))
@@ -261,6 +294,7 @@ class LobbyClient:
         self.map_wanted = None      # room mode: a !map sent, until the room shows it
         self.map_deadline = None
         self.map_skips = 0          # maps skipped in a row (not accepted or not downloadable)
+        self.ring_hint_after = 0.0  # room mode: no ring hint before this time
         self.room_password_now = ""  # the private room's password, once in it
 
     def status(self) -> dict:
@@ -417,6 +451,10 @@ class LobbyClient:
                 self.script_password = p[3]
             if b is self.battle:
                 self.boss_authorised([p[2]])
+                # Seen only by the joiner, in the room's chat; any member may
+                # send it (Teiserver SAYBATTLEPRIVATEEX, lobby.ex allow?).
+                if self.s.mode == "room" and self.s.welcome and p[2] not in (b.founder, self.s.login):
+                    self.pending.append(("SAYBATTLEPRIVATEEX", p[2], self.s.welcome))
 
     def on_LEFTBATTLE(self, line):
         p = line.split(" ")
@@ -565,6 +603,12 @@ class LobbyClient:
                 self.boss = True
                 self.configure_room()
             return
+        ring = RING_RE.match(msg.strip())
+        if ring and self.s.mode == "room" and user not in (self.battle.founder, self.s.login) \
+                and self.now() >= self.ring_hint_after:
+            self.ring_hint_after = self.now() + RING_HINT_EVERY
+            name = ring.group(1) or "a player"
+            self.say(RING_HINT % (name, ring.group(1) or "<name>"))
         # The autohost announces a vote as `* <user> called a vote for command
         # "<command>" [!vote y, ...]` (BYAR-Chobby gui_battle_room_window.lua,
         # ParseForVotingSaidBattle). End one that would unboss this client or
@@ -676,6 +720,21 @@ class LobbyClient:
         self.state = "waiting"
         self.rotate_map()
 
+    def switch_bots(self):
+        """Replace this client's bots with self.bot_ai: as a player (only
+        players may add bots), then a spectator again in a private room or in
+        follow mode; in a public room the seat rules decide."""
+        self.ai_switch_due = False
+        b = self.battle
+        log("switching the bots to %s" % self.bot_ai)
+        for name in self.my_bots():
+            self.pending.append(("REMOVEBOT", name))
+            b.bots.pop(name, None)
+        self.set_seat(True, "adding %s" % self.bot_ai)
+        self.sync_bots()
+        if self.s.mode == "follow" or b.passworded:
+            self.set_seat(False, "bots added")
+
     def playing(self) -> bool:
         return self.my_status is not None and unpack_battle_status(self.my_status)["mode"] == 1
 
@@ -781,6 +840,7 @@ class LobbyClient:
             live = self.battle is not None and self.state != "ingame"
             if len(w) >= 3 and re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", w[2]) and w[2] != self.bot_ai:
                 self.bot_ai = w[2]
+                self.save_state()
                 if live:            # replace the bots with the new AI
                     for name in self.my_bots():
                         self.pending.append(("REMOVEBOT", name))
@@ -789,6 +849,20 @@ class LobbyClient:
                 self.sync_bots()
             when = "" if live else (" after this game" if self.battle else " when I join your room")
             self.tell(user, "OK: %d %s%s." % (self.want_bots, self.bot_ai, when))
+        elif cmd in AI_COMMANDS:
+            ai = AI_COMMANDS[cmd]
+            if ai == self.bot_ai and not self.ai_switch_due:
+                self.tell(user, "The bots already run %s." % ai)
+                return
+            self.bot_ai = ai
+            self.save_state()
+            if self.battle and self.state == "waiting" and not self.game_running():
+                self.switch_bots()
+                self.tell(user, "OK: switching the bots to %s." % ai)
+            else:
+                self.ai_switch_due = bool(self.battle)
+                self.tell(user, "OK: the bots run %s %s." % (
+                    ai, "after this game" if self.battle else "from the next room"))
         elif cmd in ("!public", "!private") and self.s.mode == "room":
             self.privacy = cmd[1:]
             self.save_state()
@@ -859,10 +933,10 @@ class LobbyClient:
                 self.state, where, len(self.my_bots()), self.want_bots, self.bot_ai, self.games,
                 ("; " + self.last_error) if self.last_error else ""))
         elif self.s.mode == "room":
-            self.tell(user, "Commands: !public, !private, !bots <0-16> [AI], !status")
+            self.tell(user, "Commands: !public, !private, !barb, !smrt, !bots <0-16> [AI], !status")
         else:
-            self.tell(user, "Commands: !bots <0-16> [AI], !room <room number, host, player or title> "
-                            "[password], !join [password], !leave, !status")
+            self.tell(user, "Commands: !bots <0-16> [AI], !barb, !smrt, !room <room number, host, player or "
+                            "title> [password], !join [password], !leave, !status")
 
     def find_room(self, ref):
         """The room `ref` names, in this order: its number; its host (the
@@ -942,8 +1016,18 @@ class LobbyClient:
             self.state = "lobby"
         self.next_join = self.now() + 10
 
+    def ai_updated(self, changes, errors):
+        """The I/O layer's result of install_ai.update()."""
+        self.ai_updating = False
+        for c in changes:
+            log("AI release updated: " + c)
+            for u in sorted(self.s.follow):
+                self.tell(u, "AI release updated (%s); the next game uses it." % c.rsplit(": ", 1)[-1])
+        for e in errors:
+            log("AI update check failed: " + e)
+
     def ready_to_start(self) -> bool:
-        if not self.synced or self.map_wanted:     # no start mid map change
+        if not self.synced or self.map_wanted or self.ai_updating:   # no start mid change
             return False
         humans = self.humans()
         if self.s.min_humans <= 0 or len(humans) < self.s.min_humans:
@@ -957,6 +1041,29 @@ class LobbyClient:
         self.games += 1
         log("game %d starting on %s:%s" % (self.games, b.ip, b.port))
         self.game_proc = self.launch(b, self.script_password)
+        self.game_launched_at = self.now()
+        self.engine_exit_logged = False
+
+    def log_engine_exit(self):
+        """Once per game: the engine's exit, in the pod log (its console is
+        only on the volume). An odd exit (non-zero, or while the game goes
+        on) brings the console's last lines along."""
+        if self.game_proc is None or getattr(self, "engine_exit_logged", True):
+            return
+        self.engine_exit_logged = True
+        code = self.game_proc.poll()
+        ran = self.now() - getattr(self, "game_launched_at", self.now())
+        still = bool(self.battle and self.users.get(self.battle.founder, 0) & 1)
+        log("engine exited with code %s after %d s%s" % (code, ran, "; the game goes on" if still else ""))
+        if code == 0 and not still:
+            return
+        console = getattr(self.game_proc, "write_dir", None)
+        try:
+            lines = (console / "engine-console.log").read_text(errors="replace").splitlines()[-15:]
+        except (OSError, TypeError):
+            return
+        for line in lines:
+            log("  engine: " + line)
 
     # -- time --------------------------------------------------------------
 
@@ -967,6 +1074,7 @@ class LobbyClient:
             if self.game_proc is not None and self.game_proc.poll() is None:
                 self.flush_pending()
                 return
+            self.log_engine_exit()
             if self.battle and self.users.get(self.battle.founder, 0) & 1:
                 self.flush_pending()
                 return     # our engine ended but the game goes on: wait it out
@@ -977,6 +1085,7 @@ class LobbyClient:
             self.quiet_until = now + self.s.postgame_delay
             if self.s.mode == "follow" and self.battle:
                 self.sync_bots()        # a !bots sent during the game
+            self.next_ai_check = now    # look for a new AI release before the next game
             if self.s.mode == "room" and self.battle and self.boss and self.s.map_rotation:
                 self.map_skips = 0      # one map per game
                 self.advance_map()
@@ -1011,6 +1120,14 @@ class LobbyClient:
         # Room mode: the room kind follows !public / !private (between games),
         # and in a public room the seat follows the humans playing: spectate
         # at BARHOST_SEAT_SPECTATE_AT, play again below BARHOST_SEAT_PLAY_BELOW.
+        # A new AI release is only ever installed between games.
+        if self.s.ai_update_every > 0 and not self.ai_updating and not self.game_running() \
+                and self.state in ("lobby", "waiting") and now >= self.next_ai_check:
+            self.next_ai_check = now + self.s.ai_update_every
+            self.ai_updating = self.need_ai_update = True
+        if self.ai_switch_due and self.battle and self.state == "waiting" and not self.game_running() \
+                and (self.boss or self.s.mode == "follow"):
+            self.switch_bots()
         # Rehosting is only ever done from a room with no game in progress.
         if self.s.mode == "room" and self.battle and self.state == "waiting" and self.boss \
                 and not self.game_running() and not (self.users.get(self.battle.founder, 0) & 1):
@@ -1044,6 +1161,16 @@ class LobbyClient:
 
 
 # -- I/O --------------------------------------------------------------------
+
+async def update_ais(c: LobbyClient):
+    """Install new releases of moving-tag AI sources, off the lobby loop."""
+    try:
+        import install_ai
+        changes, errors = await asyncio.get_running_loop().run_in_executor(None, install_ai.update)
+    except Exception as e:  # a failed check keeps what is installed
+        changes, errors = [], [str(e)]
+    c.ai_updated(changes, errors)
+
 
 async def fetch_content(c: LobbyClient, b: Battle):
     """Download the room's game and map (pr-downloader skips what is there),
@@ -1111,6 +1238,9 @@ async def session(c: LobbyClient):
             if c.need_fetch is not None:
                 asyncio.ensure_future(fetch_content(c, c.need_fetch))
                 c.need_fetch = None
+            if c.need_ai_update:
+                c.need_ai_update = False
+                asyncio.ensure_future(update_ais(c))
             if time.monotonic() - last_ping > 30:
                 c.send("PING")
                 last_ping = time.monotonic()
