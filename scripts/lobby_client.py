@@ -8,9 +8,12 @@ follow (a person hosts, the client brings the bots)
   1. Log in and wait. When a user in BARHOST_FOLLOW is in a room, join it as a
      spectator (a passworded room needs `!join <password>` by private message).
      BAR's server does not tell this client who is in other rooms (see
-     NOT_SEEN), so the user can name the room instead: `!room <room number or
-     host name> [password]`.
-  2. Add BARHOST_BOT_COUNT bots it owns. The followed user can change that by
+     NOT_SEEN), so the user can name the room instead: `!room <room> [password]`,
+     where <room> is its number, its host (autohost or hosting player), a
+     player seen in it, or its title (whole or a unique part).
+  2. Add BARHOST_BOT_COUNT bots it owns: BAR's server takes ADDBOT only from
+     a player, so the client is a player for the adds, then spectates again
+     (the bots stay). The followed user can change the count by
      private message: `!bots <n> [AI]`; also `!leave`, `!join [password]`,
      `!room`, `!status`. The followed user stays boss and starts the game.
   3. When the game starts, run spring-headless as a spectator client; it runs
@@ -79,6 +82,9 @@ COMMAND_SPACING = 1.5
 # Seconds after joining before "everyone I follow left" applies: the room's
 # member list arrives just after JOINBATTLE.
 JOIN_SETTLE = 10
+# follow mode: seconds after joining before adding the bots, so the members'
+# teams are known and the bots take free ones.
+BOTS_DELAY = 3
 
 # BAR's server tells a client who joins other rooms only if it is a lobby it
 # lists (Teiserver spring_in.ex @optimisation_level: Chobby, skylobby,
@@ -187,6 +193,7 @@ class LobbyClient:
         self.target_room = ""
         self.target_owner = ""
         self.joined_at = None
+        self.bots_due = None        # follow mode: when to add the bots after joining
 
     def status(self) -> dict:
         b = self.battle
@@ -353,13 +360,11 @@ class LobbyClient:
         self.need_fetch = b
         if self.s.mode == "follow":
             # A guest: spectate, bring the bots, leave hosting to the person.
+            # The bots wait until the members' statuses (their teams) are in.
             self.my_status = battle_status(ready=0, mode=0, sync=2)
             self.pending.append(("MYBATTLESTATUS", self.my_status, 0))
             self.state = "waiting"
-            self.sync_bots()
-            owner = ", ".join(sorted(self.s.follow & b.users)) or "the owner"
-            self.say("%s here: running %d %s for %s on a server. PM me !bots <n> to change that."
-                     % (self.s.login, self.want_bots, self.bot_ai, owner))
+            self.bots_due = self.now() + BOTS_DELAY
             return
         # Join as a player first: SPADS grants boss to players (Chobby does the same).
         self.my_status = battle_status(ready=0, team=0, ally=0, mode=1, sync=2)
@@ -485,6 +490,7 @@ class LobbyClient:
         used |= {x["status"]["team"] for x in b.bots.values()}
         names = set(b.bots)
         team, i = 1, 0      # team 0 stays free for the first human
+        adds = []
         for k in range(len(mine), self.want_bots):
             while team in used:
                 team += 1
@@ -496,9 +502,24 @@ class LobbyClient:
             names.add(name)
             side = self.s.bot_sides[k % len(self.s.bot_sides)]
             st = battle_status(ready=1, team=team, ally=self.s.bot_ally, mode=1, sync=1, side=side)
-            self.pending.append(("ADDBOT", name, st, 0, self.bot_ai))
-            if self.s.bot_profile:
-                self.say("!aiProfile %s %s" % (name, self.s.bot_profile))
+            adds.append(("ADDBOT", name, st, 0, self.bot_ai))
+        # Teiserver lets only players add bots (lobby.ex allow?, player_command
+        # :add_bot); a bot stays when its owner then spectates, and goes only
+        # when the owner leaves the room. So a spectator turns player for the
+        # adds and back.
+        spectator = self.my_status is not None and unpack_battle_status(self.my_status)["mode"] == 0
+        if spectator:
+            sync = unpack_battle_status(self.my_status)["sync"]
+            while team in used:
+                team += 1
+            self.pending.append(("MYBATTLESTATUS", battle_status(ready=0, team=team, ally=self.s.bot_ally,
+                                                                 mode=1, sync=sync), 0))
+        self.pending += adds
+        if spectator:
+            self.pending.append(("MYBATTLESTATUS", self.my_status, 0))
+        if self.s.bot_profile:
+            for a in adds:
+                self.say("!aiProfile %s %s" % (a[1], self.s.bot_profile))
 
     def leave_battle(self, why):
         for name in self.my_bots():
@@ -550,10 +571,20 @@ class LobbyClient:
             else:
                 self.tell(user, "Joining your room.")
         elif cmd == "!room":
-            b = self.find_room(w[1]) if len(w) >= 2 else None
+            # !room <room> [password]: <room> may have spaces (a title), so try
+            # all of it first, then all but the last word with that as password.
+            args = msg[len(w[0]):].strip()
+            b, why, password = self.find_room(args), "", ""
+            if isinstance(b, str):
+                b, why = None, b
+            if b is None and " " in args:
+                ref, password = args.rsplit(" ", 1)
+                b = self.find_room(ref)
+                if isinstance(b, str):
+                    b, why = None, b
             if b is None:
-                self.tell(user, "Which room? PM me !room <room number or host name> [password]; "
-                                "I see %d rooms." % len(self.battles))
+                self.tell(user, (why or "I see no such room among %d." % len(self.battles))
+                          + " PM me !room <room number, host, player or title> [password].")
                 return
             if self.battle is b:
                 self.tell(user, "I am already in room %s." % b.id)
@@ -564,7 +595,7 @@ class LobbyClient:
             if self.battle:
                 self.leave_battle("moving to room %s for %s" % (b.id, user))
             self.target_room, self.target_owner = b.id, user
-            self.room_password = w[2] if len(w) >= 3 else ""
+            self.room_password = password
             self.paused = False
             self.told = set()
             self.next_join = self.now()
@@ -582,16 +613,36 @@ class LobbyClient:
                 len(self.my_bots()), self.want_bots, self.bot_ai, self.games,
                 ("; " + self.last_error) if self.last_error else ""))
         else:
-            self.tell(user, "Commands: !bots <0-16> [AI], !room <room number or host name> [password], "
-                            "!join [password], !leave, !status")
+            self.tell(user, "Commands: !bots <0-16> [AI], !room <room number, host, player or title> "
+                            "[password], !join [password], !leave, !status")
 
     def find_room(self, ref):
-        """A room by its number, or by its host's name (any case)."""
+        """The room `ref` names, in this order: its number; its host (the
+        autohost, or a player hosting it); a player seen in it (BAR's server
+        shows this client only hosts, see NOT_SEEN); its title, whole or a
+        unique part. Any case. A Battle, None, or a string saying why not."""
+        if not ref:
+            return None
         if ref in self.battles:
             return self.battles[ref]
-        for b in self.battles.values():
-            if b.founder.lower() == ref.lower():
+        r = ref.lower()
+        rooms = list(self.battles.values())
+        for b in rooms:
+            if b.founder.lower() == r:
                 return b
+        for b in rooms:
+            if r in {u.lower() for u in b.users}:
+                return b
+        for b in rooms:
+            if b.title.lower() == r:
+                return b
+        part = [b for b in rooms if len(r) >= 3 and r in b.title.lower()]
+        if len(part) == 1:
+            return part[0]
+        if len(part) > 1:
+            return "%d room titles contain \"%s\"." % (len(part), ref)
+        if any(u.lower() == r for u in self.users):
+            return "%s is online, but BAR's server does not tell me which room they are in." % ref
         return None
 
     def followed_battle(self):
@@ -638,6 +689,7 @@ class LobbyClient:
         self.synced = False
         self.boss_deadline = None
         self.target_room = ""       # !room names one room once; it is not rejoined
+        self.bots_due = None
         if self.state != "ingame":
             self.state = "lobby"
         self.next_join = self.now() + 10
@@ -685,6 +737,13 @@ class LobbyClient:
                 self.try_follow()
             else:
                 self.try_join()
+        if self.s.mode == "follow" and self.state == "waiting" and self.battle \
+                and self.bots_due is not None and now >= self.bots_due:
+            self.bots_due = None
+            self.sync_bots()
+            owner = ", ".join(sorted(self.s.follow & self.battle.users)) or "the owner"
+            self.say("%s here: running %d %s for %s on a server. PM me !bots <n> to change that."
+                     % (self.s.login, self.want_bots, self.bot_ai, owner))
         # The room's member list arrives just after JOINBATTLE: give it time.
         if self.s.mode == "follow" and self.state == "waiting" and self.battle \
                 and not (self.s.follow & self.battle.users) \

@@ -51,8 +51,12 @@ The table leaves out two cases:
      BAR's server only tells a client who joins *other* rooms if it is a lobby
      the server lists (Chobby, skylobby, modlobby), so on BAR's server the
      client usually cannot see which room the user is in. The user then names
-     it: `!room <room number or host name> [password]`. Once inside, the
-     client sees the room's members, and leaves when the user does.
+     it: `!room <room> [password]`, where `<room>` is the room's number, its
+     host (the `Host[..][..]` autohost, or a player hosting it), a player the
+     client can see in it, or its title, whole or a unique part. Once inside,
+     the client sees the room's members, and leaves when the user does.
+     BAR's server accepts `ADDBOT` only from players, so the client turns
+     player to add its bots and then spectates again; the bots stay.
   3. When the game starts, runs `spring-headless` as a spectator client, which
      runs the bots. When the user leaves the room, removes them and leaves.
 - **`client`, room mode**

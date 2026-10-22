@@ -55,7 +55,13 @@ with lobby lines and a fake clock. It covers:
   with one that does not, as BAR's does for this client (`FollowUnseen`):
   `!status` and `!join` explain it, `!room` by number or host name (with a
   password), members learned from CLIENTBATTLESTATUS on joining, leaving when
-  the owner is absent or leaves, and a failed join reported, not retried.
+  the owner is absent or leaves, a failed join reported, not retried, and the
+  bots added as a player on teams no member uses, then spectating again (also
+  for a later `!bots`), since BAR's server drops ADDBOT from a spectator;
+- `!room` by a player hosting the room, a player seen in it, the whole title
+  or a unique part of it, with a password, and explained when a title part is
+  ambiguous or the player is online in a room the client cannot see
+  (`RoomByName`).
 
 `tests/static/check_examples.py` keeps `examples/` the truthful reference for
 every mode. It checks that:

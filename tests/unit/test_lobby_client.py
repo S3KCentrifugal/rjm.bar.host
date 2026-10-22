@@ -423,7 +423,7 @@ class FollowUnseen(FollowHarness):
         self.owner_in_unseen_room()
         sent = self.pm("!room Host[XX9][9]")
         self.assertFalse([x for x in sent if x.startswith("JOINBATTLE")])
-        self.assertTrue([x for x in sent if "Which room?" in x], sent)
+        self.assertTrue([x for x in sent if "I see no such room among 1" in x], sent)
 
     def test_join_failure_is_reported_and_not_retried(self):
         self.owner_in_unseen_room()
@@ -432,6 +432,89 @@ class FollowUnseen(FollowHarness):
         sent = self.run_for(30)
         self.assertTrue([x for x in sent if "could not join room 12: Room is locked" in x], sent)
         self.assertFalse([x for x in sent if x.startswith("JOINBATTLE ")])
+
+    def test_adds_bots_as_a_player_then_spectates_again(self):
+        # Teiserver drops ADDBOT from a spectator; a bot stays when its owner spectates.
+        self.owner_in_unseen_room()
+        sent = self.enter(self.pm("!room 12"))
+        adds = [i for i, x in enumerate(sent) if x.startswith("ADDBOT")]
+        self.assertEqual(len(adds), 8)
+        mine = [(i, lc.unpack_battle_status(x.split(" ")[1])["mode"]) for i, x in enumerate(sent)
+                if x.startswith("MYBATTLESTATUS")]
+        self.assertEqual([m for i, m in mine if i < adds[0]][-1], 1)
+        self.assertEqual([m for i, m in mine if i > adds[-1]][0], 0)
+        self.assertEqual(lc.unpack_battle_status(self.c.my_status)["mode"], 0)
+
+    def test_bots_take_teams_the_members_do_not_use(self):
+        self.owner_in_unseen_room()
+        sent = self.pm("!room 12")
+        join = [x for x in sent if x.startswith("JOINBATTLE")][0]
+        self.feed("JOINBATTLE 12 hash")
+        self.c.tick()
+        self.feed("CLIENTBATTLESTATUS %s %d 0" % (OWNER, lc.battle_status(team=1, ally=0, mode=1, sync=1)),
+                  "JOINEDBATTLE 12 %s %s" % (ME, join.split(" ")[3]))
+        teams = [lc.unpack_battle_status(x.split(" ")[2])["team"] for x in self.run_for(30) if x.startswith("ADDBOT")]
+        self.assertEqual(len(teams), 8)
+        self.assertNotIn(1, teams)
+
+    def test_more_bots_later_also_turn_player(self):
+        self.owner_in_unseen_room()
+        for x in self.enter(self.pm("!room 12")):
+            if x.startswith("ADDBOT "):
+                w = x.split(" ")
+                self.feed("ADDBOT 12 %s %s %s 0 %s" % (w[1], ME, w[2], w[4]))
+        sent = self.pm("!bots 10")
+        statuses = [lc.unpack_battle_status(x.split(" ")[1])["mode"] for x in sent if x.startswith("MYBATTLESTATUS")]
+        self.assertEqual(len([x for x in sent if x.startswith("ADDBOT")]), 2)
+        self.assertEqual(statuses, [1, 0])
+
+
+class RoomByName(FollowHarness):
+    """!room <room number, host, player or title> [password]."""
+
+    def rooms(self):
+        self.feed("TASSERVER 0.38 * 8201 0", "ACCEPTED " + ME, "ADDUSER %s XX 0 2" % OWNER,
+                  "ADDUSER Friend XX 0 3",
+                  opened("12", title="Centrifugal's co-op"), opened("13", founder="SomePlayer", title="1v1 me"),
+                  opened("14", founder="Host[US4][001]", title="Team FFA", passworded=1),
+                  opened("15", founder="Host[US4][002]", title="Team chaos"), "LOGININFOEND")
+        self.take()
+
+    def joined_room(self, text):
+        return [x.split(" ")[1:3] for x in self.pm(text) if x.startswith("JOINBATTLE")]
+
+    def test_by_player_hosting_it(self):
+        self.rooms()
+        self.assertEqual(self.joined_room("!room someplayer"), [["13", "empty"]])
+
+    def test_by_whole_title_any_case(self):
+        self.rooms()
+        self.assertEqual(self.joined_room("!room centrifugal's CO-OP"), [["12", "empty"]])
+
+    def test_by_part_of_a_title_with_password(self):
+        self.rooms()
+        self.assertEqual(self.joined_room("!room ffa hunter2"), [["14", "hunter2"]])
+
+    def test_by_host_with_password(self):
+        self.rooms()
+        self.assertEqual(self.joined_room("!room Host[US4][001] hunter2"), [["14", "hunter2"]])
+
+    def test_by_a_player_seen_in_the_room(self):
+        self.rooms()
+        self.feed("JOINEDBATTLE 15 Friend")
+        self.assertEqual(self.joined_room("!room friend"), [["15", "empty"]])
+
+    def test_ambiguous_title_is_explained(self):
+        self.rooms()
+        sent = self.pm("!room team")
+        self.assertFalse([x for x in sent if x.startswith("JOINBATTLE")])
+        self.assertTrue([x for x in sent if '2 room titles contain "team"' in x], sent)
+
+    def test_online_player_in_an_unseen_room_is_explained(self):
+        self.rooms()
+        sent = self.pm("!room Friend")
+        self.assertFalse([x for x in sent if x.startswith("JOINBATTLE")])
+        self.assertTrue([x for x in sent if "Friend is online, but" in x], sent)
 
 
 if __name__ == "__main__":

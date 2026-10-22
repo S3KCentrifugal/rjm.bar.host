@@ -44,6 +44,9 @@ AIs are installed into `$BAR_ENGINE_DIR/AI/Skirmish` at container start.
   rooms' joins only to the lobbies it lists (`spring_in.ex`
   `@optimisation_level`: Chobby, skylobby, modlobby), so the followed user
   names the room with `!room`. A request to BAR to list this client is open.
+  Teiserver also takes `ADDBOT` only from players (`lobby.ex` `allow?`,
+  `player_command`), so follow mode turns player for the adds and then
+  spectates; Teiserver removes a user's bots only when they leave the room.
 - `../rjm.bar.lobbies` deploys `client` (app `bar-lobbies`). It also holds
   `spads` (`bar-spads`) and `match` (`bar-sims`), both disabled.
 
