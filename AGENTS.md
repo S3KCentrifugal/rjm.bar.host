@@ -274,6 +274,9 @@ Use the narrowest authoritative source:
   the `test` tag, which `../rjm.bar.lobbies` deploys on its next run. Never
   push or merge to `prod`: the owner squash-merges pull requests from `test` by
   hand.
+- After a push, verify it reached the cluster: follow
+  `../rjm.bar.lobbies/.claude/skills/verify-deployment/SKILL.md` (publish run,
+  then a deploy of `../rjm.bar.lobbies`, then the pod, read-only).
 - Do not commit automatically. Commit only when asked, and only the change
   asked for.
 - Never commit a secret. Check `.gitignore` covers any new credential file

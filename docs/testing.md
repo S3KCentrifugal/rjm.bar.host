@@ -43,7 +43,16 @@ with lobby lines and a fake clock. It covers:
 - room choice: cluster autohost, region, engine version, empty, unlocked, not
   in game;
 - boss, setup commands, bots on their ally team with distinct teams and
-  cycled sides, then spectating;
+  cycled sides, then still a player in a public room;
+- the public seat (`PublicSeat`): spectating at 8 humans playing, playing
+  again below 3 (not at 3 to 7), spectating before `!cv start`, playing again
+  after the game;
+- `!public` / `!private` (`Privacy`): the choice kept across a restart, a
+  private room asked of the region manager with `!privatehost`, joined with
+  its password, spectated, the password PM'd; leaving the other kind of room
+  between games but not during one or its countdown; after reconnecting
+  mid-game, no room taken until the engine's game ends; no manager online, and a silent manager
+  timing out then asked again; replies sent during a game;
 - flood spacing;
 - setup without a boss confirmation;
 - the countdown, its cancellation, and no start before content is ready or

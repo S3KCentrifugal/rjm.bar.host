@@ -2,12 +2,14 @@
 
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.environ.get("RJM_BIN", "/opt/rjm-bar-host/bin"))
 import lobby_client as lc  # noqa: E402
 
 ME = "[SMRT]Clyde"
+OWNER = "[SMRT]Centrifugal"
 HOST = "Host[EU1][3]"
 ENGINE = "2026.07.04"
 
@@ -38,10 +40,19 @@ class Harness(unittest.TestCase):
         self.clock = Clock()
         self.launched = []
         self.proc = Proc()
-        s = lc.Settings({"BARHOST_LOBBY_LOGIN": ME, "BARHOST_LOBBY_PASSWORD": "secret",
-                         "BAR_ENGINE_VERSION": ENGINE, "BARHOST_LOBBY_CLUSTER": "EU",
-                         "BARHOST_STATUS_FILE": "/tmp/test-lobby-status.json"})
-        self.c = lc.LobbyClient(s, now=self.clock, launch=self.launch)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.c = self.client()
+
+    def client(self, **extra):
+        """A client on room-mode defaults plus `extra` settings, its state
+        file in this test's own directory."""
+        e = {"BARHOST_LOBBY_LOGIN": ME, "BARHOST_LOBBY_PASSWORD": "secret",
+             "BAR_ENGINE_VERSION": ENGINE, "BARHOST_LOBBY_CLUSTER": "EU",
+             "BARHOST_STATUS_FILE": os.path.join(self.tmp.name, "status.json"),
+             "BARHOST_STATE_FILE": os.path.join(self.tmp.name, "state.json")}
+        e.update(extra)
+        return lc.LobbyClient(lc.Settings(e), now=self.clock, launch=self.launch)
 
     def launch(self, battle, password):
         self.launched.append((battle.ip, battle.port, password))
@@ -139,7 +150,7 @@ class RoomChoice(Harness):
 
 
 class Setup(Harness):
-    def test_boss_then_options_bots_and_spectate(self):
+    def test_boss_then_options_and_bots_playing_in_a_public_room(self):
         sent = self.boss_and_setup()
         said = [x[len("SAYBATTLE "):] for x in sent if x.startswith("SAYBATTLE ")]
         self.assertIn("!preset custom", said)
@@ -152,8 +163,9 @@ class Setup(Harness):
         self.assertNotIn(0, {s["team"] for s in statuses})
         self.assertEqual([s["side"] for s in statuses], [0, 1] * 4)
         self.assertEqual({b[4] for b in bots}, {"BARb"})
+        # A public room with fewer than 3 humans playing: Clyde stays a player.
         last = [lc.unpack_battle_status(x.split(" ")[1]) for x in sent if x.startswith("MYBATTLESTATUS")][-1]
-        self.assertEqual((last["mode"], last["sync"]), (0, 1))
+        self.assertEqual((last["mode"], last["sync"]), (1, 1))
 
     def test_commands_are_spaced_for_flood_protection(self):
         self.join()
@@ -229,6 +241,152 @@ class Starting(Harness):
         self.assertNotIn("SAYBATTLE !cv start", self.run_for(60))
 
 
+MANAGER = "Host[EU1]"
+PRIVATE_HOST = "Host[EU1][7]"
+
+
+def my_modes(sent):
+    """The seat (1 player, 0 spectator) of each MYBATTLESTATUS sent."""
+    return [lc.unpack_battle_status(x.split(" ")[1])["mode"] for x in sent if x.startswith("MYBATTLESTATUS")]
+
+
+class PublicSeat(Harness):
+    """A public room: a player while few humans play, a spectator from 8, a
+    player again below 3; always a spectator when the game starts."""
+
+    def humans_in(self, names, ready=0):
+        for n in names:
+            self.feed("JOINEDBATTLE 12 " + n,
+                      "CLIENTBATTLESTATUS %s %d 0" % (n, lc.battle_status(ready=ready, mode=1, sync=1)))
+        return self.run_for(5)
+
+    def test_spectates_at_8_humans_and_plays_again_below_3(self):
+        self.boss_and_setup()
+        self.assertTrue(self.c.playing())
+        names = ["P%d" % i for i in range(8)]
+        self.assertEqual(self.humans_in(names[:7]), [])                     # 7: still a player
+        self.assertEqual(my_modes(self.humans_in(names[7:])), [0])          # 8: spectate
+        for n in names[:5]:                                                 # 3 left: hysteresis
+            self.feed("LEFTBATTLE 12 " + n)
+        self.assertEqual(my_modes(self.run_for(5)), [])
+        self.feed("LEFTBATTLE 12 " + names[5])                              # 2 left: play
+        self.assertEqual(my_modes(self.run_for(5)), [1])
+
+    def test_spectates_before_the_game_starts_and_plays_after(self):
+        self.boss_and_setup()
+        sent = self.humans_in(["Alice"], ready=1) + self.run_for(25)
+        self.assertIn("SAYBATTLE !cv start", sent)
+        self.assertEqual(my_modes(sent[:sent.index("SAYBATTLE !cv start")])[-1], 0)
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        sent = self.run_for(5)
+        self.assertEqual(self.c.state, "waiting")
+        self.assertEqual(my_modes(sent), [1])                               # 1 human: play again
+
+
+class Privacy(Harness):
+    """!public / !private, remembered on the data volume; a private room is
+    opened as Chobby does, through a region manager's !privatehost."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_FOLLOW=OWNER)
+
+    def pm(self, text, user=OWNER):
+        self.feed("SAIDPRIVATE %s %s" % (user, text))
+        return self.run_for(5)
+
+    def log_in(self, manager=True):
+        self.feed("TASSERVER 0.38 * 8201 0", "ACCEPTED " + ME, "ADDUSER %s XX 0 1" % HOST,
+                  *(["ADDUSER %s XX 0 9" % MANAGER] if manager else []),
+                  opened("12"), "LOGININFOEND")
+        self.take()
+
+    def open_private(self):
+        """Ask the manager, get the password, see the room; return what was sent."""
+        sent = self.run_for(6)
+        self.assertIn("SAYPRIVATE %s !privatehost" % MANAGER, sent)
+        self.feed("SAIDPRIVATE %s Starting a new private instance in %s password=ab12 (share it)"
+                  % (MANAGER, PRIVATE_HOST),
+                  opened("20", founder=PRIVATE_HOST, passworded=1, title=ME + "'s private battle"))
+        return self.run_for(6)
+
+    def test_private_room_is_opened_joined_with_its_password_and_spectated(self):
+        self.c = self.client(BARHOST_FOLLOW=OWNER, BARHOST_ROOM_PRIVACY="private")
+        self.log_in()
+        join = [x for x in self.open_private() if x.startswith("JOINBATTLE")]
+        self.assertEqual([x.split(" ")[1:3] for x in join], [["20", "ab12"]])
+        self.feed("JOINBATTLE 20 hash", "JOINEDBATTLE 20 %s %s" % (ME, join[0].split(" ")[3]))
+        sent = self.run_for(2)
+        self.feed("SAIDBATTLEEX %s * Boss mode enabled for %s" % (PRIVATE_HOST, ME))
+        sent += self.run_for(40)
+        self.assertIn("SAYBATTLE !boss " + ME, sent)
+        self.assertEqual(len([x for x in sent if x.startswith("ADDBOT")]), 8)
+        self.assertEqual(my_modes(sent)[-1], 0)                             # private: spectate
+        self.assertTrue([x for x in sent if x.startswith("SAYPRIVATE %s Private room 20" % OWNER)
+                         and "password ab12" in x], sent)
+
+    def test_choice_is_remembered_across_a_restart(self):
+        self.log_in()
+        self.assertEqual(self.c.privacy, "public")
+        self.assertTrue([x for x in self.pm("!private") if "OK: I host a private room" in x])
+        self.assertEqual(self.client(BARHOST_FOLLOW=OWNER).privacy, "private")
+        self.pm("!public")
+        self.assertEqual(self.client(BARHOST_FOLLOW=OWNER, BARHOST_ROOM_PRIVACY="private").privacy, "public")
+
+    def test_switching_to_private_leaves_the_public_room_then_opens_one(self):
+        self.boss_and_setup()
+        self.feed("ADDUSER %s XX 0 9" % MANAGER)
+        sent = self.pm("!private") + self.run_for(30)
+        self.assertIn("LEAVEBATTLE", sent)
+        self.assertIn("SAYPRIVATE %s !privatehost" % MANAGER, sent)
+
+    def test_not_moved_during_a_game(self):
+        self.boss_and_setup()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        sent = self.pm("!private") + self.run_for(30)
+        self.assertTrue([x for x in sent if "after this game" in x], sent)
+        self.assertNotIn("LEAVEBATTLE", sent)
+
+    def test_not_moved_during_a_countdown_either(self):
+        self.boss_and_setup()
+        self.feed("JOINEDBATTLE 12 Alice",
+                  "CLIENTBATTLESTATUS Alice %d 0" % lc.battle_status(ready=1, mode=1, sync=1))
+        self.run_for(5)
+        self.assertEqual(self.c.state, "countdown")
+        sent = self.pm("!private")
+        self.assertTrue([x for x in sent if "after this game" in x], sent)
+        self.assertNotIn("LEAVEBATTLE", sent)
+
+    def test_reconnecting_during_a_game_takes_no_room_until_it_ends(self):
+        self.boss_and_setup()
+        self.feed("CLIENTSTATUS %s 65" % HOST)             # the game starts; the engine runs
+        self.assertEqual(len(self.launched), 1)
+        self.c.reset()                                      # the lobby connection drops
+        self.feed("TASSERVER 0.38 * 8201 0", "ACCEPTED " + ME, "ADDUSER %s XX 0 1" % HOST,
+                  opened("30"), "LOGININFOEND")
+        self.assertEqual(self.c.state, "ingame")
+        self.assertFalse([x for x in self.run_for(60) if x.startswith("JOINBATTLE")])
+        self.proc.code = 0                                  # the game ends
+        self.assertTrue([x for x in self.run_for(30) if x.startswith("JOINBATTLE 30")])
+
+    def test_no_manager_online_is_reported(self):
+        self.c = self.client(BARHOST_FOLLOW=OWNER, BARHOST_ROOM_PRIVACY="private")
+        self.log_in(manager=False)
+        self.assertFalse([x for x in self.run_for(10) if x.startswith("SAYPRIVATE")])
+        self.assertIn("no autohost manager online", self.c.last_error)
+
+    def test_a_silent_manager_times_out_then_is_asked_again(self):
+        self.c = self.client(BARHOST_FOLLOW=OWNER, BARHOST_ROOM_PRIVACY="private")
+        self.log_in()
+        self.assertIn("SAYPRIVATE %s !privatehost" % MANAGER, self.run_for(6))
+        sent = self.run_for(40)
+        self.assertIn("opened no private room", self.c.last_error)
+        self.assertNotIn("SAYPRIVATE %s !privatehost" % MANAGER, sent)
+        self.assertIn("SAYPRIVATE %s !privatehost" % MANAGER, self.run_for(70))
+
+
 class Recovery(Harness):
     def test_kicked_takes_another_room(self):
         self.boss_and_setup()
@@ -244,18 +402,12 @@ class Recovery(Harness):
         self.assertIsNone(self.c.battle)
 
 
-OWNER = "[SMRT]Centrifugal"
-
-
 class FollowHarness(Harness):
     """follow mode: the owner hosts; the client brings the bots."""
 
     def setUp(self):
         super().setUp()
-        s = lc.Settings({"BARHOST_LOBBY_LOGIN": ME, "BARHOST_LOBBY_PASSWORD": "secret",
-                         "BAR_ENGINE_VERSION": ENGINE, "BARHOST_CLIENT_MODE": "follow",
-                         "BARHOST_FOLLOW": OWNER, "BARHOST_STATUS_FILE": "/tmp/test-lobby-status.json"})
-        self.c = lc.LobbyClient(s, now=self.clock, launch=self.launch)
+        self.c = self.client(BARHOST_CLIENT_MODE="follow", BARHOST_FOLLOW=OWNER, BARHOST_LOBBY_CLUSTER=".*")
 
     def owner_in_room(self, bid="12", passworded=0, engine=ENGINE):
         self.feed("TASSERVER 0.38 * 8201 0", "ACCEPTED " + ME, "ADDUSER %s XX 0 1" % HOST,

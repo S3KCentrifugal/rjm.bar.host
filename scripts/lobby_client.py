@@ -21,10 +21,18 @@ follow (a person hosts, the client brings the bots)
 
 room (the client hosts by itself)
   1. Log in to BAR's lobby server (Spring lobby protocol, as Chobby does).
-  2. Take an empty room on one of BAR's cluster autohosts (`Host[XXn][k]`),
-     join it, become boss, and send the room setup commands
-     (BARHOST_ROOM_SETUP, e.g. `!bSet experimentallegionfaction 1`).
-  3. Add BARHOST_BOT_COUNT bots it owns, then become a spectator.
+  2. Public: take an empty room on one of BAR's cluster autohosts
+     (`Host[XXn][k]`). Private: PM a region manager (`Host[XXn]`)
+     `!privatehost`, as Chobby's "passworded private battle" does, and join
+     the room it opens with the password it answers. Join as a player,
+     become boss, and send the room setup commands (BARHOST_ROOM_SETUP, e.g.
+     `!bSet experimentallegionfaction 1`). A BARHOST_FOLLOW user switches
+     with `!public` / `!private` by PM; the choice survives restarts
+     (BARHOST_STATE_FILE).
+  3. Add BARHOST_BOT_COUNT bots it owns. Private: then spectate. Public: stay
+     a player until BARHOST_SEAT_SPECTATE_AT humans play, then spectate; play
+     again below BARHOST_SEAT_PLAY_BELOW. Always spectate when the countdown
+     to a game begins.
   4. When enough humans are in, ready and synced, count down and `!cv start`.
   5. When the autohost's game starts, launch spring-headless as a spectator
      client of it. The engine runs the bots, because this client owns them.
@@ -42,6 +50,11 @@ Settings (environment):
         back to SPADS_LOBBY_PASSWORD, login to SPADS_LOBBY_LOGIN)
   BARHOST_LOBBY_HOST, BARHOST_LOBBY_PORT        server4.beyondallreason.info:8200
   BARHOST_LOBBY_CLUSTER   regex on the autohost manager region, e.g. "EU" (any)
+  BARHOST_ROOM_PRIVACY    room mode: public (default) or private, first start only
+  BARHOST_STATE_FILE      where !public / !private is kept
+                          (/bar/data/lobby-client-state.json)
+  BARHOST_SEAT_SPECTATE_AT, BARHOST_SEAT_PLAY_BELOW   public room: spectate at
+                          this many humans playing (8), play below (3)
   BARHOST_ROOM_NAME       room title, set with !rename (optional)
   BARHOST_ROOM_SETUP      ';'-separated chat commands sent once boss
                           (default "!preset custom;!bSet experimentallegionfaction 1")
@@ -76,6 +89,10 @@ from barcommon import (  # noqa: E402
 
 VERSION = "rjm-bar-host-client:1"
 FOUNDER_RE = re.compile(r"^Host\[([A-Za-z]+)(\d+)\]\[\d+\]$")
+# A region's autohost manager, which opens private rooms on `!privatehost`
+# (BYAR-Chobby battle_list_window.lua, HostBattle).
+MANAGER_RE = re.compile(r"^Host\[([A-Za-z]+)\d+\]$")
+PRIVATE_WAIT = 30           # seconds to wait for the private room to appear
 
 # SPADS kicks clients that talk too fast: at most one command per this many s.
 COMMAND_SPACING = 1.5
@@ -125,6 +142,13 @@ class Settings:
         self.bot_ally = int(g("BARHOST_BOT_ALLY", "1"))
         self.bot_sides = [int(s) for s in g("BARHOST_BOT_SIDES", "0,1").split(",") if s.strip()] or [0]
         self.bot_profile = g("BARHOST_BOT_PROFILE")
+        self.privacy = g("BARHOST_ROOM_PRIVACY", "public")
+        if self.privacy not in ("public", "private"):
+            raise SystemExit("BARHOST_ROOM_PRIVACY must be public or private")
+        self.seat_spectate_at = int(g("BARHOST_SEAT_SPECTATE_AT", "8"))
+        self.seat_play_below = int(g("BARHOST_SEAT_PLAY_BELOW", "3"))
+        self.state_file = Path(g("BARHOST_STATE_FILE",
+                                 os.path.join(g("BARHOST_DATA_DIR", "/bar/data"), "lobby-client-state.json")))
         self.min_humans = int(g("BARHOST_MIN_HUMANS", "1"))
         self.start_delay = int(g("BARHOST_START_DELAY", "20"))
         self.postgame_delay = int(g("BARHOST_POSTGAME_DELAY", "60"))
@@ -156,7 +180,26 @@ class LobbyClient:
         self.now = now
         self.launch = launch or (lambda b, pw: None)
         self.outbox = []
+        # Room mode: public or private, as last chosen by !public / !private;
+        # kept on the data volume so a restart keeps it.
+        self.privacy = self.load_state().get("privacy", s.privacy)
         self.reset()
+
+    def load_state(self) -> dict:
+        try:
+            st = json.loads(self.s.state_file.read_text())
+            return st if isinstance(st, dict) and st.get("privacy") in ("public", "private") else {}
+        except (OSError, ValueError):
+            return {}
+
+    def save_state(self):
+        try:
+            self.s.state_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.s.state_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"privacy": self.privacy}))
+            tmp.replace(self.s.state_file)
+        except OSError as e:
+            log("could not save %s: %s" % (self.s.state_file, e))
 
     # -- state -------------------------------------------------------------
 
@@ -194,6 +237,8 @@ class LobbyClient:
         self.target_owner = ""
         self.joined_at = None
         self.bots_due = None        # follow mode: when to add the bots after joining
+        self.private_request = None  # room mode: {"manager", "until", "password"} while one opens
+        self.room_password_now = ""  # the private room's password, once in it
 
     def status(self) -> dict:
         b = self.battle
@@ -201,7 +246,7 @@ class LobbyClient:
         return {
             "state": self.state, "mode": self.s.mode, "login": self.s.login, "games": self.games,
             "follow": sorted(self.s.follow), "wantBots": self.want_bots, "botAI": self.bot_ai,
-            "paused": self.paused,
+            "paused": self.paused, "privacy": self.privacy if self.s.mode == "room" else None,
             "battle": None if not b else {
                 "id": b.id, "founder": b.founder, "title": b.title, "map": b.map, "game": b.game,
                 "engine": b.engine_version, "boss": self.boss, "synced": self.synced,
@@ -259,6 +304,16 @@ class LobbyClient:
     def on_ACCEPTED(self, line):
         log("logged in as %s" % self.s.login)
         self.state = "lobby"
+        if self.game_running():
+            # Reconnected while its engine still plays a game: no new room
+            # until that game ends (tick() moves on from "ingame" then).
+            self.state = "ingame"
+            log("my engine is still in a game: no new room until it ends")
+
+    def game_running(self) -> bool:
+        """This client's engine is in a game. Never leave a room or take a
+        new one then."""
+        return self.game_proc is not None and self.game_proc.poll() is None
 
     def on_DENIED(self, line):
         self.last_error = "login denied: " + line[7:]
@@ -447,6 +502,11 @@ class LobbyClient:
         return b.id not in self.join_attempted
 
     def try_join(self):
+        if self.game_running():
+            return
+        if self.privacy == "private":
+            self.try_private()
+            return
         rooms = [b for b in self.battles.values() if self.suitable(b)]
         if not rooms:
             return
@@ -455,6 +515,42 @@ class LobbyClient:
         self.script_password = str(random.randint(10 ** 8, 10 ** 9 - 1))
         self.state = "joining"
         self.send("JOINBATTLE", b.id, "empty", self.script_password)
+
+    def try_private(self):
+        """As Chobby's "passworded private battle": PM a region's manager
+        `!privatehost`; it answers with the password and opens a room titled
+        after this account; join that as a player."""
+        now = self.now()
+        req = self.private_request
+        if req is None:
+            managers = sorted(u for u in self.users
+                              if MANAGER_RE.match(u) and self.s.cluster.search(MANAGER_RE.match(u).group(1)))
+            if not managers:
+                self.last_error = "no autohost manager online to open a private room"
+                self.next_join = now + 30
+                return
+            mgr = random.choice(managers)
+            self.private_request = {"manager": mgr, "until": now + PRIVATE_WAIT, "password": None}
+            log("asking %s for a private room" % mgr)
+            self.tell(mgr, "!privatehost")
+            return
+        if now >= req["until"]:
+            self.last_error = "%s opened no private room" % req["manager"]
+            log(self.last_error)
+            self.private_request = None
+            self.next_join = now + 60
+            return
+        if not req["password"]:
+            return
+        for b in self.battles.values():
+            if b.title.startswith(self.s.login) and b.founder.startswith(req["manager"] + "[") \
+                    and (not self.s.engine_version or self.s.engine_version in b.engine_version):
+                self.room_password_now = req["password"]
+                self.private_request = None
+                self.script_password = str(random.randint(10 ** 8, 10 ** 9 - 1))
+                self.state = "joining"
+                self.send("JOINBATTLE", b.id, self.room_password_now, self.script_password)
+                return
 
     def configure_room(self):
         b = self.battle
@@ -465,10 +561,34 @@ class LobbyClient:
         for c in self.s.setup:
             self.say(c)
         self.sync_bots()
+        if b.passworded:
+            for u in sorted(self.s.follow):
+                self.tell(u, "Private room %s is up on %s; password %s." % (b.id, b.founder, self.room_password_now))
+        else:
+            # Public: stay a player; the seat rules in tick() move between
+            # player and spectator by the number of humans playing.
+            self.state = "waiting"
+            return
         # Then step aside: the account spectates; its engine runs the bots.
         self.my_status = battle_status(ready=0, mode=0, sync=1 if self.synced else 2)
         self.pending.append(("MYBATTLESTATUS", self.my_status, 0))
         self.state = "waiting"
+
+    def playing(self) -> bool:
+        return self.my_status is not None and unpack_battle_status(self.my_status)["mode"] == 1
+
+    def set_seat(self, play: bool, why: str):
+        """Player (on a free team, the humans' ally team) or spectator."""
+        sync = unpack_battle_status(self.my_status)["sync"] if self.my_status is not None else 2
+        team = 0
+        if play:
+            used = {st["team"] for n, st in self.statuses.items() if st.get("mode") == 1 and n != self.s.login}
+            used |= {x["status"]["team"] for x in self.battle.bots.values()} if self.battle else set()
+            while team in used:
+                team += 1
+        self.my_status = battle_status(ready=0, team=team, ally=0, mode=1 if play else 0, sync=sync)
+        self.pending.append(("MYBATTLESTATUS", self.my_status, 0))
+        log("%s: %s" % ("playing" if play else "spectating", why))
 
     def my_bots(self) -> "list[str]":
         b = self.battle
@@ -542,6 +662,14 @@ class LobbyClient:
         if len(p) < 3:
             return
         user, msg = p[1], p[2].strip()
+        req = self.private_request
+        if req and user == req["manager"] and "Starting a new private instance in" in msg and "password=" in msg:
+            # Chobby reads the 4 characters after "password=".
+            i = msg.index("password=") + 9
+            req["password"] = msg[i:i + 4]
+            req["until"] = self.now() + PRIVATE_WAIT
+            log("%s is opening a private room" % user)
+            return
         if user not in self.s.follow:
             return
         w = msg.split()
@@ -559,6 +687,17 @@ class LobbyClient:
                 self.sync_bots()
             when = "" if live else (" after this game" if self.battle else " when I join your room")
             self.tell(user, "OK: %d %s%s." % (self.want_bots, self.bot_ai, when))
+        elif cmd in ("!public", "!private") and self.s.mode == "room":
+            self.privacy = cmd[1:]
+            self.save_state()
+            b = self.battle
+            if b is None or b.passworded == (self.privacy == "private"):
+                self.tell(user, "OK: I host a %s room%s." % (self.privacy, " (as now)" if b else ""))
+            elif self.state in ("ingame", "countdown") or self.game_running():
+                self.tell(user, "OK: a %s room after this game." % self.privacy)
+            else:
+                self.tell(user, "OK: moving to a %s room." % self.privacy)
+            # tick() leaves a room of the other kind once no game is running.
         elif cmd == "!join":
             self.room_password = w[1] if len(w) >= 2 else ""
             self.paused = False
@@ -607,11 +746,18 @@ class LobbyClient:
             self.tell(user, "Left. PM me !join [password] or !room <room> to come back.")
         elif cmd == "!status":
             b = self.battle
+            if self.s.mode == "room":
+                where = "%s room%s" % (self.privacy, (" %s (%s)%s, %s" % (
+                    b.id, b.title, (", password " + self.room_password_now) if b.passworded else "",
+                    "playing" if self.playing() else "spectating")) if b else ", none yet")
+            else:
+                where = ("room %s (%s)" % (b.id, b.title)) if b else \
+                    "no room (%d rooms seen; I cannot see you in one: PM me !room <room>)" % len(self.battles)
             self.tell(user, "%s; %s; bots %d/%d %s; games %d%s" % (
-                self.state, ("room %s (%s)" % (b.id, b.title)) if b
-                else "no room (%d rooms seen; I cannot see you in one: PM me !room <room>)" % len(self.battles),
-                len(self.my_bots()), self.want_bots, self.bot_ai, self.games,
+                self.state, where, len(self.my_bots()), self.want_bots, self.bot_ai, self.games,
                 ("; " + self.last_error) if self.last_error else ""))
+        elif self.s.mode == "room":
+            self.tell(user, "Commands: !public, !private, !bots <0-16> [AI], !status")
         else:
             self.tell(user, "Commands: !bots <0-16> [AI], !room <room number, host, player or title> "
                             "[password], !join [password], !leave, !status")
@@ -656,7 +802,7 @@ class LobbyClient:
 
     def try_follow(self):
         b = self.followed_battle()
-        if b is None or self.paused:
+        if b is None or self.paused or self.game_running():
             return
         owner = (sorted(self.s.follow & b.users) or [self.target_owner or sorted(self.s.follow)[0]])[0]
 
@@ -715,9 +861,12 @@ class LobbyClient:
     def tick(self):
         now = self.now()
         if self.state == "ingame":
+            # Replies to private messages still go out during a game.
             if self.game_proc is not None and self.game_proc.poll() is None:
+                self.flush_pending()
                 return
             if self.battle and self.users.get(self.battle.founder, 0) & 1:
+                self.flush_pending()
                 return     # our engine ended but the game goes on: wait it out
             if self.game_proc is not None and hasattr(self.game_proc, "close"):
                 self.game_proc.close()
@@ -749,12 +898,29 @@ class LobbyClient:
                 and not (self.s.follow & self.battle.users) \
                 and now - (self.joined_at or 0) >= JOIN_SETTLE:
             self.leave_battle("everyone I follow left")
+        # Room mode: the room kind follows !public / !private (between games),
+        # and in a public room the seat follows the humans playing: spectate
+        # at BARHOST_SEAT_SPECTATE_AT, play again below BARHOST_SEAT_PLAY_BELOW.
+        # Rehosting is only ever done from a room with no game in progress.
+        if self.s.mode == "room" and self.battle and self.state == "waiting" and self.boss \
+                and not self.game_running() and not (self.users.get(self.battle.founder, 0) & 1):
+            b = self.battle
+            if b.passworded != (self.privacy == "private"):
+                self.leave_battle("switching to a %s room" % self.privacy)
+            elif not b.passworded and not self.pending:
+                n = len(self.humans())
+                if self.playing() and n >= self.s.seat_spectate_at:
+                    self.set_seat(False, "%d humans playing" % n)
+                elif not self.playing() and n < self.s.seat_play_below:
+                    self.set_seat(True, "%d humans playing" % n)
         if self.state in ("waiting", "countdown") and self.boss and not self.pending \
                 and now >= self.quiet_until:
             if self.ready_to_start():
                 if self.countdown_end is None:
                     self.countdown_end = now + self.s.start_delay
                     self.state = "countdown"
+                    if self.playing():      # no idle commander in the game
+                        self.set_seat(False, "the game is about to start")
                     self.say("Everyone is ready: starting in %d s." % self.s.start_delay)
                 elif now >= self.countdown_end:
                     self.countdown_end = None

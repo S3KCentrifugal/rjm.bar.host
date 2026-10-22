@@ -60,12 +60,21 @@ The table leaves out two cases:
   3. When the game starts, runs `spring-headless` as a spectator client, which
      runs the bots. When the user leaves the room, removes them and leaves.
 - **`client`, room mode**
-  1. Logs in and takes an empty room on a `Host[XXn][k]`
-     autohost.
-  2. Makes itself boss, sends the room setup commands
-     (`BARHOST_ROOM_SETUP`, e.g. `!bSet experimentallegionfaction 1`), adds
-     bots it owns, and switches to spectator.
-  3. Counts down once every human is ready, then sends `!cv start`.
+  1. Logs in and takes a **public** room (an empty `Host[XXn][k]` autohost) or
+     a **private** one (PMs the region manager `Host[XXn]` `!privatehost`, as
+     Chobby's "passworded private battle" does, and joins with the password
+     it answers). A `BARHOST_FOLLOW` user switches with `!public` /
+     `!private` by PM; the choice is kept on the data volume across restarts.
+  2. Joins as a player, makes itself boss, sends the room setup commands
+     (`BARHOST_ROOM_SETUP`, e.g. `!bSet experimentallegionfaction 1`) and
+     adds bots it owns. In a private room it then spectates and PMs the
+     password. In a public room it stays a player until 8 humans play, then
+     spectates, and plays again when they fall below 3
+     (`BARHOST_SEAT_SPECTATE_AT`, `BARHOST_SEAT_PLAY_BELOW`).
+  3. Counts down once every human is ready, spectating first, then sends
+     `!cv start`. It never leaves a room or takes a new one while its engine
+     is in a game, including after reconnecting mid-game; a `!public` /
+     `!private` switch waits for a room with no game in progress.
   4. When the autohost's game starts, runs `spring-headless` as a spectator
      client of it. That engine runs the bots.
 - **`spads`** ([`docker/spads/`](docker/spads))
