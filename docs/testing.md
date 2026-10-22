@@ -50,7 +50,12 @@ with lobby lines and a fake clock. It covers:
   with unsynced players;
 - the engine launch with the battle's address and script password;
 - the post-game cooldown;
-- taking another room when kicked, and leaving on a failed download.
+- taking another room when kicked, and leaving on a failed download;
+- follow mode with a server that reports every room's joins (`Follow`), and
+  with one that does not, as BAR's does for this client (`FollowUnseen`):
+  `!status` and `!join` explain it, `!room` by number or host name (with a
+  password), members learned from CLIENTBATTLESTATUS on joining, leaving when
+  the owner is absent or leaves, and a failed join reported, not retried.
 
 `tests/static/check_examples.py` keeps `examples/` the truthful reference for
 every mode. It checks that:

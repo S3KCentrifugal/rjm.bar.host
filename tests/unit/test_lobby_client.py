@@ -247,7 +247,7 @@ class Recovery(Harness):
 OWNER = "[SMRT]Centrifugal"
 
 
-class Follow(Harness):
+class FollowHarness(Harness):
     """follow mode: the owner hosts; the client brings the bots."""
 
     def setUp(self):
@@ -280,6 +280,10 @@ class Follow(Harness):
     def pm(self, text, user=OWNER):
         self.feed("SAIDPRIVATE %s %s" % (user, text))
         return self.run_for(30)      # commands go out 1.5 s apart
+
+
+class Follow(FollowHarness):
+    """A server that reports every room's joins (the owner is seen)."""
 
     def test_joins_the_owners_room_and_brings_8_bots_as_a_spectator(self):
         sent = self.joined()
@@ -355,6 +359,79 @@ class Follow(Harness):
         self.feed("CLIENTSTATUS %s 65" % HOST)
         self.assertEqual(len(self.launched), 1)
         self.assertEqual(self.c.state, "ingame")
+
+
+class FollowUnseen(FollowHarness):
+    """BAR's real server: this client is not a lobby Teiserver lists, so it is
+    never told who joins other rooms (protocol_optimisation :full). It sees the
+    rooms, not that the owner is in one; the owner names the room with !room."""
+
+    def owner_in_unseen_room(self, passworded=0):
+        self.feed("TASSERVER 0.38 * 8201 0", "ACCEPTED " + ME, "ADDUSER %s XX 0 1" % HOST,
+                  "ADDUSER %s XX 0 2" % OWNER, opened("12", passworded=passworded), "LOGININFOEND")
+        self.take()
+
+    def enter(self, sent, members=(HOST, OWNER)):
+        """Answer a JOINBATTLE as Teiserver does: who is in the room comes only
+        as CLIENTBATTLESTATUS, then JOINEDBATTLE for this client alone."""
+        join = [x for x in sent if x.startswith("JOINBATTLE")]
+        self.assertEqual(len(join), 1, sent)
+        self.feed("JOINBATTLE 12 hash")
+        self.c.tick()
+        for m in members:
+            self.feed("CLIENTBATTLESTATUS %s %d 0" % (m, lc.battle_status(team=0, ally=0, mode=1, sync=1)))
+        self.feed("JOINEDBATTLE 12 %s %s" % (ME, join[0].split(" ")[3]))
+        return self.run_for(30)
+
+    def test_waits_unseen_and_status_says_why(self):
+        self.owner_in_unseen_room()
+        self.assertFalse([x for x in self.run_for(30) if x.startswith("JOINBATTLE")])
+        status = [x for x in self.pm("!status") if x.startswith("SAYPRIVATE")]
+        self.assertIn("1 rooms seen", status[0])
+        self.assertIn("!room", status[0])
+        self.assertTrue([x for x in self.pm("!join") if "cannot see you in a room" in x])
+
+    def test_room_by_host_name_joins_and_stays_with_the_owner(self):
+        self.owner_in_unseen_room()
+        sent = self.pm("!room host[eu1][3]")
+        self.assertTrue([x for x in sent if x.startswith("SAYPRIVATE %s Joining room 12" % OWNER)], sent)
+        sent = self.enter(sent)
+        self.assertEqual(len([x for x in sent if x.startswith("ADDBOT")]), 8)
+        self.assertNotIn("LEAVEBATTLE", sent + self.run_for(60))
+        self.assertIsNotNone(self.c.battle)
+
+    def test_room_by_number_with_password(self):
+        self.owner_in_unseen_room(passworded=1)
+        sent = self.pm("!room 12 hunter2")
+        self.assertEqual([x.split(" ")[:3] for x in sent if x.startswith("JOINBATTLE")],
+                         [["JOINBATTLE", "12", "hunter2"]])
+
+    def test_named_room_without_the_owner_is_left_and_not_rejoined(self):
+        self.owner_in_unseen_room()
+        sent = self.enter(self.pm("!room 12"), members=(HOST,))
+        self.assertIn("LEAVEBATTLE", sent)
+        self.assertFalse([x for x in self.run_for(60) if x.startswith("JOINBATTLE")])
+
+    def test_owner_leaving_the_named_room_is_seen(self):
+        self.owner_in_unseen_room()
+        self.enter(self.pm("!room 12"))
+        self.feed("LEFTBATTLE 12 " + OWNER)
+        self.assertIn("LEAVEBATTLE", self.run_for(20))
+        self.assertFalse([x for x in self.run_for(60) if x.startswith("JOINBATTLE")])
+
+    def test_unknown_room_is_explained(self):
+        self.owner_in_unseen_room()
+        sent = self.pm("!room Host[XX9][9]")
+        self.assertFalse([x for x in sent if x.startswith("JOINBATTLE")])
+        self.assertTrue([x for x in sent if "Which room?" in x], sent)
+
+    def test_join_failure_is_reported_and_not_retried(self):
+        self.owner_in_unseen_room()
+        self.pm("!room 12")
+        self.feed("JOINBATTLEFAILED Room is locked")
+        sent = self.run_for(30)
+        self.assertTrue([x for x in sent if "could not join room 12: Room is locked" in x], sent)
+        self.assertFalse([x for x in sent if x.startswith("JOINBATTLE ")])
 
 
 if __name__ == "__main__":

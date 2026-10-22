@@ -39,7 +39,11 @@ AIs are installed into `$BAR_ENGINE_DIR/AI/Skirmish` at container start.
 
 **Status:**
 - `match`, `spads` and `host`/`join` are verified locally, end to end.
-- `client` is unit-tested but not yet run against BAR's real lobby server.
+- `client` is unit-tested and logs in on BAR's real lobby server. There,
+  follow mode cannot see who is in other rooms: Teiserver reports other
+  rooms' joins only to the lobbies it lists (`spring_in.ex`
+  `@optimisation_level`: Chobby, skylobby, modlobby), so the followed user
+  names the room with `!room`. A request to BAR to list this client is open.
 - `../rjm.bar.lobbies` deploys `client` (app `bar-lobbies`). It also holds
   `spads` (`bar-spads`) and `match` (`bar-sims`), both disabled.
 

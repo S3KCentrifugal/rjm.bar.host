@@ -38,7 +38,7 @@ The table leaves out two cases:
 | Engine | must match BAR's autohosts | yours (players must match it) |
 | Room settings | what a boss may set with chat commands | anything SPADS allows, including vote rules and takeover protection |
 | If the container restarts | the room goes back to BAR's pool; the client takes another | the room closes and reopens |
-| Verified | protocol unit-tested; not yet run against BAR's real servers | end to end against a fake lobby server; not yet against BAR's real servers |
+| Verified | protocol unit-tested; follow mode logs in on BAR's real server, where it must be told the room (`!room`) | end to end against a fake lobby server; not yet against BAR's real servers |
 
 ### How each mode works
 
@@ -48,6 +48,11 @@ The table leaves out two cases:
   2. That user stays boss and starts the game, and can PM the client
      `!bots <n> [AI]`, `!join [password]` (for a passworded room), `!leave` or
      `!status`.
+     BAR's server only tells a client who joins *other* rooms if it is a lobby
+     the server lists (Chobby, skylobby, modlobby), so on BAR's server the
+     client usually cannot see which room the user is in. The user then names
+     it: `!room <room number or host name> [password]`. Once inside, the
+     client sees the room's members, and leaves when the user does.
   3. When the game starts, runs `spring-headless` as a spectator client, which
      runs the bots. When the user leaves the room, removes them and leaves.
 - **`client`, room mode**
