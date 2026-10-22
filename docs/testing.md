@@ -59,6 +59,22 @@ with lobby lines and a fake clock. It covers:
   after it, strangers refused;
 - the welcome (`Welcome`): said privately (SAYBATTLEPRIVATEEX) to each
   joiner, not to itself, the autohost or other rooms, nothing when unset;
+- per-game measurement (`Perf`): started with the engine, summarised in the
+  log at its exit, `!perf` replying with the last game
+  (`test_cgroup_perf.py`: cgroup v2 and v1 counters, cores average, p95
+  and 1 s / 10 s peaks, throttled share and time, memory peak, samples and
+  the summary CSV, nothing readable);
+- start boxes (`StartBoxes`): lookup by map name without version, `_` as a
+  space, first variant of `BARHOST_START_BOX_KEYS` present; set once boss on
+  the room's map, after every map change once per map, `0` for a map with
+  none, nothing before boss or without a file;
+- the bonus (`Bonus`): the vote hint for the word "bonus" (any case, not
+  "bonuses", not the autohost or itself), once a minute; a passed vote for
+  all or one AI applied to every AI and kept for later adds in the room;
+  only the autohost's pass message counts;
+- `!stop` (`StopRequest`): during a game, one line asking the players to
+  vote `!cv stop`, no command of its own, once a minute; nothing without a
+  game; strangers ignored;
 - the ring hint (`RingHint`): one line on voting an away player to
   spectator after a `!ring`, no command of its own, at most once a minute,
   not for the autohost, itself, or text that is not a ring;
@@ -69,10 +85,10 @@ with lobby lines and a fake clock. It covers:
   after each game with the place kept across a restart, wrapping around, and
   skipping a map that is not taken or cannot be downloaded (not leaving the
   room); any map change, by anyone, is downloaded before a game can start;
-- the public seat (`PublicSeat`): spectating at 8 humans playing, playing
-  again below 3 (not at 3 to 7), spectating before `!cv start`, once everyone
-  is ready, and at once on `!start`, `!cv forcestart` or a start vote (held
-  for a minute, not for `!startpos` or chat), playing again after the game;
+- the headless seat (`HeadlessSeat`): a spectator before the first setting
+  once boss, a player only around bot adds, a spectator whatever the number
+  of humans and after a game, never left in a player seat, and spectating
+  first when a start is called while seated;
 - bots named as Chobby with simple AI names off (`BARbstable(1)`), side 2
   (Random) by default, cycling when `BARHOST_BOT_SIDES` is set;
   `BARHOST_BOT_SETUP` sent after every add (setup, more bots), not after

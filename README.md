@@ -71,14 +71,12 @@ The table leaves out two cases:
      never sets up a room it was not made boss of. Then it makes itself
      boss, sends the room setup commands
      (`BARHOST_ROOM_SETUP`, e.g. `!bSet experimentallegionfaction 1`) and
-     adds bots it owns. In a private room it then spectates and PMs the
-     password. In a public room it stays a player until 8 humans play, then
-     spectates, and plays again when they fall below 3
-     (`BARHOST_SEAT_SPECTATE_AT`, `BARHOST_SEAT_PLAY_BELOW`). It spectates
-     before any game: once every human is ready, the moment a start is
-     called (`!start`, `!cv start`, `!forcestart`, or a vote for one), and at
-     its own countdown. A player's lag slows the whole game; a spectator's
-     does not (`GameServer.cpp:905`).
+     adds bots it owns; in a private room it PMs the password. It is a
+     headless host and never plays: once boss it spectates, and takes a
+     player seat again only for the moment it adds bots (BAR's server takes
+     `ADDBOT` only from players), spectating at once if a start is called
+     then. A player's lag slows the whole game; a spectator's does not
+     (`GameServer.cpp:905`).
   3. While boss, gives boss to `BARHOST_FOLLOW` users as they join, and ends
      (`!ev`) any vote to unboss everyone, the client, or one of those users.
      An AI from `BARHOST_AI_ARCHIVES` on a moving tag (`@latest`, `@newest`)
@@ -88,6 +86,21 @@ The table leaves out two cases:
      Those users switch the bots' AI with `!barb` / `!smrt`, kept across
      restarts and done as a player (after the game if one is running). Each
      player who joins gets `BARHOST_WELCOME` privately in the room chat.
+     During a game, their `!stop` makes the client ask the players to vote
+     `!cv stop`: the autohost lets only players stop a game, and both the
+     host and the client spectate.
+     After every map change (its rotation's or a boss's), sets the map's start
+     boxes from `BARHOST_START_BOXES_FILE` with `!bSet
+     mapmetadata_startbox_override`, or the map's defaults (`0`) for a map
+     without them.
+     Each game is measured from the container's own cgroup (CPU cores,
+     throttling, memory; `scripts/cgroup_perf.py`, a few file reads a
+     second): one `perf` line in the log, a row in
+     `$BARHOST_OUT_DIR/client/perf-summary.csv`, per-second samples in the
+     game's `perf.csv`; `!perf` by PM repeats the last.
+     When a player mentions "bonus", says how to vote the AIs' bonus (all
+     with `!cv setallaibonus <n>`, one with `!cv force %<AI> bonus <n>`); a
+     passed bonus vote is applied to every AI and kept for later bot adds.
      When a player rings another, says once how to vote an away player to
      spectator (`!cv spec <name>`), leaving it to the room. Reports its
      engine's exit in its own log, with the engine's last lines if it failed.

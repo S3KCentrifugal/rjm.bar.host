@@ -1,5 +1,6 @@
 """lobby_client.py: the protocol state machine, driven with lobby lines and a fake clock."""
 
+import json
 import os
 import sys
 import tempfile
@@ -150,7 +151,7 @@ class RoomChoice(Harness):
 
 
 class Setup(Harness):
-    def test_boss_then_options_and_bots_playing_in_a_public_room(self):
+    def test_boss_then_options_and_bots_then_spectating(self):
         sent = self.boss_and_setup()
         said = [x[len("SAYBATTLE "):] for x in sent if x.startswith("SAYBATTLE ")]
         self.assertIn("!preset custom", said)
@@ -164,9 +165,9 @@ class Setup(Harness):
         self.assertEqual([s["side"] for s in statuses], [2] * 8)            # Random, as Chobby
         self.assertEqual([b[1] for b in bots], ["BARbstable(%d)" % n for n in range(1, 9)])
         self.assertEqual({b[4] for b in bots}, {"BARb"})
-        # A public room with fewer than 3 humans playing: Clyde stays a player.
+        # A headless host: a spectator once set up.
         last = [lc.unpack_battle_status(x.split(" ")[1]) for x in sent if x.startswith("MYBATTLESTATUS")][-1]
-        self.assertEqual((last["mode"], last["sync"]), (1, 1))
+        self.assertEqual((last["mode"], last["sync"]), (0, 1))
 
     def test_bot_setup_follows_every_add(self):
         self.c = self.client(BARHOST_BOT_SETUP="!setallaibonus 50", BARHOST_FOLLOW=OWNER)
@@ -305,9 +306,9 @@ def my_modes(sent):
     return [lc.unpack_battle_status(x.split(" ")[1])["mode"] for x in sent if x.startswith("MYBATTLESTATUS")]
 
 
-class PublicSeat(Harness):
-    """A public room: a player while few humans play, a spectator from 8, a
-    player again below 3; always a spectator when the game starts."""
+class HeadlessSeat(Harness):
+    """A headless host never plays: a player seat only to be made boss and,
+    briefly, to add bots."""
 
     def humans_in(self, names, ready=0):
         for n in names:
@@ -315,56 +316,47 @@ class PublicSeat(Harness):
                       "CLIENTBATTLESTATUS %s %d 0" % (n, lc.battle_status(ready=ready, mode=1, sync=1)))
         return self.run_for(5)
 
-    def test_spectates_at_8_humans_and_plays_again_below_3(self):
-        self.boss_and_setup()
-        self.assertTrue(self.c.playing())
-        names = ["P%d" % i for i in range(8)]
-        self.assertEqual(self.humans_in(names[:7]), [])                     # 7: still a player
-        self.assertEqual(my_modes(self.humans_in(names[7:])), [0])          # 8: spectate
-        for n in names[:5]:                                                 # 3 left: hysteresis
-            self.feed("LEFTBATTLE 12 " + n)
-        self.assertEqual(my_modes(self.run_for(5)), [])
-        self.feed("LEFTBATTLE 12 " + names[5])                              # 2 left: play
-        self.assertEqual(my_modes(self.run_for(5)), [1])
-
-    def test_spectates_before_the_game_starts_and_plays_after(self):
-        self.boss_and_setup()
-        sent = self.humans_in(["Alice"], ready=1) + self.run_for(25)
-        self.assertIn("SAYBATTLE !cv start", sent)
-        self.assertEqual(my_modes(sent[:sent.index("SAYBATTLE !cv start")])[-1], 0)
-        self.feed("CLIENTSTATUS %s 65" % HOST)
-        self.proc.code = 0
-        self.feed("CLIENTSTATUS %s 64" % HOST,                              # back, not ready yet
-                  "CLIENTBATTLESTATUS Alice %d 0" % lc.battle_status(ready=0, mode=1, sync=1))
-        sent = self.run_for(5)
-        self.assertEqual(self.c.state, "waiting")
-        self.assertEqual(my_modes(sent), [1])                               # 1 human: play again
-
-    def test_spectates_once_everyone_is_ready(self):
-        self.boss_and_setup()
-        self.c.s.start_delay = 600                                          # no start in this test
-        sent = self.humans_in(["Alice", "Bob"], ready=1)
-        self.assertEqual(my_modes(sent), [0])
+    def test_spectates_once_boss_and_stays_so(self):
+        sent = self.boss_and_setup()
+        modes = my_modes(sent)
+        adds = [i for i, x in enumerate(sent) if x.startswith("ADDBOT")]
+        boss = sent.index("SAYBATTLE !boss " + ME)
+        first_setting = min(i for i, x in enumerate(sent) if x.startswith("SAYBATTLE !") and i > boss)
+        statuses = [i for i, x in enumerate(sent) if x.startswith("MYBATTLESTATUS")]
+        # a spectator before the first setting; a player only around the adds
+        self.assertEqual(lc.unpack_battle_status(sent[max(i for i in statuses if i < first_setting)]
+                                                 .split(" ")[1])["mode"], 0)
+        player_at = [i for i in statuses if lc.unpack_battle_status(sent[i].split(" ")[1])["mode"] == 1
+                     and i > boss]
+        self.assertTrue(all(i < adds[0] for i in player_at))
+        self.assertEqual(modes[-1], 0)
+        for names in (["P1"], ["P1", "P2"], ["P%d" % i for i in range(3, 10)]):
+            self.assertEqual(my_modes(self.humans_in(names)), [])
         self.assertFalse(self.c.playing())
 
-    def test_spectates_at_once_when_a_start_is_called(self):
-        for call in ("SAIDBATTLE Alice !start", "SAIDBATTLE Alice !cv forcestart",
-                     'SAIDBATTLEEX %s * Alice called a vote for command "start" [!vote y, !vote n, !vote b]' % HOST):
-            self.setUp()
-            self.boss_and_setup()
-            self.humans_in(["Alice"])                                       # not ready: still a player
-            self.assertTrue(self.c.playing())
-            self.feed(call)
-            sent = self.run_for(2)
-            self.assertEqual(my_modes(sent), [0], call)
-            self.assertEqual(self.run_for(50), [], call)                    # held: no flip back yet
-            self.assertEqual(my_modes(self.run_for(15)), [1], call)         # the hold over, no game
-
-    def test_other_chat_does_not_move_it(self):
+    def test_still_a_spectator_after_a_game(self):
         self.boss_and_setup()
-        self.humans_in(["Alice"])
-        self.feed("SAIDBATTLE Alice !startpos", "SAIDBATTLE Alice let's start soon")
-        self.assertEqual(my_modes(self.run_for(5)), [])
+        self.humans_in(["Alice"], ready=1)
+        self.run_for(25)
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST,
+                  "CLIENTBATTLESTATUS Alice %d 0" % lc.battle_status(ready=0, mode=1, sync=1))
+        self.assertNotIn(1, my_modes(self.run_for(30)))
+        self.assertFalse(self.c.playing())
+
+    def test_never_left_in_a_player_seat(self):
+        self.boss_and_setup()
+        self.c.set_seat(True, "test")
+        self.assertEqual(my_modes(self.run_for(7)), [1, 0])     # seated, then back at once
+        self.assertFalse(self.c.playing())
+
+    def test_a_start_called_while_seated_spectates_first(self):
+        self.boss_and_setup()
+        self.c.pending.append("!some queued chat")
+        self.c.set_seat(True, "adding bots")
+        self.feed("SAIDBATTLE Alice !cv start")
+        self.assertEqual(lc.unpack_battle_status(self.c.pending[0][1])["mode"], 0)
 
 
 class Privacy(Harness):
@@ -489,7 +481,7 @@ class MapRotation(Harness):
         self.run_for(2)
         self.c.fetched(self.c.battle, True)
         self.feed("SAIDBATTLEEX %s * Boss mode enabled for %s" % (HOST, ME))
-        return self.run_for(20)
+        return self.run_for(30)
 
     def test_sets_the_first_map_and_starts_only_once_it_is_downloaded(self):
         sent = self.boss()
@@ -776,6 +768,223 @@ class AIUpdate(Harness):
         self.clock.t += 100000
         self.c.tick()
         self.assertFalse(self.c.need_ai_update)
+
+
+class Bonus(Harness):
+    """"bonus" in chat gets the vote hint; a passed bonus vote is applied to
+    every AI and kept for this room's later adds."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_BOT_SETUP="!setallaibonus 50", BARHOST_FOLLOW=OWNER)
+
+    def hints(self, sent):
+        return [x for x in sent if x.startswith("SAYBATTLE Bonus: ")]
+
+    def passed(self, command):
+        self.feed('SAIDBATTLEEX %s * Vote for command "%s" passed.' % (HOST, command))
+        return self.run_for(3)
+
+    def test_the_word_bonus_gets_the_hint_once_a_minute(self):
+        self.boss_and_setup()
+        self.feed("SAIDBATTLE Alice can we get more BONUS for the AI?")
+        sent = self.run_for(3)
+        self.assertEqual(self.hints(sent), ["SAYBATTLE Bonus: vote for all AI with !cv setallaibonus <0-100>, "
+                                            "or one with !cv force %<AI name> bonus <0-100>, then !vote y."])
+        self.feed("SAIDBATTLE Bob bonus pls")
+        self.assertEqual(self.hints(self.run_for(30)), [])
+        self.run_for(30)
+        self.feed("SAIDBATTLE Bob bonus pls")
+        self.assertEqual(len(self.hints(self.run_for(3))), 1)
+
+    def test_not_for_other_words_the_autohost_or_itself(self):
+        self.boss_and_setup()
+        self.feed("SAIDBATTLE Alice bonuses and bonusround", "SAIDBATTLEEX %s * bonus set" % HOST,
+                  "SAIDBATTLE %s bonus" % ME)
+        self.assertEqual(self.hints(self.run_for(3)), [])
+
+    def test_a_passed_vote_for_all_or_one_is_applied_to_every_ai(self):
+        self.boss_and_setup()
+        self.assertIn("SAYBATTLE !setallaibonus 30", self.passed("setallaibonus 30"))
+        self.assertIn("SAYBATTLE !setallaibonus 80", self.passed("force SMRTBARbstable(2) bonus 80"))
+        self.assertNotIn("SAYBATTLE !setallaibonus 5", self.passed("set map Tetrad_V2"))
+
+    def test_the_voted_bonus_is_kept_for_later_adds_in_the_room(self):
+        sent = self.boss_and_setup()
+        for x in sent:
+            if x.startswith("ADDBOT "):
+                w = x.split(" ")
+                self.feed("ADDBOT 12 %s %s %s 0 %s" % (w[1], ME, w[2], w[4]))
+        self.passed("setallaibonus 20")
+        self.feed("SAIDPRIVATE %s !bots 10" % OWNER)
+        sent = self.run_for(30)
+        self.assertIn("SAYBATTLE !setallaibonus 20", sent)
+        self.assertNotIn("SAYBATTLE !setallaibonus 50", sent)
+
+    def test_only_the_autohosts_pass_message_counts(self):
+        self.boss_and_setup()
+        self.feed('SAIDBATTLE Troll * Vote for command "setallaibonus 100" passed.')
+        self.assertNotIn("SAYBATTLE !setallaibonus 100", self.run_for(3))
+
+
+class StartBoxes(Harness):
+    """BARHOST_START_BOXES_FILE: after every map change, as boss, the map's start
+    boxes are set (first of BARHOST_START_BOX_KEYS), or "0" for a map with none."""
+
+    def setUp(self):
+        super().setUp()
+        self.file = os.path.join(self.tmp.name, "boxes.json")
+        with open(self.file, "w", encoding="utf-8") as f:
+            json.dump({"All That Simmers": {"override": "OVR", "team2_ai": "T2A"},
+                       "All That Smolders": {"team2_ai": None, "override": "SMOVR"},
+                       "Coastlines_Dry": {"team2_ai": "COAST"},
+                       "Cells": {"note": "no boxes"}}, f)
+        self.c = self.client(BARHOST_START_BOXES_FILE=self.file)
+
+    def boxes(self, sent):
+        return [x.split(" ", 3)[3] for x in sent if x.startswith("SAYBATTLE !bSet mapmetadata_startbox_override ")]
+
+    def boss(self):
+        self.join()
+        self.run_for(2)
+        self.c.fetched(self.c.battle, True)
+        self.feed("SAIDBATTLEEX %s * Boss mode enabled for %s" % (HOST, ME))
+        return self.run_for(30)
+
+    def map_is(self, name):
+        self.feed("UPDATEBATTLEINFO 12 1 0 123 " + name)
+        return self.run_for(5)
+
+    def test_lookup(self):
+        b = self.c.s.start_boxes
+        self.assertEqual(lc.start_box_for(b, "All That Simmers v1.2"), "T2A")
+        self.assertEqual(lc.start_box_for(b, "All That Smolders 1.0"), "SMOVR")   # null team2_ai: override
+        self.assertEqual(lc.start_box_for(b, "Coastlines Dry 1.1"), "COAST")
+        self.assertIsNone(lc.start_box_for(b, "Cells 2"))
+        self.assertIsNone(lc.start_box_for(b, "All That Glitters v2"))
+
+    def test_set_on_the_rooms_map_once_boss(self):
+        self.assertEqual(self.boxes(self.run_for(1)), [])
+        sent = self.boss()
+        self.assertEqual(self.boxes(sent), ["0"])          # the room's map has none
+
+    def test_every_map_change_by_anyone_once_each(self):
+        self.boss()
+        self.assertEqual(self.boxes(self.map_is("All That Simmers v1.2")), ["T2A"])
+        self.assertEqual(self.boxes(self.map_is("All That Simmers v1.2")), [])
+        self.feed("SAIDBATTLE %s !map Coastlines" % OWNER)
+        self.assertEqual(self.boxes(self.map_is("Coastlines Dry 1.1")), ["COAST"])
+        self.assertEqual(self.boxes(self.map_is("Cells 2")), ["0"])
+
+    def test_not_before_boss(self):
+        self.join()
+        self.run_for(2)
+        self.assertEqual(self.boxes(self.map_is("All That Simmers v1.2")), [])
+
+    def test_no_file_no_command(self):
+        c = self.client()
+        self.assertEqual(c.s.start_boxes, {})
+        self.c = c
+        self.assertEqual(self.boxes(self.boss()), [])
+
+    def test_unreadable_file_is_none(self):
+        self.assertEqual(self.client(BARHOST_START_BOXES_FILE=self.file + ".missing").s.start_boxes, {})
+
+
+class StopRequest(Harness):
+    """An authorised user's !stop: ask the players to vote; never act."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_FOLLOW=OWNER)
+
+    def pm(self, text, user=OWNER):
+        self.feed("SAIDPRIVATE %s %s" % (user, text))
+        return self.run_for(5)
+
+    def test_during_a_game_the_room_is_asked_once(self):
+        self.boss_and_setup()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        sent = self.pm("!stop")
+        self.assertIn("SAYBATTLE %s asks to end this game: a player can type !cv stop, then the others "
+                      "!vote y." % OWNER, sent)
+        self.assertTrue([x for x in sent if x.startswith("SAYPRIVATE %s Asked the players" % OWNER)])
+        self.assertFalse([x for x in sent if x in ("SAYBATTLE !stop", "SAYBATTLE !cv stop")])
+        again = self.pm("!stop")
+        self.assertFalse([x for x in again if x.startswith("SAYBATTLE")])
+        self.assertTrue([x for x in again if "less than a minute ago" in x])
+
+    def test_no_game_no_message(self):
+        self.boss_and_setup()
+        sent = self.pm("!stop")
+        self.assertFalse([x for x in sent if x.startswith("SAYBATTLE")])
+        self.assertTrue([x for x in sent if "No game is running" in x])
+
+    def test_strangers_are_ignored(self):
+        self.boss_and_setup()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.assertEqual(self.pm("!stop", user="Troll"), [])
+
+
+class FakePerf:
+    def __init__(self):
+        self.started, self.stopped, self.last_summary = [], 0, None
+
+    def start(self, label, run_dir=None, now=None):
+        self.started.append(label)
+
+    def stop(self):
+        self.stopped += 1
+        self.last_summary = {"label": self.started[-1], "seconds": 600, "cores_avg": 2.1, "cores_p95": 2.9,
+                             "cores_peak_10s": 3.4, "cores_peak_1s": 4.2, "limit_cores": 16.0,
+                             "throttled_pct": 0.0, "throttled_s": 0.0, "mem_peak_gib": 6.1}
+        return self.last_summary
+
+    def sample(self, now):
+        pass
+
+
+class Perf(Harness):
+    """Each game is measured: started with the engine, summarised at its exit."""
+
+    def setUp(self):
+        super().setUp()
+        self.perf = FakePerf()
+        self.c = lc.LobbyClient(lc.Settings({
+            "BARHOST_LOBBY_LOGIN": ME, "BARHOST_LOBBY_PASSWORD": "secret", "BAR_ENGINE_VERSION": ENGINE,
+            "BARHOST_LOBBY_CLUSTER": "EU", "BARHOST_FOLLOW": OWNER,
+            "BARHOST_STATUS_FILE": os.path.join(self.tmp.name, "status.json"),
+            "BARHOST_STATE_FILE": os.path.join(self.tmp.name, "state.json")}),
+            now=self.clock, launch=self.launch, perf=self.perf)
+
+    def test_a_game_is_measured_and_summarised_in_the_log(self):
+        self.boss_and_setup()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.assertEqual(self.perf.started, ["game 1 All That Glitters v2.2.3"])
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        out = []
+        old = lc.log
+        lc.log = out.append
+        try:
+            self.run_for(2)
+        finally:
+            lc.log = old
+        self.assertEqual(self.perf.stopped, 1)
+        self.assertTrue([x for x in out if x.startswith("perf game 1 All That Glitters v2.2.3: 600 s; cores avg 2.10,"
+                                                         " p95 2.90, peak 3.40 (10 s) 4.20 (1 s)/16; throttled 0.00%")],
+                        out)
+
+    def test_perf_command_replies_with_the_last_game(self):
+        self.boss_and_setup()
+        self.feed("SAIDPRIVATE %s !perf" % OWNER)
+        self.assertTrue([x for x in self.run_for(3) if x == "SAYPRIVATE %s No game measured yet." % OWNER])
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        self.run_for(2)
+        self.feed("SAIDPRIVATE %s !perf" % OWNER)
+        self.assertTrue([x for x in self.run_for(3) if x.startswith("SAYPRIVATE %s Last game 1" % OWNER)])
 
 
 class EngineExit(Harness):

@@ -29,17 +29,21 @@ room (the client hosts by itself)
      `!bSet experimentallegionfaction 1`). A BARHOST_FOLLOW user switches
      with `!public` / `!private` by PM; the choice survives restarts
      (BARHOST_STATE_FILE).
-  3. Add BARHOST_BOT_COUNT bots it owns. Private: then spectate. Public: stay
-     a player until BARHOST_SEAT_SPECTATE_AT humans play, then spectate; play
-     again below BARHOST_SEAT_PLAY_BELOW. Always spectate before a game: when
-     every human is ready, when a start is called (`!start`, `!cv start`,
-     `!forcestart`, or the autohost's vote for one; then for START_HOLD
-     seconds), and when the countdown begins.
+  3. Once boss, spectate: a headless host never plays. Settings and maps
+     are a boss's; only adding bots (BAR's server takes ADDBOT only from
+     players) takes a player seat, for the adds alone. A start called while
+     it holds that seat (`!start`, `!cv start`, `!forcestart`, a vote for
+     one) makes it spectate at once.
   4. While boss, give boss to BARHOST_FOLLOW users as they join (`!boss`),
      and end at once (`!ev`) any vote to unboss everyone, this client, or a
      BARHOST_FOLLOW user. A BARHOST_FOLLOW user switches the bots' AI with
      `!barb` / `!smrt` (kept across restarts; done as a player, after the
-     game if one is on). Each joiner gets BARHOST_WELCOME privately.
+     game if one is on), and `!stop` asks the players to vote `!cv stop`
+     (a spectator may not stop a game). Each joiner gets BARHOST_WELCOME
+     privately.
+     A player's "bonus" gets one line on voting the AIs' bonus (all, or one),
+     once a minute; a passed bonus vote is applied to every AI
+     (`!setallaibonus`) and kept for the room's later bot adds.
      When a player rings another (`!ring <name>`), say
      how to vote an away player to spectator, at most once a minute; the room
      decides.
@@ -63,11 +67,13 @@ Settings (environment):
   BARHOST_ROOM_PRIVACY    room mode: public (default) or private, first start only
   BARHOST_STATE_FILE      where !public / !private is kept
                           (/bar/data/lobby-client-state.json)
-  BARHOST_SEAT_SPECTATE_AT, BARHOST_SEAT_PLAY_BELOW   public room: spectate at
-                          this many humans playing (8), play below (3)
   BARHOST_MAP_ROTATION    room mode: ';'-separated maps, one per game, in order
                           (its place is kept in BARHOST_STATE_FILE)
   BARHOST_ROOM_NAME       room title, set with !rename (optional)
+  BARHOST_START_BOXES_FILE  room mode: JSON of start boxes per map, applied
+                          after every map change (optional; see start_box_for)
+  BARHOST_START_BOX_KEYS  ','-separated variants to use, first found wins
+                          (team2_ai,override)
   BARHOST_WELCOME         room mode: said privately in the room to each joiner
   BARHOST_AI_UPDATE_EVERY seconds between checks for a new release of a
                           BARHOST_AI_ARCHIVES moving tag, only between games,
@@ -103,6 +109,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cgroup_perf  # noqa: E402
 from barcommon import (  # noqa: E402
     Engine, battle_status, client_script, engine_settings, make_log, password_hash, unpack_battle_status,
 )
@@ -116,17 +123,32 @@ PRIVATE_WAIT = 30           # seconds to wait for the private room to appear
 VACANCY_WAIT = 3            # seconds after joining before judging a room free
 MAP_WAIT = 20               # seconds for the autohost to switch to a !map before skipping it
 VOTE_RE = re.compile(r'called a vote for command "([^"]*)"')
-# A game about to start (a player's command, or the autohost's vote): a
-# player-seated client spectates at once, so its engine is never a lagging
-# player (the server slows the game for players, GameServer.cpp:905).
+# A game about to start (a player's command, or the autohost's vote): if it
+# holds a player seat (only ever to add bots) it spectates at once, so its
+# engine is never a lagging player (the server slows the game for players,
+# GameServer.cpp:905).
 START_RE = re.compile(r"^!(?:cv\s+)?(?:force)?start\b", re.IGNORECASE)
-START_HOLD = 60             # seconds to stay a spectator after a start is called
 # A player ringing another (Chobby's "Ring" sends `!ring <name>`): answer with
 # how the room can vote an away player to spectator (Chobby's "Force
 # Spectator" is `!spec <name>`); the room decides. At most once a minute.
 RING_RE = re.compile(r"^!ring(?=\s|$)\s*(\S+)?", re.IGNORECASE)
 RING_HINT = "If %s is away: vote them to spectator with !cv spec %s, then !vote y."
 RING_HINT_EVERY = 60
+# A player mentioning "bonus": how to vote the AIs' bonus (all, or one AI by
+# SPADS `force <name> bonus <n>`, docker/spads/plugins/Autopilot.pm), at most
+# once a minute. A passed bonus vote is applied to every AI with
+# `!setallaibonus`, and used for this room's later bot adds.
+BONUS_RE = re.compile(r"\bbonus\b", re.IGNORECASE)
+BONUS_HINT = ("Bonus: vote for all AI with !cv setallaibonus <0-100>, or one with "
+              "!cv force %<AI name> bonus <0-100>, then !vote y.")
+BONUS_HINT_EVERY = 60
+BONUS_PASSED_RE = re.compile(r'Vote for command "(?:setallaibonus|force \S+ bonus) (\d{1,3})" passed', re.IGNORECASE)
+SETALL_RE = re.compile(r"^!setallaibonus\s+\d+\s*$", re.IGNORECASE)
+# An authorised user's `!stop` by PM: a spectator (host or this client) may
+# not stop a game (SPADS [stop] is for players only), so ask the players to
+# vote, and leave it to them. At most once a minute.
+STOP_HINT = "%s asks to end this game: a player can type !cv stop, then the others !vote y."
+STOP_HINT_EVERY = 60
 # Authorised users switch the bots' AI by PM; the choice is kept.
 AI_COMMANDS = {"!barb": "BARb", "!smrt": "SMRTBARb"}
 
@@ -190,13 +212,16 @@ class Settings:
         self.privacy = g("BARHOST_ROOM_PRIVACY", "public")
         if self.privacy not in ("public", "private"):
             raise SystemExit("BARHOST_ROOM_PRIVACY must be public or private")
-        self.seat_spectate_at = int(g("BARHOST_SEAT_SPECTATE_AT", "8"))
-        self.seat_play_below = int(g("BARHOST_SEAT_PLAY_BELOW", "3"))
         self.state_file = Path(g("BARHOST_STATE_FILE",
                                  os.path.join(g("BARHOST_DATA_DIR", "/bar/data"), "lobby-client-state.json")))
         # Room mode: maps to cycle through, one per game (';'-separated names as
         # the autohost's !map takes them; a part of a name is enough if unique).
         self.map_rotation = [m.strip() for m in g("BARHOST_MAP_ROTATION").split(";") if m.strip()]
+        # Room mode: start boxes per map, sent as the mapmetadata_startbox_override
+        # mod option after every map change, whoever changed it.
+        self.start_box_keys = [k.strip() for k in g("BARHOST_START_BOX_KEYS", "team2_ai,override").split(",")
+                               if k.strip()]
+        self.start_boxes = load_start_boxes(g("BARHOST_START_BOXES_FILE"), self.start_box_keys)
         # Seconds between checks for a new release of a BARHOST_AI_ARCHIVES
         # source on a moving tag (@latest / @newest), only between games; also
         # checked after every game. 0 = never.
@@ -209,6 +234,47 @@ class Settings:
         self.status_file = Path(g("BARHOST_STATUS_FILE", "/tmp/lobby-client-status.json"))
         if not self.login or not self.password:
             raise SystemExit("BARHOST_LOBBY_LOGIN and BARHOST_LOBBY_PASSWORD must be set")
+
+
+def _map_key(name: str) -> str:
+    return " ".join(name.replace("_", " ").lower().split())
+
+
+def load_start_boxes(path: str, keys: list) -> dict:
+    """{"<map>": {"<variant>": "<base64url(zlib(json))>", ...}, ...} -> {normalised
+    map name: value} for the first of `keys` each map has. The value is the
+    game's mapmetadata_startbox_override mod option (modoptions.lua;
+    startbox_utilities.lua decodes it), as BAR's start position tool copies it:
+    "!bSet mapmetadata_startbox_override <value>" (cmd_startpos_tool.lua)."""
+    if not path:
+        return {}
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        log("start boxes: cannot read %s (%s); none applied" % (path, e))
+        return {}
+    out = {}
+    for name, variants in data.items():
+        if not isinstance(variants, dict):
+            continue
+        for k in keys:
+            v = variants.get(k)
+            if isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9_-]+", v):
+                out[_map_key(name)] = v
+                break
+    log("start boxes: %d maps from %s (%s)" % (len(out), path, ",".join(keys)))
+    return out
+
+
+def start_box_for(boxes: dict, map_name: str):
+    """The start boxes for a room's map ("All That Glitters v2.2.3" matches
+    "All That Glitters"; the longest match wins), or None."""
+    m = _map_key(map_name)
+    best = None
+    for k in boxes:
+        if (m == k or m.startswith(k + " ")) and (best is None or len(k) > len(best)):
+            best = k
+    return boxes[best] if best else None
 
 
 class Battle:
@@ -227,10 +293,12 @@ class LobbyClient:
     """The protocol state machine. `feed(line)` and `tick(now)` act on the
     world; everything to send is appended to `self.outbox`. No I/O here."""
 
-    def __init__(self, s: Settings, now=time.monotonic, launch=None):
+    def __init__(self, s: Settings, now=time.monotonic, launch=None, perf=None):
         self.s = s
         self.now = now
         self.launch = launch or (lambda b, pw: None)
+        # cgroup_perf.PerfRecorder: the container's CPU and memory per game.
+        self.perf = perf
         self.outbox = []
         # Room mode: public or private, as last chosen by !public / !private;
         # kept on the data volume so a restart keeps it.
@@ -311,10 +379,13 @@ class LobbyClient:
         self.bots_due = None        # follow mode: when to add the bots after joining
         self.private_request = None  # room mode: {"manager", "until", "password"} while one opens
         self.map_wanted = None      # room mode: a !map sent, until the room shows it
+        self.start_boxes_map = None  # room mode: the map whose start boxes were last sent
         self.map_deadline = None
         self.map_skips = 0          # maps skipped in a row (not accepted or not downloadable)
         self.ring_hint_after = 0.0  # room mode: no ring hint before this time
-        self.seat_hold_until = 0.0  # public room: no return to a player seat before this
+        self.stop_hint_after = 0.0  # no !stop request posted before this
+        self.bonus_hint_after = 0.0  # no bonus hint before this
+        self.voted_bonus = None     # the AI bonus this room voted in, if any
         self.vacant = None          # room mode: the joined room was found free
         self.vacancy_check_at = None
         self.room_password_now = ""  # the private room's password, once in it
@@ -463,6 +534,21 @@ class LobbyClient:
             self.my_status = battle_status(ready=0, team=st["team"], ally=st["ally"], mode=st["mode"], sync=2)
             self.pending.append(("MYBATTLESTATUS", self.my_status, 0))
         self.need_fetch = b
+        self.apply_start_boxes()
+
+    def apply_start_boxes(self):
+        """Room mode, as boss: set the start boxes for the room's map, once per
+        map, after any map change (the rotation's or a boss's). A map with no
+        entry gets "0", Chobby's Default Boxes (gui_battle_room_window.lua), so
+        the previous map's boxes never carry over."""
+        b = self.battle
+        if (self.s.mode != "room" or not self.s.start_boxes or not b or not self.boss
+                or self.game_running() or self.start_boxes_map == b.map):
+            return
+        self.start_boxes_map = b.map
+        value = start_box_for(self.s.start_boxes, b.map)
+        log("start boxes for %s: %s" % (b.map, "set" if value else "none known, map defaults"))
+        self.say("!bSet mapmetadata_startbox_override " + (value or "0"))
 
     def on_JOINEDBATTLE(self, line):
         p = line.split(" ")
@@ -554,11 +640,15 @@ class LobbyClient:
 
     def rotate_map(self):
         """Ask the autohost for the rotation's current map."""
-        if not self.s.map_rotation or not self.battle:
+        if not self.battle:
+            return
+        if not self.s.map_rotation:
+            self.apply_start_boxes()        # for the room's own map
             return
         name = self.s.map_rotation[self.map_index % len(self.s.map_rotation)]
         if name.lower() in self.battle.map.lower():
             self.map_wanted = None
+            self.apply_start_boxes()
             return
         # The wait counts from when the command goes out, after the queue.
         self.map_wanted = name
@@ -632,9 +722,18 @@ class LobbyClient:
         starting = (user not in (self.battle.founder, self.s.login) and START_RE.match(msg.strip())) or \
             (vote_cmd and re.match(r"(?:force)?start\b", vote_cmd.group(1), re.IGNORECASE))
         if starting and self.s.mode == "room":
-            self.seat_hold_until = self.now() + START_HOLD
             if self.playing():
                 self.set_seat(False, "a game start was called", first=True)
+        passed = BONUS_PASSED_RE.search(msg) if user == self.battle.founder else None
+        if passed and self.s.mode == "room" and self.boss and 0 <= int(passed.group(1)) <= 100:
+            self.voted_bonus = int(passed.group(1))
+            log("a bonus vote passed: every AI to %d" % self.voted_bonus)
+            self.say("!setallaibonus %d" % self.voted_bonus)
+            return
+        if self.s.mode == "room" and user not in (self.battle.founder, self.s.login) \
+                and BONUS_RE.search(msg) and self.now() >= self.bonus_hint_after:
+            self.bonus_hint_after = self.now() + BONUS_HINT_EVERY
+            self.say(BONUS_HINT)
         ring = RING_RE.match(msg.strip())
         if ring and self.s.mode == "room" and user not in (self.battle.founder, self.s.login) \
                 and self.now() >= self.ring_hint_after:
@@ -735,6 +834,11 @@ class LobbyClient:
         b = self.battle
         self.boss_deadline = None
         log("boss in room %s; setting it up" % b.id)
+        # A headless host never plays: it took a player seat only to be made
+        # boss (as Chobby, which forces a player seat "so he can boss self",
+        # battle_list_window.lua HostBattle). Settings and maps are a boss's,
+        # not a player's; only adding bots needs the seat, briefly (sync_bots).
+        self.set_seat(False, "boss; a headless host spectates")
         if self.s.room_name:
             self.say("!rename " + self.s.room_name)
         for c in self.s.setup:
@@ -744,28 +848,24 @@ class LobbyClient:
         if b.passworded:
             for u in sorted(self.s.follow):
                 self.tell(u, "Private room %s is up on %s; password %s." % (b.id, b.founder, self.room_password_now))
-            # Then step aside: the account spectates; its engine runs the bots.
-            self.my_status = battle_status(ready=0, mode=0, sync=1 if self.synced else 2)
-            self.pending.append(("MYBATTLESTATUS", self.my_status, 0))
-        # Public: stay a player; the seat rules in tick() move between player
-        # and spectator by the number of humans playing.
         self.state = "waiting"
         self.rotate_map()
 
     def switch_bots(self):
-        """Replace this client's bots with self.bot_ai: as a player (only
-        players may add bots), then a spectator again in a private room or in
-        follow mode; in a public room the seat rules decide."""
+        """Replace this client's bots with self.bot_ai. sync_bots takes a
+        player seat for the adds only (only players may add bots) and returns
+        to spectating."""
         self.ai_switch_due = False
         b = self.battle
         log("switching the bots to %s" % self.bot_ai)
         for name in self.my_bots():
             self.pending.append(("REMOVEBOT", name))
             b.bots.pop(name, None)
-        self.set_seat(True, "adding %s" % self.bot_ai)
+        if not self.playing():
+            self.sync_bots()
+            return
+        self.set_seat(False, "a headless host spectates")
         self.sync_bots()
-        if self.s.mode == "follow" or b.passworded:
-            self.set_seat(False, "bots added")
 
     def playing(self) -> bool:
         return self.my_status is not None and unpack_battle_status(self.my_status)["mode"] == 1
@@ -841,8 +941,11 @@ class LobbyClient:
                 self.say("!aiProfile %s %s" % (a[1], self.s.bot_profile))
         if adds:
             # e.g. !setallaibonus 50: it applies to the AIs in the room, so it
-            # follows every add (setup, an AI switch, more bots).
+            # follows every add (setup, an AI switch, more bots). A bonus the
+            # room voted in replaces the configured one in this room.
             for c in self.s.bot_setup:
+                if self.voted_bonus is not None and SETALL_RE.match(c):
+                    c = "!setallaibonus %d" % self.voted_bonus
                 self.say(c)
 
     def leave_battle(self, why):
@@ -892,6 +995,19 @@ class LobbyClient:
                 self.sync_bots()
             when = "" if live else (" after this game" if self.battle else " when I join your room")
             self.tell(user, "OK: %d %s%s." % (self.want_bots, self.bot_ai, when))
+        elif cmd == "!perf":
+            last = self.perf.last_summary if self.perf is not None else None
+            self.tell(user, ("Last " + cgroup_perf.describe(last)) if last else "No game measured yet.")
+        elif cmd == "!stop":
+            b = self.battle
+            if not b or not (self.state == "ingame" or self.users.get(b.founder, 0) & 1):
+                self.tell(user, "No game is running in my room.")
+            elif self.now() < self.stop_hint_after:
+                self.tell(user, "I asked the room less than a minute ago.")
+            else:
+                self.stop_hint_after = self.now() + STOP_HINT_EVERY
+                self.say(STOP_HINT % user)
+                self.tell(user, "Asked the players to vote !cv stop.")
         elif cmd in AI_COMMANDS:
             ai = AI_COMMANDS[cmd]
             if ai == self.bot_ai and not self.ai_switch_due:
@@ -976,7 +1092,7 @@ class LobbyClient:
                 self.state, where, len(self.my_bots()), self.want_bots, self.bot_ai, self.games,
                 ("; " + self.last_error) if self.last_error else ""))
         elif self.s.mode == "room":
-            self.tell(user, "Commands: !public, !private, !barb, !smrt, !bots <0-16> [AI], !status")
+            self.tell(user, "Commands: !public, !private, !barb, !smrt, !bots <0-16> [AI], !stop, !perf, !status")
         else:
             self.tell(user, "Commands: !bots <0-16> [AI], !barb, !smrt, !room <room number, host, player or "
                             "title> [password], !join [password], !leave, !status")
@@ -1054,6 +1170,8 @@ class LobbyClient:
         self.synced = False
         self.boss_deadline = None
         self.target_room = ""       # !room names one room once; it is not rejoined
+        self.start_boxes_map = None  # boxes are sent again in the next room
+        self.voted_bonus = None     # a voted bonus belongs to that room
         self.bots_due = None
         if self.state != "ingame":
             self.state = "lobby"
@@ -1086,6 +1204,9 @@ class LobbyClient:
         self.game_proc = self.launch(b, self.script_password)
         self.game_launched_at = self.now()
         self.engine_exit_logged = False
+        if self.perf is not None:
+            self.perf.start("game %d %s" % (self.games, b.map), getattr(self.game_proc, "write_dir", None),
+                            now=self.now())
 
     def log_engine_exit(self):
         """Once per game: the engine's exit, in the pod log (its console is
@@ -1098,6 +1219,10 @@ class LobbyClient:
         ran = self.now() - getattr(self, "game_launched_at", self.now())
         still = bool(self.battle and self.users.get(self.battle.founder, 0) & 1)
         log("engine exited with code %s after %d s%s" % (code, ran, "; the game goes on" if still else ""))
+        if self.perf is not None:
+            summary = self.perf.stop()
+            if summary:
+                log("perf " + cgroup_perf.describe(summary))
         if code == 0 and not still:
             return
         console = getattr(self.game_proc, "write_dir", None)
@@ -1173,9 +1298,6 @@ class LobbyClient:
                 and not (self.s.follow & self.battle.users) \
                 and now - (self.joined_at or 0) >= JOIN_SETTLE:
             self.leave_battle("everyone I follow left")
-        # Room mode: the room kind follows !public / !private (between games),
-        # and in a public room the seat follows the humans playing: spectate
-        # at BARHOST_SEAT_SPECTATE_AT, play again below BARHOST_SEAT_PLAY_BELOW.
         # A new AI release is only ever installed between games.
         if self.s.ai_update_every > 0 and not self.ai_updating and not self.game_running() \
                 and self.state in ("lobby", "waiting") and now >= self.next_ai_check:
@@ -1184,23 +1306,15 @@ class LobbyClient:
         if self.ai_switch_due and self.battle and self.state == "waiting" and not self.game_running() \
                 and (self.boss or self.s.mode == "follow"):
             self.switch_bots()
-        # Rehosting is only ever done from a room with no game in progress.
+        # Room mode: the room kind follows !public / !private; rehosting is
+        # only ever done from a room with no game in progress.
         if self.s.mode == "room" and self.battle and self.state == "waiting" and self.boss \
                 and not self.game_running() and not (self.users.get(self.battle.founder, 0) & 1):
-            b = self.battle
-            if b.passworded != (self.privacy == "private"):
+            if self.battle.passworded != (self.privacy == "private"):
                 self.leave_battle("switching to a %s room" % self.privacy)
-            elif not b.passworded and not self.pending:
-                humans = self.humans()
-                n = len(humans)
-                # Everyone ready means a start is near: spectate for it.
-                all_ready = bool(humans) and all(self.statuses[h].get("ready") for h in humans)
-                if self.playing() and (n >= self.s.seat_spectate_at or all_ready):
-                    self.set_seat(False, "everyone is ready" if all_ready and n < self.s.seat_spectate_at
-                                  else "%d humans playing" % n)
-                elif not self.playing() and n < self.s.seat_play_below and not all_ready \
-                        and now >= self.seat_hold_until:
-                    self.set_seat(True, "%d humans playing" % n)
+            elif self.playing() and not self.pending:
+                # Never left in a player seat: it is only for adding bots.
+                self.set_seat(False, "a headless host spectates")
         if self.state in ("waiting", "countdown") and self.boss and not self.pending \
                 and now >= self.quiet_until:
             if self.ready_to_start():
@@ -1285,7 +1399,7 @@ async def session(c: LobbyClient):
     log("connecting to %s:%d" % (s.host, s.port))
     reader, writer = await asyncio.wait_for(asyncio.open_connection(s.host, s.port), 30)
     c.reset()
-    last_ping = time.monotonic()
+    last_ping = last_perf = time.monotonic()
     try:
         while True:
             try:
@@ -1302,6 +1416,9 @@ async def session(c: LobbyClient):
             if c.need_ai_update:
                 c.need_ai_update = False
                 asyncio.ensure_future(update_ais(c))
+            if c.perf is not None and time.monotonic() - last_perf >= 1:
+                last_perf = time.monotonic()
+                c.perf.sample(last_perf)
             if time.monotonic() - last_ping > 30:
                 c.send("PING")
                 last_ping = time.monotonic()
@@ -1319,7 +1436,13 @@ async def session(c: LobbyClient):
 def main() -> int:
     s = Settings()
     s.out_dir.mkdir(parents=True, exist_ok=True)
-    c = LobbyClient(s, launch=launch_engine(s))
+    perf = cgroup_perf.PerfRecorder(summary_csv=s.out_dir / "perf-summary.csv")
+    if perf.cg.read() is None:
+        log("perf: no cgroup counters readable under %s; games are not measured" % cgroup_perf.ROOT)
+    else:
+        log("perf: cgroup %s, CPU limit %s cores; each game is summarised here and in %s" % (
+            "v2" if perf.cg.v2 else "v1", perf.cg.limit_cores() or "no", perf.summary_csv))
+    c = LobbyClient(s, launch=launch_engine(s), perf=perf)
     delay = 10
     while True:
         try:
