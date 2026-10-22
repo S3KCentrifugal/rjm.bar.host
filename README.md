@@ -71,11 +71,17 @@ The table leaves out two cases:
      password. In a public room it stays a player until 8 humans play, then
      spectates, and plays again when they fall below 3
      (`BARHOST_SEAT_SPECTATE_AT`, `BARHOST_SEAT_PLAY_BELOW`).
-  3. Counts down once every human is ready, spectating first, then sends
+  3. While boss, gives boss to `BARHOST_FOLLOW` users as they join, and ends
+     (`!ev`) any vote to unboss everyone, the client, or one of those users.
+     With `BARHOST_MAP_ROTATION`, sends `!map <next>` once boss and after
+     every game, keeping its place across restarts, and skips a map the
+     autohost will not take or that cannot be downloaded. Any map change is
+     downloaded before a game can start.
+  4. Counts down once every human is ready, spectating first, then sends
      `!cv start`. It never leaves a room or takes a new one while its engine
      is in a game, including after reconnecting mid-game; a `!public` /
      `!private` switch waits for a room with no game in progress.
-  4. When the autohost's game starts, runs `spring-headless` as a spectator
+  5. When the autohost's game starts, runs `spring-headless` as a spectator
      client of it. That engine runs the bots.
 - **`spads`** ([`docker/spads/`](docker/spads))
   - Runs [SPADS](https://github.com/Yaribz/SPADS) from pinned commits with BAR's

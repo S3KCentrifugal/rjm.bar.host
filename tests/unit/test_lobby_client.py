@@ -387,6 +387,144 @@ class Privacy(Harness):
         self.assertIn("SAYPRIVATE %s !privatehost" % MANAGER, self.run_for(70))
 
 
+ROTATION = "All That Simmers;Cells;Forge"
+
+
+class MapRotation(Harness):
+    """BARHOST_MAP_ROTATION: one map per game, in order, kept across restarts;
+    any map change re-downloads before a game can start."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_MAP_ROTATION=ROTATION)
+
+    def map_is(self, name):
+        self.feed("UPDATEBATTLEINFO 12 1 0 123 " + name)
+
+    def boss(self):
+        """Join and become boss; return what was sent up to the !map."""
+        self.join()
+        self.run_for(2)
+        self.c.fetched(self.c.battle, True)
+        self.feed("SAIDBATTLEEX %s * Boss mode enabled for %s" % (HOST, ME))
+        return self.run_for(20)
+
+    def test_sets_the_first_map_and_starts_only_once_it_is_downloaded(self):
+        sent = self.boss()
+        self.assertIn("SAYBATTLE !map All That Simmers", sent)
+        self.feed("JOINEDBATTLE 12 Alice",
+                  "CLIENTBATTLESTATUS Alice %d 0" % lc.battle_status(ready=1, mode=1, sync=1))
+        self.assertFalse([x for x in self.run_for(5) if "starting in" in x])    # map not switched yet
+        self.map_is("All That Simmers v1.2")
+        sent = self.run_for(5)
+        self.assertEqual(lc.unpack_battle_status(
+            [x for x in sent if x.startswith("MYBATTLESTATUS")][0].split(" ")[1])["sync"], 2)
+        self.assertFalse([x for x in sent if "starting in" in x])               # downloading
+        self.c.fetched(self.c.battle, True)
+        self.assertTrue([x for x in self.run_for(5) if "starting in" in x])
+
+    def test_next_map_after_each_game_and_the_place_is_kept(self):
+        self.boss()
+        self.map_is("All That Simmers v1.2")
+        self.c.fetched(self.c.battle, True)
+        self.feed("CLIENTSTATUS %s 65" % HOST)                # a game is played
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        self.assertIn("SAYBATTLE !map Cells", self.run_for(5))
+        self.assertEqual(self.client(BARHOST_MAP_ROTATION=ROTATION).map_index, 1)
+
+    def test_a_map_the_autohost_does_not_take_is_skipped(self):
+        self.boss()
+        sent = self.run_for(25)                               # no UPDATEBATTLEINFO comes
+        self.assertIn("SAYBATTLE !map Cells", sent)
+
+    def test_a_map_that_cannot_be_downloaded_is_skipped_not_the_room(self):
+        self.boss()
+        self.map_is("All That Simmers v1.2")
+        self.c.fetched(self.c.battle, False)
+        sent = self.run_for(5)
+        self.assertNotIn("LEAVEBATTLE", sent)
+        self.assertIn("SAYBATTLE !map Cells", sent)
+
+    def test_rotation_wraps_around(self):
+        self.c.map_index = 2
+        self.c.advance_map()
+        self.assertEqual(self.c.map_index, 0)
+
+    def test_any_map_change_downloads_it_first(self):
+        self.c = self.client()                                # no rotation: someone else changes the map
+        self.join()
+        self.c.fetched(self.c.battle, True)
+        self.run_for(2)
+        self.map_is("Glacier Pass 1.2")
+        self.assertFalse(self.c.synced)
+        self.assertIs(self.c.need_fetch, self.c.battle)
+
+
+FRIEND = "[iS]BarscrewlSports"
+
+
+def vote(user, command):
+    return "SAIDBATTLEEX %s * %s called a vote for command \"%s\" [!vote y, !vote n, !vote b]" % (HOST, user, command)
+
+
+class Guard(Harness):
+    """Room mode, as boss: end votes that would unboss this client or an
+    authorised user; boss authorised users when they join."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_FOLLOW="%s,%s" % (OWNER, FRIEND))
+
+    def ended(self, command, user="Troll"):
+        self.feed(vote(user, command))
+        sent = self.run_for(2)
+        return "SAYBATTLE !ev" in sent
+
+    def test_ends_a_vote_to_unboss_clyde_at_once(self):
+        self.boss_and_setup()
+        self.assertTrue(self.ended("unboss " + ME))
+
+    def test_ends_a_vote_to_unboss_everyone(self):
+        self.boss_and_setup()
+        self.assertTrue(self.ended("unboss"))
+
+    def test_ends_a_vote_to_unboss_an_authorised_user(self):
+        self.boss_and_setup()
+        self.assertTrue(self.ended("unboss " + FRIEND.lower()))
+
+    def test_leaves_other_votes_alone(self):
+        self.boss_and_setup()
+        self.assertFalse(self.ended("unboss SomeTroll"))
+        self.assertFalse(self.ended("set map Tetrad_V2"))
+        self.assertFalse(self.ended("forcestart"))
+
+    def test_only_the_autohost_announces_votes(self):
+        self.boss_and_setup()
+        self.feed("SAIDBATTLE Troll * X called a vote for command \"unboss %s\" [!vote y]" % ME)
+        self.assertNotIn("SAYBATTLE !ev", self.run_for(2))
+
+    def test_not_boss_does_not_end_votes(self):
+        self.join()
+        self.feed(vote("Troll", "unboss " + ME))
+        self.assertNotIn("SAYBATTLE !ev", self.run_for(2))
+
+    def test_bosses_authorised_users_when_they_join(self):
+        self.boss_and_setup()
+        self.feed("JOINEDBATTLE 12 " + FRIEND, "JOINEDBATTLE 12 Stranger")
+        sent = self.run_for(5)
+        self.assertIn("SAYBATTLE !boss " + FRIEND, sent)
+        self.assertFalse([x for x in sent if x == "SAYBATTLE !boss Stranger"])
+
+    def test_bosses_authorised_users_already_in_the_room(self):
+        self.join()
+        self.feed("JOINEDBATTLE 12 " + OWNER)
+        sent = self.run_for(2)
+        self.assertNotIn("SAYBATTLE !boss " + OWNER, sent)      # not boss yet
+        self.feed("SAIDBATTLEEX %s * Boss mode enabled for %s" % (HOST, ME))
+        self.assertIn("SAYBATTLE !boss " + OWNER, self.run_for(10))
+
+
 class Recovery(Harness):
     def test_kicked_takes_another_room(self):
         self.boss_and_setup()

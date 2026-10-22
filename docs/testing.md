@@ -44,6 +44,15 @@ with lobby lines and a fake clock. It covers:
   in game;
 - boss, setup commands, bots on their ally team with distinct teams and
   cycled sides, then still a player in a public room;
+- the boss guard (`Guard`): `!ev` at once for a vote to unboss the client,
+  everyone, or an authorised user (any case), not for other votes, not for
+  vote text said by anyone but the autohost, and not before being boss;
+  authorised users made boss when they join, or once boss if already in;
+- the map rotation (`MapRotation`): the first map once boss, no countdown
+  until the autohost has switched and the map is downloaded, the next map
+  after each game with the place kept across a restart, wrapping around, and
+  skipping a map that is not taken or cannot be downloaded (not leaving the
+  room); any map change, by anyone, is downloaded before a game can start;
 - the public seat (`PublicSeat`): spectating at 8 humans playing, playing
   again below 3 (not at 3 to 7), spectating before `!cv start`, playing again
   after the game;

@@ -33,10 +33,13 @@ room (the client hosts by itself)
      a player until BARHOST_SEAT_SPECTATE_AT humans play, then spectate; play
      again below BARHOST_SEAT_PLAY_BELOW. Always spectate when the countdown
      to a game begins.
-  4. When enough humans are in, ready and synced, count down and `!cv start`.
-  5. When the autohost's game starts, launch spring-headless as a spectator
+  4. While boss, give boss to BARHOST_FOLLOW users as they join (`!boss`),
+     and end at once (`!ev`) any vote to unboss everyone, this client, or a
+     BARHOST_FOLLOW user.
+  5. When enough humans are in, ready and synced, count down and `!cv start`.
+  6. When the autohost's game starts, launch spring-headless as a spectator
      client of it. The engine runs the bots, because this client owns them.
-  6. After the game, stay in the room and go back to 4. If the room is lost,
+  7. After the game, stay in the room and go back to 5. If the room is lost,
      take another; if the connection is lost, log in again.
 
 The protocol details (LOGIN fields, room choice, `!boss`, ADDBOT, the client
@@ -55,6 +58,8 @@ Settings (environment):
                           (/bar/data/lobby-client-state.json)
   BARHOST_SEAT_SPECTATE_AT, BARHOST_SEAT_PLAY_BELOW   public room: spectate at
                           this many humans playing (8), play below (3)
+  BARHOST_MAP_ROTATION    room mode: ';'-separated maps, one per game, in order
+                          (its place is kept in BARHOST_STATE_FILE)
   BARHOST_ROOM_NAME       room title, set with !rename (optional)
   BARHOST_ROOM_SETUP      ';'-separated chat commands sent once boss
                           (default "!preset custom;!bSet experimentallegionfaction 1")
@@ -93,6 +98,8 @@ FOUNDER_RE = re.compile(r"^Host\[([A-Za-z]+)(\d+)\]\[\d+\]$")
 # (BYAR-Chobby battle_list_window.lua, HostBattle).
 MANAGER_RE = re.compile(r"^Host\[([A-Za-z]+)\d+\]$")
 PRIVATE_WAIT = 30           # seconds to wait for the private room to appear
+MAP_WAIT = 20               # seconds for the autohost to switch to a !map before skipping it
+VOTE_RE = re.compile(r'called a vote for command "([^"]*)"')
 
 # SPADS kicks clients that talk too fast: at most one command per this many s.
 COMMAND_SPACING = 1.5
@@ -149,6 +156,9 @@ class Settings:
         self.seat_play_below = int(g("BARHOST_SEAT_PLAY_BELOW", "3"))
         self.state_file = Path(g("BARHOST_STATE_FILE",
                                  os.path.join(g("BARHOST_DATA_DIR", "/bar/data"), "lobby-client-state.json")))
+        # Room mode: maps to cycle through, one per game (';'-separated names as
+        # the autohost's !map takes them; a part of a name is enough if unique).
+        self.map_rotation = [m.strip() for m in g("BARHOST_MAP_ROTATION").split(";") if m.strip()]
         self.min_humans = int(g("BARHOST_MIN_HUMANS", "1"))
         self.start_delay = int(g("BARHOST_START_DELAY", "20"))
         self.postgame_delay = int(g("BARHOST_POSTGAME_DELAY", "60"))
@@ -182,21 +192,31 @@ class LobbyClient:
         self.outbox = []
         # Room mode: public or private, as last chosen by !public / !private;
         # kept on the data volume so a restart keeps it.
-        self.privacy = self.load_state().get("privacy", s.privacy)
+        state = self.load_state()
+        self.privacy = state.get("privacy", s.privacy)
+        # Room mode: the next map of BARHOST_MAP_ROTATION; also kept.
+        self.map_index = state.get("map_index", 0)
         self.reset()
 
     def load_state(self) -> dict:
         try:
             st = json.loads(self.s.state_file.read_text())
-            return st if isinstance(st, dict) and st.get("privacy") in ("public", "private") else {}
         except (OSError, ValueError):
             return {}
+        if not isinstance(st, dict):
+            return {}
+        out = {}
+        if st.get("privacy") in ("public", "private"):
+            out["privacy"] = st["privacy"]
+        if isinstance(st.get("map_index"), int) and st["map_index"] >= 0:
+            out["map_index"] = st["map_index"]
+        return out
 
     def save_state(self):
         try:
             self.s.state_file.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.s.state_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"privacy": self.privacy}))
+            tmp.write_text(json.dumps({"privacy": self.privacy, "map_index": self.map_index}))
             tmp.replace(self.s.state_file)
         except OSError as e:
             log("could not save %s: %s" % (self.s.state_file, e))
@@ -238,6 +258,9 @@ class LobbyClient:
         self.joined_at = None
         self.bots_due = None        # follow mode: when to add the bots after joining
         self.private_request = None  # room mode: {"manager", "until", "password"} while one opens
+        self.map_wanted = None      # room mode: a !map sent, until the room shows it
+        self.map_deadline = None
+        self.map_skips = 0          # maps skipped in a row (not accepted or not downloadable)
         self.room_password_now = ""  # the private room's password, once in it
 
     def status(self) -> dict:
@@ -366,8 +389,24 @@ class LobbyClient:
         b = self.battles.get(p[1])
         if b and len(p) >= 5:
             b.spectators, b.locked = int(p[2]), p[3] == "1"
-            if len(p) == 6:
+            if len(p) == 6 and p[5] != b.map:
                 b.map = p[5]
+                if b is self.battle:
+                    self.map_changed(b)
+
+    def map_changed(self, b: Battle):
+        """The room's map changed: unsynced until it is downloaded, so no game
+        starts (and the engine never launches) without it."""
+        log("the room's map is now %s" % b.map)
+        if self.map_wanted and self.map_wanted.lower() in b.map.lower():
+            self.map_wanted = self.map_deadline = None
+            self.map_skips = 0
+        self.synced = False
+        if self.my_status is not None:
+            st = unpack_battle_status(self.my_status)
+            self.my_status = battle_status(ready=0, team=st["team"], ally=st["ally"], mode=st["mode"], sync=2)
+            self.pending.append(("MYBATTLESTATUS", self.my_status, 0))
+        self.need_fetch = b
 
     def on_JOINEDBATTLE(self, line):
         p = line.split(" ")
@@ -376,6 +415,8 @@ class LobbyClient:
             b.users.add(p[2])
             if p[2] == self.s.login and len(p) > 3:
                 self.script_password = p[3]
+            if b is self.battle:
+                self.boss_authorised([p[2]])
 
     def on_LEFTBATTLE(self, line):
         p = line.split(" ")
@@ -434,14 +475,51 @@ class LobbyClient:
             return
         if not ok:
             self.last_error = "could not download %s / %s" % (b.game, b.map)
+            if self.s.mode == "room" and self.boss and self.s.map_rotation and self.state == "waiting":
+                log(self.last_error + "; skipping that map")     # our own map choice: take the next
+                self.skip_map()
+                return
             self.send("LEAVEBATTLE")
             self.lost_battle(self.last_error)
             return
         log("content ready: %s, %s" % (b.game, b.map))
         self.synced = True
-        st = unpack_battle_status(self.my_status) if self.my_status is not None else {"mode": 1}
-        self.my_status = battle_status(mode=st["mode"], sync=1)
+        st = unpack_battle_status(self.my_status) if self.my_status is not None \
+            else {"mode": 1, "team": 0, "ally": 0}
+        self.my_status = battle_status(team=st["team"], ally=st["ally"], mode=st["mode"], sync=1)
         self.pending.append(("MYBATTLESTATUS", self.my_status, 0))
+
+    # -- map rotation (room mode) ------------------------------------------
+
+    def rotate_map(self):
+        """Ask the autohost for the rotation's current map."""
+        if not self.s.map_rotation or not self.battle:
+            return
+        name = self.s.map_rotation[self.map_index % len(self.s.map_rotation)]
+        if name.lower() in self.battle.map.lower():
+            self.map_wanted = None
+            return
+        # The wait counts from when the command goes out, after the queue.
+        self.map_wanted = name
+        self.map_deadline = self.now() + MAP_WAIT + COMMAND_SPACING * (len(self.pending) + 1)
+        log("next map: %s" % name)
+        self.say("!map " + name)
+
+    def advance_map(self):
+        self.map_index = (self.map_index + 1) % len(self.s.map_rotation)
+        self.save_state()
+
+    def skip_map(self):
+        """The current rotation map cannot be used: try the next, at most one
+        full round in a row."""
+        self.map_wanted = self.map_deadline = None
+        self.map_skips += 1
+        if self.map_skips >= len(self.s.map_rotation):
+            self.last_error = "no map of BARHOST_MAP_ROTATION could be used; keeping %s" % self.battle.map
+            log(self.last_error)
+            return
+        self.advance_map()
+        self.rotate_map()
 
     def on_REQUESTBATTLESTATUS(self, line):
         if self.my_status is None:
@@ -486,6 +564,31 @@ class LobbyClient:
             if not self.boss:
                 self.boss = True
                 self.configure_room()
+            return
+        # The autohost announces a vote as `* <user> called a vote for command
+        # "<command>" [!vote y, ...]` (BYAR-Chobby gui_battle_room_window.lua,
+        # ParseForVotingSaidBattle). End one that would unboss this client or
+        # an authorised user at once.
+        m = VOTE_RE.search(msg)
+        if user == self.battle.founder and self.boss and m and self.protected_from(m.group(1)):
+            log("ending the vote \"%s\"" % m.group(1))
+            self.pending.insert(0, "!ev")       # ahead of anything queued
+
+    def protected_from(self, command: str) -> bool:
+        """`unboss` alone (everyone), or of this client or an authorised user."""
+        w = command.split()
+        if not w or w[0].lower() != "unboss":
+            return False
+        guarded = {self.s.login.lower()} | {u.lower() for u in self.s.follow}
+        return len(w) == 1 or w[1].lower() in guarded
+
+    def boss_authorised(self, names):
+        """Room mode, once boss: give boss to the authorised users in `names`."""
+        if self.s.mode != "room" or not self.boss:
+            return
+        for n in sorted(set(names) & self.s.follow):
+            log("bossing %s" % n)
+            self.say("!boss " + n)
 
     # -- the room ----------------------------------------------------------
 
@@ -560,19 +663,18 @@ class LobbyClient:
             self.say("!rename " + self.s.room_name)
         for c in self.s.setup:
             self.say(c)
+        self.boss_authorised(b.users)
         self.sync_bots()
         if b.passworded:
             for u in sorted(self.s.follow):
                 self.tell(u, "Private room %s is up on %s; password %s." % (b.id, b.founder, self.room_password_now))
-        else:
-            # Public: stay a player; the seat rules in tick() move between
-            # player and spectator by the number of humans playing.
-            self.state = "waiting"
-            return
-        # Then step aside: the account spectates; its engine runs the bots.
-        self.my_status = battle_status(ready=0, mode=0, sync=1 if self.synced else 2)
-        self.pending.append(("MYBATTLESTATUS", self.my_status, 0))
+            # Then step aside: the account spectates; its engine runs the bots.
+            self.my_status = battle_status(ready=0, mode=0, sync=1 if self.synced else 2)
+            self.pending.append(("MYBATTLESTATUS", self.my_status, 0))
+        # Public: stay a player; the seat rules in tick() move between player
+        # and spectator by the number of humans playing.
         self.state = "waiting"
+        self.rotate_map()
 
     def playing(self) -> bool:
         return self.my_status is not None and unpack_battle_status(self.my_status)["mode"] == 1
@@ -841,7 +943,7 @@ class LobbyClient:
         self.next_join = self.now() + 10
 
     def ready_to_start(self) -> bool:
-        if not self.synced:
+        if not self.synced or self.map_wanted:     # no start mid map change
             return False
         humans = self.humans()
         if self.s.min_humans <= 0 or len(humans) < self.s.min_humans:
@@ -875,6 +977,14 @@ class LobbyClient:
             self.quiet_until = now + self.s.postgame_delay
             if self.s.mode == "follow" and self.battle:
                 self.sync_bots()        # a !bots sent during the game
+            if self.s.mode == "room" and self.battle and self.boss and self.s.map_rotation:
+                self.map_skips = 0      # one map per game
+                self.advance_map()
+                self.rotate_map()
+        if self.map_wanted and self.map_deadline is not None and now >= self.map_deadline \
+                and self.battle and self.state in ("waiting", "countdown"):
+            log("the autohost did not switch to %s; skipping it" % self.map_wanted)
+            self.skip_map()
         if self.state == "setup" and self.boss_deadline is not None and now >= self.boss_deadline \
                 and not self.pending:
             log("no boss confirmation; setting the room up anyway")
