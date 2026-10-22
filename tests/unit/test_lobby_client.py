@@ -161,11 +161,17 @@ class Setup(Harness):
         self.assertEqual({s["ally"] for s in statuses}, {1})
         self.assertEqual(len({s["team"] for s in statuses}), 8)
         self.assertNotIn(0, {s["team"] for s in statuses})
-        self.assertEqual([s["side"] for s in statuses], [0, 1] * 4)
+        self.assertEqual([s["side"] for s in statuses], [2] * 8)            # Random, as Chobby
+        self.assertEqual([b[1] for b in bots], ["BARbstable(%d)" % n for n in range(1, 9)])
         self.assertEqual({b[4] for b in bots}, {"BARb"})
         # A public room with fewer than 3 humans playing: Clyde stays a player.
         last = [lc.unpack_battle_status(x.split(" ")[1]) for x in sent if x.startswith("MYBATTLESTATUS")][-1]
         self.assertEqual((last["mode"], last["sync"]), (1, 1))
+
+    def test_sides_cycle_when_set(self):
+        self.c = self.client(BARHOST_BOT_SIDES="0,1")
+        bots = [x.split(" ") for x in self.boss_and_setup() if x.startswith("ADDBOT")]
+        self.assertEqual([lc.unpack_battle_status(b[2])["side"] for b in bots], [0, 1] * 4)
 
     def test_commands_are_spaced_for_flood_protection(self):
         self.join()
@@ -279,10 +285,37 @@ class PublicSeat(Harness):
         self.assertEqual(my_modes(sent[:sent.index("SAYBATTLE !cv start")])[-1], 0)
         self.feed("CLIENTSTATUS %s 65" % HOST)
         self.proc.code = 0
-        self.feed("CLIENTSTATUS %s 64" % HOST)
+        self.feed("CLIENTSTATUS %s 64" % HOST,                              # back, not ready yet
+                  "CLIENTBATTLESTATUS Alice %d 0" % lc.battle_status(ready=0, mode=1, sync=1))
         sent = self.run_for(5)
         self.assertEqual(self.c.state, "waiting")
         self.assertEqual(my_modes(sent), [1])                               # 1 human: play again
+
+    def test_spectates_once_everyone_is_ready(self):
+        self.boss_and_setup()
+        self.c.s.start_delay = 600                                          # no start in this test
+        sent = self.humans_in(["Alice", "Bob"], ready=1)
+        self.assertEqual(my_modes(sent), [0])
+        self.assertFalse(self.c.playing())
+
+    def test_spectates_at_once_when_a_start_is_called(self):
+        for call in ("SAIDBATTLE Alice !start", "SAIDBATTLE Alice !cv forcestart",
+                     'SAIDBATTLEEX %s * Alice called a vote for command "start" [!vote y, !vote n, !vote b]' % HOST):
+            self.setUp()
+            self.boss_and_setup()
+            self.humans_in(["Alice"])                                       # not ready: still a player
+            self.assertTrue(self.c.playing())
+            self.feed(call)
+            sent = self.run_for(2)
+            self.assertEqual(my_modes(sent), [0], call)
+            self.assertEqual(self.run_for(50), [], call)                    # held: no flip back yet
+            self.assertEqual(my_modes(self.run_for(15)), [1], call)         # the hold over, no game
+
+    def test_other_chat_does_not_move_it(self):
+        self.boss_and_setup()
+        self.humans_in(["Alice"])
+        self.feed("SAIDBATTLE Alice !startpos", "SAIDBATTLE Alice let's start soon")
+        self.assertEqual(my_modes(self.run_for(5)), [])
 
 
 class Privacy(Harness):

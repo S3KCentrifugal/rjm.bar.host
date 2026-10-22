@@ -70,7 +70,11 @@ The table leaves out two cases:
      adds bots it owns. In a private room it then spectates and PMs the
      password. In a public room it stays a player until 8 humans play, then
      spectates, and plays again when they fall below 3
-     (`BARHOST_SEAT_SPECTATE_AT`, `BARHOST_SEAT_PLAY_BELOW`).
+     (`BARHOST_SEAT_SPECTATE_AT`, `BARHOST_SEAT_PLAY_BELOW`). It spectates
+     before any game: once every human is ready, the moment a start is
+     called (`!start`, `!cv start`, `!forcestart`, or a vote for one), and at
+     its own countdown. A player's lag slows the whole game; a spectator's
+     does not (`GameServer.cpp:905`).
   3. While boss, gives boss to `BARHOST_FOLLOW` users as they join, and ends
      (`!ev`) any vote to unboss everyone, the client, or one of those users.
      An AI from `BARHOST_AI_ARCHIVES` on a moving tag (`@latest`, `@newest`)

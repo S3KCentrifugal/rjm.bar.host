@@ -70,8 +70,11 @@ with lobby lines and a fake clock. It covers:
   skipping a map that is not taken or cannot be downloaded (not leaving the
   room); any map change, by anyone, is downloaded before a game can start;
 - the public seat (`PublicSeat`): spectating at 8 humans playing, playing
-  again below 3 (not at 3 to 7), spectating before `!cv start`, playing again
-  after the game;
+  again below 3 (not at 3 to 7), spectating before `!cv start`, once everyone
+  is ready, and at once on `!start`, `!cv forcestart` or a start vote (held
+  for a minute, not for `!startpos` or chat), playing again after the game;
+- bots named as Chobby with simple AI names off (`BARbstable(1)`), side 2
+  (Random) by default, cycling when `BARHOST_BOT_SIDES` is set;
 - `!public` / `!private` (`Privacy`): the choice kept across a restart, a
   private room asked of the region manager with `!privatehost`, joined with
   its password, spectated, the password PM'd; leaving the other kind of room

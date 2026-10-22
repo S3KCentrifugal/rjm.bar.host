@@ -31,8 +31,10 @@ room (the client hosts by itself)
      (BARHOST_STATE_FILE).
   3. Add BARHOST_BOT_COUNT bots it owns. Private: then spectate. Public: stay
      a player until BARHOST_SEAT_SPECTATE_AT humans play, then spectate; play
-     again below BARHOST_SEAT_PLAY_BELOW. Always spectate when the countdown
-     to a game begins.
+     again below BARHOST_SEAT_PLAY_BELOW. Always spectate before a game: when
+     every human is ready, when a start is called (`!start`, `!cv start`,
+     `!forcestart`, or the autohost's vote for one; then for START_HOLD
+     seconds), and when the countdown begins.
   4. While boss, give boss to BARHOST_FOLLOW users as they join (`!boss`),
      and end at once (`!ev`) any vote to unboss everyone, this client, or a
      BARHOST_FOLLOW user. A BARHOST_FOLLOW user switches the bots' AI with
@@ -75,8 +77,10 @@ Settings (environment):
   BARHOST_BOT_AI          AI short name (BARb)
   BARHOST_BOT_COUNT       number of bots (8); in follow mode, added on joining
   BARHOST_BOT_ALLY        their ally team, 0-based (1); humans play ally 0
-  BARHOST_BOT_SIDES       ','-separated sides cycled over the bots (0,1:
-                          Armada, Cortex; 3 is Legion)
+  BARHOST_BOT_SIDES       ','-separated sides cycled over the bots (2, Random;
+                          0 Armada, 1 Cortex, 3 Legion)
+  BARHOST_BOT_AI_VERSION  the AI version in the bots' names, as Chobby shows
+                          them with simple AI names off (stable: BARbstable(1))
   BARHOST_BOT_PROFILE     optional JSON sent as !aiProfile for every bot
   BARHOST_MIN_HUMANS      humans needed before an auto-start (1; 0 = never)
   BARHOST_START_DELAY     countdown in seconds once all are ready (20)
@@ -109,6 +113,11 @@ MANAGER_RE = re.compile(r"^Host\[([A-Za-z]+)\d+\]$")
 PRIVATE_WAIT = 30           # seconds to wait for the private room to appear
 MAP_WAIT = 20               # seconds for the autohost to switch to a !map before skipping it
 VOTE_RE = re.compile(r'called a vote for command "([^"]*)"')
+# A game about to start (a player's command, or the autohost's vote): a
+# player-seated client spectates at once, so its engine is never a lagging
+# player (the server slows the game for players, GameServer.cpp:905).
+START_RE = re.compile(r"^!(?:cv\s+)?(?:force)?start\b", re.IGNORECASE)
+START_HOLD = 60             # seconds to stay a spectator after a start is called
 # A player ringing another (Chobby's "Ring" sends `!ring <name>`): answer with
 # how the room can vote an away player to spectator (Chobby's "Force
 # Spectator" is `!spec <name>`); the room decides. At most once a minute.
@@ -166,7 +175,13 @@ class Settings:
         self.bot_ai = g("BARHOST_BOT_AI", "BARb")
         self.bot_count = int(g("BARHOST_BOT_COUNT", "8"))
         self.bot_ally = int(g("BARHOST_BOT_ALLY", "1"))
-        self.bot_sides = [int(s) for s in g("BARHOST_BOT_SIDES", "0,1").split(",") if s.strip()] or [0]
+        # Default 2, Random, as Chobby gives the AIs it adds (BYAR-Chobby
+        # ai_list_window.lua AddAi side = 2; sidedata.lua: 0 Armada, 1 Cortex,
+        # 2 Random, 3 Legion).
+        self.bot_sides = [int(s) for s in g("BARHOST_BOT_SIDES", "2").split(",") if s.strip()] or [2]
+        # Bots are named as Chobby names them with its simple AI names off:
+        # "<shortName> <version> (<n>)" without spaces, e.g. BARbstable(1).
+        self.bot_ai_version = g("BARHOST_BOT_AI_VERSION", "stable")
         self.bot_profile = g("BARHOST_BOT_PROFILE")
         self.privacy = g("BARHOST_ROOM_PRIVACY", "public")
         if self.privacy not in ("public", "private"):
@@ -295,6 +310,7 @@ class LobbyClient:
         self.map_deadline = None
         self.map_skips = 0          # maps skipped in a row (not accepted or not downloadable)
         self.ring_hint_after = 0.0  # room mode: no ring hint before this time
+        self.seat_hold_until = 0.0  # public room: no return to a player seat before this
         self.room_password_now = ""  # the private room's password, once in it
 
     def status(self) -> dict:
@@ -603,6 +619,13 @@ class LobbyClient:
                 self.boss = True
                 self.configure_room()
             return
+        vote_cmd = VOTE_RE.search(msg) if user == self.battle.founder else None
+        starting = (user not in (self.battle.founder, self.s.login) and START_RE.match(msg.strip())) or \
+            (vote_cmd and re.match(r"(?:force)?start\b", vote_cmd.group(1), re.IGNORECASE))
+        if starting and self.s.mode == "room":
+            self.seat_hold_until = self.now() + START_HOLD
+            if self.playing():
+                self.set_seat(False, "a game start was called", first=True)
         ring = RING_RE.match(msg.strip())
         if ring and self.s.mode == "room" and user not in (self.battle.founder, self.s.login) \
                 and self.now() >= self.ring_hint_after:
@@ -738,8 +761,9 @@ class LobbyClient:
     def playing(self) -> bool:
         return self.my_status is not None and unpack_battle_status(self.my_status)["mode"] == 1
 
-    def set_seat(self, play: bool, why: str):
-        """Player (on a free team, the humans' ally team) or spectator."""
+    def set_seat(self, play: bool, why: str, first: bool = False):
+        """Player (on a free team, the humans' ally team) or spectator; `first`
+        sends it ahead of anything queued."""
         sync = unpack_battle_status(self.my_status)["sync"] if self.my_status is not None else 2
         team = 0
         if play:
@@ -748,8 +772,13 @@ class LobbyClient:
             while team in used:
                 team += 1
         self.my_status = battle_status(ready=0, team=team, ally=0, mode=1 if play else 0, sync=sync)
-        self.pending.append(("MYBATTLESTATUS", self.my_status, 0))
+        self.pending.insert(0, ("MYBATTLESTATUS", self.my_status, 0)) if first \
+            else self.pending.append(("MYBATTLESTATUS", self.my_status, 0))
         log("%s: %s" % ("playing" if play else "spectating", why))
+
+    def bot_name(self, n: int) -> str:
+        """Chobby's real AI name (simple names off): BARbstable(1)."""
+        return ("%s %s (%d)" % (self.bot_ai, self.s.bot_ai_version, n)).replace(" ", "")
 
     def my_bots(self) -> "list[str]":
         b = self.battle
@@ -777,9 +806,9 @@ class LobbyClient:
                 team += 1
             used.add(team)
             i += 1
-            while "%s%d" % (self.bot_ai, i) in names:
+            while self.bot_name(i) in names:
                 i += 1
-            name = "%s%d" % (self.bot_ai, i)
+            name = self.bot_name(i)
             names.add(name)
             side = self.s.bot_sides[k % len(self.s.bot_sides)]
             st = battle_status(ready=1, team=team, ally=self.s.bot_ally, mode=1, sync=1, side=side)
@@ -1135,10 +1164,15 @@ class LobbyClient:
             if b.passworded != (self.privacy == "private"):
                 self.leave_battle("switching to a %s room" % self.privacy)
             elif not b.passworded and not self.pending:
-                n = len(self.humans())
-                if self.playing() and n >= self.s.seat_spectate_at:
-                    self.set_seat(False, "%d humans playing" % n)
-                elif not self.playing() and n < self.s.seat_play_below:
+                humans = self.humans()
+                n = len(humans)
+                # Everyone ready means a start is near: spectate for it.
+                all_ready = bool(humans) and all(self.statuses[h].get("ready") for h in humans)
+                if self.playing() and (n >= self.s.seat_spectate_at or all_ready):
+                    self.set_seat(False, "everyone is ready" if all_ready and n < self.s.seat_spectate_at
+                                  else "%d humans playing" % n)
+                elif not self.playing() and n < self.s.seat_play_below and not all_ready \
+                        and now >= self.seat_hold_until:
                     self.set_seat(True, "%d humans playing" % n)
         if self.state in ("waiting", "countdown") and self.boss and not self.pending \
                 and now >= self.quiet_until:
