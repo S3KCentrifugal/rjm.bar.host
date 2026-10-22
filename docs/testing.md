@@ -75,6 +75,8 @@ with lobby lines and a fake clock. It covers:
   for a minute, not for `!startpos` or chat), playing again after the game;
 - bots named as Chobby with simple AI names off (`BARbstable(1)`), side 2
   (Random) by default, cycling when `BARHOST_BOT_SIDES` is set;
+  `BARHOST_BOT_SETUP` sent after every add (setup, more bots), not after
+  removals;
 - `!public` / `!private` (`Privacy`): the choice kept across a restart, a
   private room asked of the region manager with `!privatehost`, joined with
   its password, spectated, the password PM'd; leaving the other kind of room

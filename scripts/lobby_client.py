@@ -82,6 +82,8 @@ Settings (environment):
   BARHOST_BOT_AI_VERSION  the AI version in the bots' names, as Chobby shows
                           them with simple AI names off (stable: BARbstable(1))
   BARHOST_BOT_PROFILE     optional JSON sent as !aiProfile for every bot
+  BARHOST_BOT_SETUP       ';'-separated chat commands sent each time after the
+                          client adds bots, e.g. "!setallaibonus 50"
   BARHOST_MIN_HUMANS      humans needed before an auto-start (1; 0 = never)
   BARHOST_START_DELAY     countdown in seconds once all are ready (20)
   BARHOST_POSTGAME_DELAY  no auto-start for this many seconds after a game (60)
@@ -184,6 +186,7 @@ class Settings:
         # "<shortName> <version> (<n>)" without spaces, e.g. BARbstable(1).
         self.bot_ai_version = g("BARHOST_BOT_AI_VERSION", "stable")
         self.bot_profile = g("BARHOST_BOT_PROFILE")
+        self.bot_setup = [c.strip() for c in g("BARHOST_BOT_SETUP").split(";") if c.strip()]
         self.privacy = g("BARHOST_ROOM_PRIVACY", "public")
         if self.privacy not in ("public", "private"):
             raise SystemExit("BARHOST_ROOM_PRIVACY must be public or private")
@@ -836,6 +839,11 @@ class LobbyClient:
         if self.s.bot_profile:
             for a in adds:
                 self.say("!aiProfile %s %s" % (a[1], self.s.bot_profile))
+        if adds:
+            # e.g. !setallaibonus 50: it applies to the AIs in the room, so it
+            # follows every add (setup, an AI switch, more bots).
+            for c in self.s.bot_setup:
+                self.say(c)
 
     def leave_battle(self, why):
         for name in self.my_bots():

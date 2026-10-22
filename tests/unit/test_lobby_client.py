@@ -168,6 +168,21 @@ class Setup(Harness):
         last = [lc.unpack_battle_status(x.split(" ")[1]) for x in sent if x.startswith("MYBATTLESTATUS")][-1]
         self.assertEqual((last["mode"], last["sync"]), (1, 1))
 
+    def test_bot_setup_follows_every_add(self):
+        self.c = self.client(BARHOST_BOT_SETUP="!setallaibonus 50", BARHOST_FOLLOW=OWNER)
+        sent = self.boss_and_setup()
+        adds = [i for i, x in enumerate(sent) if x.startswith("ADDBOT")]
+        self.assertIn("SAYBATTLE !setallaibonus 50", sent)
+        self.assertGreater(sent.index("SAYBATTLE !setallaibonus 50"), adds[-1])
+        for x in sent:                                      # the server echoes the bots
+            if x.startswith("ADDBOT "):
+                w = x.split(" ")
+                self.feed("ADDBOT 12 %s %s %s 0 %s" % (w[1], ME, w[2], w[4]))
+        self.feed("SAIDPRIVATE %s !bots 10" % OWNER)
+        self.assertIn("SAYBATTLE !setallaibonus 50", self.run_for(30))   # again after more bots
+        self.feed("SAIDPRIVATE %s !bots 4" % OWNER)
+        self.assertNotIn("SAYBATTLE !setallaibonus 50", self.run_for(30))  # removing only
+
     def test_sides_cycle_when_set(self):
         self.c = self.client(BARHOST_BOT_SIDES="0,1")
         bots = [x.split(" ") for x in self.boss_and_setup() if x.startswith("ADDBOT")]
