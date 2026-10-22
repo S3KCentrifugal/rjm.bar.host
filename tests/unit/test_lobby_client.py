@@ -187,9 +187,43 @@ class Setup(Harness):
         gaps = [b - a for a, b in zip(times, times[1:])]
         self.assertTrue(all(g >= lc.COMMAND_SPACING for g in gaps), gaps)
 
-    def test_sets_up_without_boss_confirmation(self):
+    def test_leaves_without_boss_confirmation(self):
         self.join()
         sent = self.run_for(60)
+        self.assertIn("SAYBATTLE !boss " + ME, sent)
+        self.assertIn("LEAVEBATTLE", sent)
+        self.assertFalse([x for x in sent if x.startswith("ADDBOT") or x.startswith("SAYBATTLE !preset")])
+
+
+class Vacancy(Harness):
+    """BAR's server hides other rooms' members, so a room is judged free only
+    from inside it; an occupied room is left untouched and not retried."""
+
+    def test_an_occupied_room_is_left_without_a_word(self):
+        self.join()
+        self.feed("CLIENTBATTLESTATUS Alice %d 0" % lc.battle_status(mode=1, sync=1))
+        sent = self.run_for(10)
+        self.assertIn("LEAVEBATTLE", sent)
+        self.assertFalse([x for x in sent if x.startswith("SAYBATTLE")])     # no !boss, no setup
+        self.assertFalse([x for x in self.run_for(30) if x.startswith("JOINBATTLE 12 ")])
+
+    def test_a_room_with_someone_elses_bots_is_left(self):
+        self.join()
+        self.feed("ADDBOT 12 Scav1 Alice %d 0 ScavengersAI" % lc.battle_status(team=1, ally=1, mode=1, sync=1))
+        self.assertIn("LEAVEBATTLE", self.run_for(10))
+
+    def test_boss_granted_before_the_check_still_waits_for_it(self):
+        self.join()
+        self.feed("SAIDBATTLEEX %s * Boss mode enabled for %s" % (HOST, ME),
+                  "CLIENTBATTLESTATUS Alice %d 0" % lc.battle_status(mode=1, sync=1))
+        sent = self.run_for(10)
+        self.assertIn("LEAVEBATTLE", sent)
+        self.assertFalse([x for x in sent if x.startswith("SAYBATTLE !rename") or x.startswith("SAYBATTLE !preset")
+                          or x.startswith("ADDBOT")])
+
+    def test_a_free_room_is_claimed(self):
+        sent = self.boss_and_setup()
+        self.assertIn("SAYBATTLE !boss " + ME, sent)
         self.assertEqual(len([x for x in sent if x.startswith("ADDBOT")]), 8)
 
     def test_battle_status_round_trip(self):
@@ -549,13 +583,12 @@ class Guard(Harness):
         self.assertIn("SAYBATTLE !boss " + FRIEND, sent)
         self.assertFalse([x for x in sent if x == "SAYBATTLE !boss Stranger"])
 
-    def test_bosses_authorised_users_already_in_the_room(self):
-        self.join()
+    def test_bosses_authorised_users_who_rejoin(self):
+        self.boss_and_setup()
+        self.feed("JOINEDBATTLE 12 " + OWNER, "LEFTBATTLE 12 " + OWNER)
+        self.run_for(5)
         self.feed("JOINEDBATTLE 12 " + OWNER)
-        sent = self.run_for(2)
-        self.assertNotIn("SAYBATTLE !boss " + OWNER, sent)      # not boss yet
-        self.feed("SAIDBATTLEEX %s * Boss mode enabled for %s" % (HOST, ME))
-        self.assertIn("SAYBATTLE !boss " + OWNER, self.run_for(10))
+        self.assertIn("SAYBATTLE !boss " + OWNER, self.run_for(5))
 
 
 class RingHint(Harness):

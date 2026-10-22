@@ -88,6 +88,9 @@ with lobby lines and a fake clock. It covers:
 - the engine launch with the battle's address and script password;
 - the post-game cooldown;
 - taking another room when kicked, and leaving on a failed download;
+- the vacancy check (`Vacancy`): an occupied room (a member, or another's
+  bots) left without a word and not retried, even if boss came first; a free
+  room claimed; no setup without boss confirmation;
 - follow mode with a server that reports every room's joins (`Follow`), and
   with one that does not, as BAR's does for this client (`FollowUnseen`):
   `!status` and `!join` explain it, `!room` by number or host name (with a

@@ -111,6 +111,7 @@ FOUNDER_RE = re.compile(r"^Host\[([A-Za-z]+)(\d+)\]\[\d+\]$")
 # (BYAR-Chobby battle_list_window.lua, HostBattle).
 MANAGER_RE = re.compile(r"^Host\[([A-Za-z]+)\d+\]$")
 PRIVATE_WAIT = 30           # seconds to wait for the private room to appear
+VACANCY_WAIT = 3            # seconds after joining before judging a room free
 MAP_WAIT = 20               # seconds for the autohost to switch to a !map before skipping it
 VOTE_RE = re.compile(r'called a vote for command "([^"]*)"')
 # A game about to start (a player's command, or the autohost's vote): a
@@ -311,6 +312,8 @@ class LobbyClient:
         self.map_skips = 0          # maps skipped in a row (not accepted or not downloadable)
         self.ring_hint_after = 0.0  # room mode: no ring hint before this time
         self.seat_hold_until = 0.0  # public room: no return to a player seat before this
+        self.vacant = None          # room mode: the joined room was found free
+        self.vacancy_check_at = None
         self.room_password_now = ""  # the private room's password, once in it
 
     def status(self) -> dict:
@@ -519,10 +522,11 @@ class LobbyClient:
         # Join as a player first: SPADS grants boss to players (Chobby does the same).
         self.my_status = battle_status(ready=0, team=0, ally=0, mode=1, sync=2)
         self.pending.append(("MYBATTLESTATUS", self.my_status, 0))
-        self.say("!boss " + self.s.login)
-        # SPADS runs a command at once when nobody else can vote; if its "Boss
-        # mode enabled" reply is missed, set the room up anyway.
-        self.boss_deadline = self.now() + 20
+        # BAR's server does not say who is in other rooms (NOT_SEEN), so a room
+        # can only be known to be free from inside it: its members arrive as
+        # CLIENTBATTLESTATUS just after JOINBATTLE. Check before claiming it.
+        self.vacant = None
+        self.vacancy_check_at = self.now() + VACANCY_WAIT
 
     def fetched(self, b: Battle, ok: bool):
         if b is not self.battle:
@@ -617,7 +621,9 @@ class LobbyClient:
         if user == self.battle.founder and re.search(r"Boss mode enabled for %s\b" % re.escape(self.s.login), msg):
             if not self.boss:
                 self.boss = True
-                self.configure_room()
+                # Room mode sets up only a room it has found free.
+                if self.s.mode != "room" or self.vacant:
+                    self.configure_room()
             return
         vote_cmd = VOTE_RE.search(msg) if user == self.battle.founder else None
         starting = (user not in (self.battle.founder, self.s.login) and START_RE.match(msg.strip())) or \
@@ -1123,11 +1129,24 @@ class LobbyClient:
                 and self.battle and self.state in ("waiting", "countdown"):
             log("the autohost did not switch to %s; skipping it" % self.map_wanted)
             self.skip_map()
+        if self.s.mode == "room" and self.state == "setup" and self.battle \
+                and self.vacancy_check_at is not None and now >= self.vacancy_check_at:
+            self.vacancy_check_at = None
+            b = self.battle
+            others = sorted(n for n in b.users | set(self.statuses) if n not in (b.founder, self.s.login))
+            bots = sorted(n for n, x in b.bots.items() if x["owner"] != self.s.login)
+            if others or bots:
+                self.leave_battle("in use (%s)" % ", ".join(others + bots))
+            else:
+                self.vacant = True
+                self.say("!boss " + self.s.login)
+                self.boss_deadline = now + 20
+                if self.boss:               # granted before the check
+                    self.configure_room()
         if self.state == "setup" and self.boss_deadline is not None and now >= self.boss_deadline \
-                and not self.pending:
-            log("no boss confirmation; setting the room up anyway")
-            self.boss = True
-            self.configure_room()
+                and not self.pending and not self.boss:
+            # Never set up a room this client was not made boss of.
+            self.leave_battle("the autohost did not make me boss")
         if self.state == "lobby" and now >= self.next_join:
             self.next_join = now + 5
             if self.s.mode == "follow":

@@ -65,7 +65,11 @@ The table leaves out two cases:
      Chobby's "passworded private battle" does, and joins with the password
      it answers). A `BARHOST_FOLLOW` user switches with `!public` /
      `!private` by PM; the choice is kept on the data volume across restarts.
-  2. Joins as a player, makes itself boss, sends the room setup commands
+  2. Joins as a player and checks the room is free: BAR's server shows a
+     room's members only to its members, so the client looks from inside and
+     leaves at once, untouched, if anyone or any other bot is there. It
+     never sets up a room it was not made boss of. Then it makes itself
+     boss, sends the room setup commands
      (`BARHOST_ROOM_SETUP`, e.g. `!bSet experimentallegionfaction 1`) and
      adds bots it owns. In a private room it then spectates and PMs the
      password. In a public room it stays a player until 8 humans play, then
