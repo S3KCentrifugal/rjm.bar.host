@@ -259,6 +259,9 @@ PROMOTE_MARGIN = 5          # past the cooldown the autohost names
 # !stop while this engine is in the game: it leaves, which resigns the bots.
 RESIGN_SAY = "%s ended this game: resigning the AI bots."
 RESIGN_KILL_AFTER = 20
+# !rehost: end the game (as !stop), leave the room, take a new one.
+REHOST_GAME_SAY = "%s ended this game: resigning the AI bots and moving to a new room."
+REHOST_SAY = "%s asked me to rehost: moving to a new room."
 
 # SPADS kicks clients that talk too fast: at most one command per this many s.
 COMMAND_SPACING = 1.5
@@ -465,6 +468,7 @@ class LobbyClient:
         # ended since the client started, until the archive's index has them.
         self.current_game = None
         self.finished_games = []
+        self.rehost_due = None      # !rehost: the user, until the room is left
         # Points the engine at a channel's release (install_ai.activate_channel);
         # returns its tag. The default, for tests, only reports the known tag.
         self.activate = activate or (lambda channel: self.ai_releases.get(channel, ""))
@@ -1302,6 +1306,24 @@ class LobbyClient:
         elif cmd == "!help":
             for line in self.help_lines():
                 self.tell(user, line)
+        elif cmd == "!rehost" and self.s.mode == "room":
+            if self.rehost_due is not None:
+                self.tell(user, "Already rehosting.")
+            elif self.game_running() and hasattr(self.game_proc, "terminate"):
+                self.rehost_due = user
+                if self.resign_kill_at is None:
+                    log("rehosting at %s's request: resigning the bots first" % user)
+                    self.game_proc.terminate()
+                    self.resign_kill_at = self.now() + RESIGN_KILL_AFTER
+                    self.say(REHOST_GAME_SAY % user)
+                self.tell(user, "Ending the game (resigning the bots), then moving to a new room.")
+            elif self.battle is None:
+                self.tell(user, "I am not in a room; I am already looking for one.")
+            else:
+                self.rehost_due = user
+                self.say(REHOST_SAY % user)
+                self.finish_rehost()
+                self.tell(user, "Left room; taking a new one.")
         elif cmd == "!stop":
             b = self.battle
             if not b or not (self.state == "ingame" or self.users.get(b.founder, 0) & 1):
@@ -1406,7 +1428,8 @@ class LobbyClient:
                  ai]
         if self.s.mode == "room":
             lines.append("!public / !private: the kind of room I host (I PM you a private room's password). "
-                         "!stop: in a game, resign the bots (ends it). !help: this list.")
+                         "!stop: in a game, resign the bots (ends it). !rehost: end any game, leave this room "
+                         "and host a new one. !help: this list.")
         else:
             lines.append("!room <room number, host, player or title> [password], !join [password], !leave: "
                          "which room I follow you into. !stop: in a game, resign the bots. !help: this list.")
@@ -1776,6 +1799,27 @@ class LobbyClient:
             log("could not write ended.json in %s: %s" % (run_dir, e))
         self.archive(Path(run_dir))
 
+    def finish_rehost(self):
+        """!rehost, once no engine of ours is in a game: forget the game, leave
+        the room (it is not rejoined: join_attempted) and look for another
+        at once, with the next map of the rotation if a game was played."""
+        user, self.rehost_due = self.rehost_due, None
+        played = self.game_proc is not None
+        if self.game_proc is not None and hasattr(self.game_proc, "close"):
+            self.game_proc.close()
+        self.game_proc = None
+        self.resign_kill_at = None
+        if self.battle is not None:
+            self.state = "waiting"
+            self.leave_battle("rehosting for %s" % user)
+        self.state = "lobby"
+        self.next_join = self.now() + 3
+        if played and self.s.map_rotation:
+            self.map_skips = 0
+            self.advance_map()
+        if played:
+            self.tell(user, "Game over for my bots; left the room, taking a new one.")
+
     def resign(self, user):
         """Resign the bots: this engine hosts them, so it leaves the game. BAR
         then counts the bots' teams as uncontrolled and wipes out their ally
@@ -1831,6 +1875,10 @@ class LobbyClient:
                 self.flush_pending()
                 return
             self.log_engine_exit()
+            if self.rehost_due is not None:
+                self.finish_rehost()    # !rehost: the engine has left; leave the room too
+                self.flush_pending()
+                return
             if self.battle and self.users.get(self.battle.founder, 0) & 1:
                 self.flush_pending()
                 return     # our engine ended but the game goes on: wait it out

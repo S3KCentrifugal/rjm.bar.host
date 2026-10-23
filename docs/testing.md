@@ -80,7 +80,11 @@ with lobby lines and a fake clock. It covers:
   / `!help` (`GamesAndPerf`): newest first with the game running as 0 and
   live lag, archived games from the index, a game ended but not yet
   archived, the count, live and archived reports, unknown numbers and
-  words, no lag data, the help lines, strangers refused
+  words, no lag data, the help lines, strangers refused; `!rehost`
+  (`Rehost`): without a game it leaves at once and joins another room, in a
+  game the bots resign first (the engine killed if it does not quit) and the
+  room is left once the engine is out, with the next map; authorised users
+  only; not in follow mode
   (`test_cgroup_perf.py`: cgroup v2 and v1 counters, cores average, p95
   and 1 s / 10 s peaks, throttled share and time, memory peak, samples and
   the summary CSV, nothing readable);

@@ -1300,6 +1300,79 @@ class StartBoxes(Harness):
         self.assertEqual(self.client(BARHOST_START_BOXES_FILE=self.file + ".missing").s.start_boxes, {})
 
 
+class Rehost(Harness):
+    """!rehost: end any game (the bots resign: the engine leaves), leave the
+    room, and take a new one (never the room just left)."""
+
+    OTHER = "Host[EU1][4]"
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_FOLLOW=OWNER, BARHOST_MAP_ROTATION="Map A;Map B;Map C")
+
+    def pm(self, text, user=OWNER, wait=5):
+        self.feed("SAIDPRIVATE %s %s" % (user, text))
+        return self.run_for(wait)
+
+    def set_up(self):
+        sent = self.boss_and_setup()
+        for x in sent:
+            if x.startswith("ADDBOT "):
+                w = x.split(" ")
+                self.feed("ADDBOT 12 %s %s %s 0 %s" % (w[1], ME, w[2], w[4]))
+        self.feed("ADDUSER %s XX 0 2" % self.OTHER, opened("14", founder=self.OTHER))
+
+    def joins(self, sent):
+        return [x.split(" ")[1] for x in sent if x.startswith("JOINBATTLE ")]
+
+    def test_without_a_game_it_moves_at_once(self):
+        self.set_up()
+        sent = self.pm("!rehost", wait=20)
+        self.assertIn("SAYBATTLE %s asked me to rehost: moving to a new room." % OWNER, sent)
+        self.assertEqual(len([x for x in sent if x.startswith("REMOVEBOT")]), 8)
+        self.assertIn("LEAVEBATTLE", sent)
+        self.assertLess(sent.index("SAYBATTLE %s asked me to rehost: moving to a new room." % OWNER),
+                        sent.index("LEAVEBATTLE"))
+        self.assertEqual(self.joins(sent), ["14"])                  # not room 12 again
+        self.assertIsNone(self.c.battle)
+        self.assertEqual(self.c.map_index, 0)                        # no game was played
+
+    def test_in_a_game_the_bots_resign_then_it_moves(self):
+        self.set_up()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        before = self.c.map_index
+        sent = self.pm("!rehost")
+        self.assertEqual(getattr(self.proc, "terminated", 0), 1)
+        self.assertIn("SAYBATTLE %s ended this game: resigning the AI bots and moving to a new room." % OWNER, sent)
+        self.assertNotIn("LEAVEBATTLE", sent)                         # not while the engine is in the game
+        self.assertTrue([x for x in sent if x.startswith("SAYPRIVATE %s Ending the game" % OWNER)])
+        self.assertEqual(self.pm("!rehost"), ["SAYPRIVATE %s Already rehosting." % OWNER])
+        self.proc.code = 0                                            # the engine left; the game goes on
+        sent = self.run_for(20)
+        self.assertIn("LEAVEBATTLE", sent)
+        self.assertEqual(self.joins(sent), ["14"])
+        self.assertTrue([x for x in sent if x.startswith("SAYPRIVATE %s Game over for my bots" % OWNER)])
+        self.assertEqual(self.c.map_index, (before + 1) % 3)          # the next map in the next room
+        self.assertIsNone(self.c.game_proc)
+
+    def test_an_engine_that_does_not_quit_is_killed(self):
+        self.set_up()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.pm("!rehost")
+        self.run_for(20)
+        self.assertEqual(getattr(self.proc, "killed", 0), 1)
+
+    def test_only_authorised_users(self):
+        self.set_up()
+        self.assertFalse([x for x in self.pm("!rehost", user="Troll", wait=20) if x == "LEAVEBATTLE"])
+        self.assertIsNotNone(self.c.battle)
+
+    def test_follow_mode_has_no_rehost(self):
+        self.c = self.client(BARHOST_CLIENT_MODE="follow", BARHOST_FOLLOW=OWNER)
+        self.log_in()
+        self.assertTrue([x for x in self.pm("!rehost") if "Unknown command !rehost" in x])
+
+
 class StopRequest(Harness):
     """An authorised user's !stop: while this engine is in the game it leaves,
     which resigns the bots; if it is not (the game goes on without it), the
