@@ -29,25 +29,34 @@ room (the client hosts by itself)
      `!bSet experimentallegionfaction 1`). A BARHOST_FOLLOW user switches
      with `!public` / `!private` by PM; the choice survives restarts
      (BARHOST_STATE_FILE).
-  3. Once boss, spectate: a headless host never plays. Settings and maps
-     are a boss's; only adding bots (BAR's server takes ADDBOT only from
-     players) takes a player seat, for the adds alone. A start called while
-     it holds that seat (`!start`, `!cv start`, `!forcestart`, a vote for
-     one) makes it spectate at once.
+  3. Once boss, spectate: a headless host never plays a game. Settings and
+     maps are a boss's; adding bots (BAR's server takes ADDBOT only from
+     players) takes a player seat, for the adds alone. With
+     BARHOST_BOOST_BELOW set, it also sits as a player while few humans
+     play, so the battle list shows the room busier, and spectates again
+     from BARHOST_BOOST_UNTIL humans or a full room. Everyone ready, or a
+     start called (`!start`, `!cv start`, `!forcestart`, a vote for one),
+     makes it spectate at once, so its engine never joins as a player.
   4. While boss, give boss to BARHOST_FOLLOW users as they join (`!boss`),
      and end at once (`!ev`) any vote to unboss everyone, this client, or a
-     BARHOST_FOLLOW user. A BARHOST_FOLLOW user switches the bots' AI with
+     BARHOST_FOLLOW user ("Shame on you, <caller>!" when the vote was
+     against this client). BARHOST_AUTO_BOSS users are bossed as they join
+     and guarded the same way, but get no commands. A BARHOST_FOLLOW
+     user switches the bots' AI with
      `!barb` / `!smrt` (kept across restarts; done as a player, after the
-     game if one is on), and `!stop` asks the players to vote `!cv stop`
-     (a spectator may not stop a game). Each joiner gets BARHOST_WELCOME
-     privately.
+     game if one is on), and `!stop` resigns the bots during a game (its
+     engine leaves the game). Each joiner gets BARHOST_WELCOME privately.
      A player's "bonus" gets one line on voting the AIs' bonus (all, or one),
      once a minute; a passed bonus vote is applied to every AI
      (`!setallaibonus`) and kept for the room's later bot adds.
      When a player rings another (`!ring <name>`), say
      how to vote an away player to spectator, at most once a minute; the room
      decides.
-  5. When enough humans are in, ready and synced, count down and `!cv start`.
+  5. When enough humans are in, ready and synced, say how to vote the start
+     (`!cv start`). It never starts a game itself: the players vote it.
+     With BARHOST_PROMOTE_EVERY set, while a public room's player team is
+     not full and no start is near, PM the autohost `!promote` (it
+     advertises the room in #main) each time its cooldown allows.
   6. When the autohost's game starts, launch spring-headless as a spectator
      client of it. The engine runs the bots, because this client owns them.
   7. After the game, stay in the room and go back to 5. If the room is lost,
@@ -60,6 +69,10 @@ start script) follow BYAR-Chobby's liblobby and battle list window, where the
 Settings (environment):
   BARHOST_CLIENT_MODE     room (default) or follow
   BARHOST_FOLLOW          follow mode: ','-separated users to follow and obey
+  BARHOST_AUTO_BOSS       room mode: ','-separated users made boss when they
+                          join and guarded from unboss votes, as
+                          BARHOST_FOLLOW users are; they get no commands
+                          (optional)
   BARHOST_LOBBY_LOGIN, BARHOST_LOBBY_PASSWORD   the account (password falls
         back to SPADS_LOBBY_PASSWORD, login to SPADS_LOBBY_LOGIN)
   BARHOST_LOBBY_HOST, BARHOST_LOBBY_PORT        server4.beyondallreason.info:8200
@@ -92,9 +105,18 @@ Settings (environment):
                           client adds bots, e.g. "!setallaibonus 50"
   BARHOST_FRIEND_JOINERS  room mode: send a friend request to each player who
                           joins the room, once per account (0; 1 = on)
-  BARHOST_MIN_HUMANS      humans needed before an auto-start (1; 0 = never)
-  BARHOST_START_DELAY     countdown in seconds once all are ready (20)
-  BARHOST_POSTGAME_DELAY  no auto-start for this many seconds after a game (60)
+  BARHOST_MIN_HUMANS      room mode: ready humans needed before the client says
+                          how to vote the game started (1; 0 = never). It
+                          never starts a game itself: the players vote it.
+  BARHOST_POSTGAME_DELAY  no start hint for this many seconds after a game (60)
+  BARHOST_BOOST_BELOW     room mode: take a player seat while fewer humans than
+                          this play, so the room lists more players (0 = never)
+  BARHOST_BOOST_UNTIL     ... and spectate again once this many humans play, or
+                          the room is full (7). In between, the seat is kept.
+  BARHOST_PROMOTE_EVERY   room mode: `!promote` a public room whose player team
+                          is not full, this many seconds apart (the autohost's
+                          promoteDelay; its "Please wait" answer sets the next
+                          try). 0 = never (default)
   BARHOST_OUT_DIR         games are written under $BARHOST_OUT_DIR/client/
   BARHOST_STATUS_FILE     JSON status, rewritten on every change
                           (/tmp/lobby-client-status.json)
@@ -151,6 +173,25 @@ SETALL_RE = re.compile(r"^!setallaibonus\s+\d+\s*$", re.IGNORECASE)
 # vote, and leave it to them. At most once a minute.
 STOP_HINT = "%s asks to end this game: a player can type !cv stop, then the others !vote y."
 STOP_HINT_EVERY = 60
+# Everyone ready: the players vote the start (the client never starts a game).
+START_HINT = "Everyone is ready. To start the game, call a vote with !cv start, then the others !vote y."
+START_HINT_EVERY = 60
+# After a start is called or everyone is ready, a start may be under way: no
+# boost seat and no move to another room for this long.
+START_HOLD = 120
+# Said after ending (!ev) a vote that would unboss this client.
+SHAME_SAY = "Shame on you, %s!"
+CALLER_RE = re.compile(r"(\S+) called a vote for command")
+# The autohost's answers to !promote (SPADS spads.pl hPromote, :10963): the
+# cooldown left (secToTime, :1096: "4 minutes and 10 seconds"), done, or
+# refused (closed, disabled, locked, full, enough players).
+PROMOTE_WAIT_RE = re.compile(r"Please wait (.+?) before promoting battle")
+PROMOTE_UNIT_RE = re.compile(r"(\d+) (year|day|hour|minute|second)s?")
+PROMOTE_UNITS = {"year": 31536000, "day": 86400, "hour": 3600, "minute": 60, "second": 1}
+PROMOTE_DONE = "Promoting battle in"
+PROMOTE_REFUSED_RE = re.compile(r"Unable to promote battle|Promote command is disabled")
+PROMOTE_RETRY = 120         # after a refusal, or no answer
+PROMOTE_MARGIN = 5          # past the cooldown the autohost names
 # !stop while this engine is in the game: it leaves, which resigns the bots.
 RESIGN_SAY = "%s ended this game: resigning the AI bots."
 RESIGN_KILL_AFTER = 20
@@ -196,6 +237,9 @@ class Settings:
         self.follow = {u.strip() for u in g("BARHOST_FOLLOW").replace(";", ",").split(",") if u.strip()}
         if self.mode == "follow" and not self.follow:
             raise SystemExit("follow mode needs BARHOST_FOLLOW (the users to follow)")
+        # Room mode: trusted players made boss on joining; unlike BARHOST_FOLLOW
+        # they cannot command the client.
+        self.auto_boss = {u.strip() for u in g("BARHOST_AUTO_BOSS").replace(";", ",").split(",") if u.strip()}
         self.room_name = g("BARHOST_ROOM_NAME")
         # Room mode: said privately in the room to each player who joins.
         self.welcome = g("BARHOST_WELCOME")
@@ -235,8 +279,13 @@ class Settings:
         # per account (Teiserver c.user.add_friend <account id>).
         self.friend_joiners = g("BARHOST_FRIEND_JOINERS", "0") == "1"
         self.min_humans = int(g("BARHOST_MIN_HUMANS", "1"))
-        self.start_delay = int(g("BARHOST_START_DELAY", "20"))
         self.postgame_delay = int(g("BARHOST_POSTGAME_DELAY", "60"))
+        # Room mode: a player seat while few humans play (the battle list
+        # counts players), a spectator again from boost_until or a full room.
+        self.boost_below = int(g("BARHOST_BOOST_BELOW", "0"))
+        self.boost_until = int(g("BARHOST_BOOST_UNTIL", "7"))
+        # Room mode: !promote while the player team is not full (0 = never).
+        self.promote_every = int(g("BARHOST_PROMOTE_EVERY", "0"))
         self.engine_version = g("BAR_ENGINE_VERSION")
         self.out_dir = Path(g("BARHOST_OUT_DIR", "/bar/out")) / "client"
         self.status_file = Path(g("BARHOST_STATUS_FILE", "/tmp/lobby-client-status.json"))
@@ -294,6 +343,7 @@ class Battle:
         self.users = {founder}
         self.spectators = 1
         self.locked = False
+        self.max_players = 0  # the room's player cap (BATTLEOPENED), 0 = unknown
         self.bots = {}  # name -> {"owner", "status"}
 
 
@@ -357,7 +407,7 @@ class LobbyClient:
     # -- state -------------------------------------------------------------
 
     def reset(self):
-        self.state = "connecting"   # connecting, login, lobby, joining, setup, waiting, countdown, ingame
+        self.state = "connecting"   # connecting, login, lobby, joining, setup, waiting, ingame
         self.users = {}             # name -> CLIENTSTATUS int
         self.battles = {}
         self.battle = None
@@ -367,7 +417,6 @@ class LobbyClient:
         self.boss = False
         self.pending = []           # chat/commands waiting for the flood spacing
         self.last_sent = 0.0
-        self.countdown_end = None
         self.join_attempted = set()
         self.next_join = 0.0
         # A running engine and the game count survive a reconnect.
@@ -377,7 +426,11 @@ class LobbyClient:
         self.need_fetch = None      # a Battle whose content the I/O layer must fetch
         self.synced = False
         self.boss_deadline = None
-        self.quiet_until = 0.0      # no auto-start before this (after a game)
+        self.quiet_until = 0.0      # no start hint before this (after a game)
+        self.start_hint_given = False  # said for this time everyone is ready
+        self.start_hint_after = 0.0
+        self.start_hold_until = 0.0  # room mode: a start may be under way until then
+        self.promote_after = 0.0    # room mode: no !promote before this (its cooldown)
         # follow mode; survives a reconnect
         self.want_bots = getattr(self, "want_bots", self.s.bot_count)
         self.bot_ai = getattr(self, "bot_ai", self.s.bot_ai)
@@ -409,7 +462,7 @@ class LobbyClient:
         humans = self.humans()
         return {
             "state": self.state, "mode": self.s.mode, "login": self.s.login, "games": self.games,
-            "follow": sorted(self.s.follow), "wantBots": self.want_bots, "botAI": self.bot_ai,
+            "follow": sorted(self.s.follow), "autoBoss": sorted(self.s.auto_boss), "wantBots": self.want_bots, "botAI": self.bot_ai,
             "paused": self.paused, "privacy": self.privacy if self.s.mode == "room" else None,
             "battle": None if not b else {
                 "id": b.id, "founder": b.founder, "title": b.title, "map": b.map, "game": b.game,
@@ -418,7 +471,6 @@ class LobbyClient:
                 "humans": [{"name": n, **{k: self.statuses.get(n, {}).get(k) for k in ("ready", "sync", "ally")}}
                            for n in humans],
             },
-            "countdown": None if self.countdown_end is None else max(0, round(self.countdown_end - self.now())),
             "lastError": self.last_error,
         }
 
@@ -540,7 +592,8 @@ class LobbyClient:
         rest = p[11].split("\t")
         rest += [""] * (5 - len(rest))
         bid, founder, ip, port, passworded = p[1], p[4], p[5], p[6], p[8] == "1"
-        self.battles[bid] = Battle(bid, founder, ip, port, passworded, *rest[:5])
+        self.battles[bid] = b = Battle(bid, founder, ip, port, passworded, *rest[:5])
+        b.max_players = int(p[7]) if p[7].isdigit() else 0
 
     def on_BATTLECLOSED(self, line):
         bid = line.split(" ")[1]
@@ -761,8 +814,11 @@ class LobbyClient:
         starting = (user not in (self.battle.founder, self.s.login) and START_RE.match(msg.strip())) or \
             (vote_cmd and re.match(r"(?:force)?start\b", vote_cmd.group(1), re.IGNORECASE))
         if starting and self.s.mode == "room":
+            self.start_hold_until = self.now() + START_HOLD   # no boost seat or move while it starts
             if self.playing():
                 self.set_seat(False, "a game start was called", first=True)
+        if user == self.battle.founder and PROMOTE_DONE in msg:
+            self.promote_answer(msg)        # someone else's !promote: the cooldown restarts
         passed = BONUS_PASSED_RE.search(msg) if user == self.battle.founder else None
         if passed and self.s.mode == "room" and self.boss and 0 <= int(passed.group(1)) <= 100:
             self.voted_bonus = int(passed.group(1))
@@ -787,20 +843,26 @@ class LobbyClient:
         if user == self.battle.founder and self.boss and m and self.protected_from(m.group(1)):
             log("ending the vote \"%s\"" % m.group(1))
             self.pending.insert(0, "!ev")       # ahead of anything queued
+            w = m.group(1).split()
+            caller = CALLER_RE.search(msg)
+            if caller and (len(w) == 1 or w[1].lower() == self.s.login.lower()):
+                self.pending.insert(1, SHAME_SAY % caller.group(1))   # it would unboss this client
 
     def protected_from(self, command: str) -> bool:
-        """`unboss` alone (everyone), or of this client or an authorised user."""
+        """`unboss` alone (everyone), or of this client, an authorised user or
+        an auto-boss user."""
         w = command.split()
         if not w or w[0].lower() != "unboss":
             return False
-        guarded = {self.s.login.lower()} | {u.lower() for u in self.s.follow}
+        guarded = {self.s.login.lower()} | {u.lower() for u in self.s.follow | self.s.auto_boss}
         return len(w) == 1 or w[1].lower() in guarded
 
     def boss_authorised(self, names):
-        """Room mode, once boss: give boss to the authorised users in `names`."""
+        """Room mode, once boss: give boss to the authorised and auto-boss
+        users in `names`."""
         if self.s.mode != "room" or not self.boss:
             return
-        for n in sorted(set(names) & self.s.follow):
+        for n in sorted(set(names) & (self.s.follow | self.s.auto_boss)):
             log("bossing %s" % n)
             self.say("!boss " + n)
 
@@ -873,7 +935,7 @@ class LobbyClient:
         b = self.battle
         self.boss_deadline = None
         log("boss in room %s; setting it up" % b.id)
-        # A headless host never plays: it took a player seat only to be made
+        # A headless host never plays a game: it took a player seat to be made
         # boss (as Chobby, which forces a player seat "so he can boss self",
         # battle_list_window.lua HostBattle). Settings and maps are a boss's,
         # not a player's; only adding bots needs the seat, briefly (sync_bots).
@@ -946,6 +1008,8 @@ class LobbyClient:
             return
         used = {st["team"] for n, st in self.statuses.items() if st.get("mode") == 1 and n != self.s.login}
         used |= {x["status"]["team"] for x in b.bots.values()}
+        if self.playing():                  # its own seat (boosting) is taken too
+            used.add(unpack_battle_status(self.my_status)["team"])
         names = set(b.bots)
         team, i = 1, 0      # team 0 stays free for the first human
         adds = []
@@ -1016,6 +1080,8 @@ class LobbyClient:
             req["until"] = self.now() + PRIVATE_WAIT
             log("%s is opening a private room" % user)
             return
+        if self.battle and user == self.battle.founder and self.promote_answer(msg):
+            return
         if user not in self.s.follow:
             return
         w = msg.split()
@@ -1069,7 +1135,7 @@ class LobbyClient:
             b = self.battle
             if b is None or b.passworded == (self.privacy == "private"):
                 self.tell(user, "OK: I host a %s room%s." % (self.privacy, " (as now)" if b else ""))
-            elif self.state in ("ingame", "countdown") or self.game_running():
+            elif self.state == "ingame" or self.game_running():
                 self.tell(user, "OK: a %s room after this game." % self.privacy)
             else:
                 self.tell(user, "OK: moving to a %s room." % self.privacy)
@@ -1206,7 +1272,6 @@ class LobbyClient:
         self.statuses = {}
         self.my_status = None
         self.pending = []
-        self.countdown_end = None
         self.need_fetch = None
         self.synced = False
         self.boss_deadline = None
@@ -1238,7 +1303,6 @@ class LobbyClient:
 
     def game_started(self):
         b = self.battle
-        self.countdown_end = None
         self.state = "ingame"
         self.games += 1
         log("game %d starting on %s:%s" % (self.games, b.ip, b.port))
@@ -1320,7 +1384,7 @@ class LobbyClient:
                 self.advance_map()
                 self.rotate_map()
         if self.map_wanted and self.map_deadline is not None and now >= self.map_deadline \
-                and self.battle and self.state in ("waiting", "countdown"):
+                and self.battle and self.state == "waiting":
             log("the autohost did not switch to %s; skipping it" % self.map_wanted)
             self.skip_map()
         if self.s.mode == "room" and self.state == "setup" and self.battle \
@@ -1371,29 +1435,84 @@ class LobbyClient:
         # only ever done from a room with no game in progress.
         if self.s.mode == "room" and self.battle and self.state == "waiting" and self.boss \
                 and not self.game_running() and not (self.users.get(self.battle.founder, 0) & 1):
-            if self.battle.passworded != (self.privacy == "private"):
+            if self.battle.passworded != (self.privacy == "private") and now >= self.start_hold_until:
                 self.leave_battle("switching to a %s room" % self.privacy)
-            elif self.playing() and not self.pending:
-                # Never left in a player seat: it is only for adding bots.
-                self.set_seat(False, "a headless host spectates")
-        if self.state in ("waiting", "countdown") and self.boss and not self.pending \
-                and now >= self.quiet_until:
-            if self.ready_to_start():
-                if self.countdown_end is None:
-                    self.countdown_end = now + self.s.start_delay
-                    self.state = "countdown"
-                    if self.playing():      # no idle commander in the game
-                        self.set_seat(False, "the game is about to start")
-                    self.say("Everyone is ready: starting in %d s." % self.s.start_delay)
-                elif now >= self.countdown_end:
-                    self.countdown_end = None
-                    self.state = "waiting"
-                    self.say("!cv start")
-            elif self.countdown_end is not None:
-                self.countdown_end = None
-                self.state = "waiting"
-                self.say("Countdown cancelled: waiting for everyone to be ready.")
+            elif self.battle.passworded == (self.privacy == "private") and not self.pending:
+                # The seat outside a bot add: a spectator, unless boosting.
+                want = self.boost_seat()
+                if want is True and not self.playing():
+                    self.set_seat(True, "boosting the room (%d playing)" % len(self.humans()))
+                elif want is False and self.playing():
+                    self.set_seat(False, "a headless host spectates")
+        # The players start the game by vote; the client only says how.
+        if self.s.mode == "room" and self.state == "waiting" and self.boss and now >= self.quiet_until:
+            if not self.ready_to_start():
+                self.start_hint_given = False
+            elif not self.start_hint_given and now >= self.start_hint_after:
+                self.start_hint_given = True
+                self.start_hint_after = now + START_HINT_EVERY
+                self.start_hold_until = now + START_HOLD
+                if self.playing():          # never an idle commander in the game
+                    self.set_seat(False, "everyone is ready", first=True)
+                self.say(START_HINT)
+        if self.promote_due():
+            self.promote_after = now + PROMOTE_RETRY    # until the autohost answers
+            log("promoting the room (%d playing)" % len(self.humans()))
+            self.pending.append(("SAYPRIVATE", self.battle.founder, "!promote"))
         self.flush_pending()
+
+    def promote_due(self) -> bool:
+        """Room mode: time to !promote a public room whose player team is not
+        full, with no game on or start near. By PM, so the room sees no
+        command and no cooldown answers."""
+        b = self.battle
+        if self.s.mode != "room" or self.s.promote_every <= 0 or not b or self.state != "waiting":
+            return False
+        now = self.now()
+        if now < self.promote_after or now < self.start_hold_until or b.passworded \
+                or self.game_running() or self.users.get(b.founder, 0) & 1:
+            return False
+        return not self.team_full() and not self.ready_to_start()
+
+    def promote_answer(self, msg) -> bool:
+        """The autohost's answer to a !promote: set when to try next."""
+        now = self.now()
+        wait = PROMOTE_WAIT_RE.search(msg)
+        if wait:
+            secs = sum(int(n) * PROMOTE_UNITS[u] for n, u in PROMOTE_UNIT_RE.findall(wait.group(1)))
+            self.promote_after = now + secs + PROMOTE_MARGIN
+        elif PROMOTE_DONE in msg:
+            self.promote_after = now + max(self.s.promote_every, 0) + PROMOTE_MARGIN
+        elif PROMOTE_REFUSED_RE.search(msg):
+            self.promote_after = now + PROMOTE_RETRY
+        else:
+            return False
+        return True
+
+    def team_full(self) -> bool:
+        """The room's player seats are all taken: humans, this client if it
+        plays, and the bots (the room's player limit counts them)."""
+        b = self.battle
+        seated = len(self.humans()) + len(b.bots) + (1 if self.playing() else 0)
+        return bool(b.max_players) and seated >= b.max_players
+
+    def boost_seat(self):
+        """Room mode: True to take a player seat (fewer than boost_below humans
+        play: the battle list counts players), False to spectate (boost off,
+        boost_until humans or more, the room full with this client in it,
+        everyone ready, or a start just called), None to keep the seat."""
+        b = self.battle
+        humans = self.humans()
+        if self.s.boost_below <= 0 or self.now() < self.start_hold_until:
+            return False
+        if humans and all(self.statuses[h].get("ready") for h in humans):
+            return False                    # about to start: never in the game
+        seated = len(humans) + len(b.bots) + 1     # with this client in a seat
+        if len(humans) >= self.s.boost_until or (b.max_players and seated >= b.max_players):
+            return False
+        if len(humans) < self.s.boost_below:
+            return True
+        return None
 
 
 # -- I/O --------------------------------------------------------------------

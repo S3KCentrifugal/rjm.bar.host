@@ -72,17 +72,27 @@ The table leaves out two cases:
      boss, sends the room setup commands
      (`BARHOST_ROOM_SETUP`, e.g. `!bSet experimentallegionfaction 1`) and
      adds bots it owns; in a private room it PMs the password. It is a
-     headless host and never plays: once boss it spectates, and takes a
-     player seat again only for the moment it adds bots (BAR's server takes
-     `ADDBOT` only from players), spectating at once if a start is called
-     then. A player's lag slows the whole game; a spectator's does not
+     headless host and never plays a game: once boss it spectates, and takes
+     a player seat again for the moment it adds bots (BAR's server takes
+     `ADDBOT` only from players). With `BARHOST_BOOST_BELOW`, it also sits as
+     a player while fewer humans play, so the battle list shows the room
+     busier, and spectates again from `BARHOST_BOOST_UNTIL` humans or a full
+     room (in between it keeps its seat). Once everyone is ready, or a start
+     is called, it spectates at once, so its engine never joins as a player:
+     a player's lag slows the whole game; a spectator's does not
      (`GameServer.cpp:905`).
   3. While boss, gives boss to `BARHOST_FOLLOW` users as they join, and ends
-     (`!ev`) any vote to unboss everyone, the client, or one of those users.
+     (`!ev`) any vote to unboss everyone, the client, or one of those users;
+     a vote against the client also gets "Shame on you, <caller>!".
+     `BARHOST_AUTO_BOSS` users are also made boss as they join, and votes to
+     unboss them are ended too, but they cannot PM it commands.
+     With `BARHOST_PROMOTE_EVERY`, it PMs the autohost `!promote` while a
+     public room's player team is not full, as soon as each cooldown ends
+     (it reads the autohost's "Please wait ..." answer).
      An AI from `BARHOST_AI_ARCHIVES` on a moving tag (`@latest`, `@newest`)
      is updated between games: checked after every game and every
      `BARHOST_AI_UPDATE_EVERY` seconds, installed only when no game runs, and
-     no countdown starts until it is done.
+     no start hint is given until it is done.
      Those users switch the bots' AI with `!barb` / `!smrt`, kept across
      restarts and done as a player (after the game if one is running). Each
      player who joins gets `BARHOST_WELCOME` privately in the room chat.
@@ -112,10 +122,12 @@ The table leaves out two cases:
      every game, keeping its place across restarts, and skips a map the
      autohost will not take or that cannot be downloaded. Any map change is
      downloaded before a game can start.
-  4. Counts down once every human is ready, spectating first, then sends
-     `!cv start`. It never leaves a room or takes a new one while its engine
+  4. Never starts a game itself: once every human is ready (and the content
+     is downloaded) it says how to vote the start (`!cv start`), at most once
+     a minute. It never leaves a room or takes a new one while its engine
      is in a game, including after reconnecting mid-game; a `!public` /
-     `!private` switch waits for a room with no game in progress.
+     `!private` switch waits for a room with no game in progress, and for two
+     minutes after a start is called or everyone is ready.
   5. When the autohost's game starts, runs `spring-headless` as a spectator
      client of it. That engine runs the bots.
 - **`spads`** ([`docker/spads/`](docker/spads))

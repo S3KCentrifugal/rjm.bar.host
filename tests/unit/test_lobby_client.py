@@ -261,16 +261,21 @@ class Starting(Harness):
         self.feed("JOINEDBATTLE 12 " + name,
                   "CLIENTBATTLESTATUS %s %d 0" % (name, lc.battle_status(ready=ready, mode=1, sync=sync)))
 
-    def test_countdown_then_start_then_launch(self):
-        password = None
+    def hints(self, sent):
+        return [x for x in sent if x == "SAYBATTLE " + lc.START_HINT]
+
+    def test_ready_gets_the_vote_hint_never_a_start(self):
         self.boss_and_setup()
         password = self.c.script_password
         self.human()
         sent = self.run_for(5)
-        self.assertTrue(any("starting in" in x for x in sent), sent)
-        sent = self.run_for(20)
-        self.assertIn("SAYBATTLE !cv start", sent)
-        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.assertEqual(len(self.hints(sent)), 1, sent)
+        self.assertIn("!cv start", lc.START_HINT)
+        sent += self.run_for(120)
+        self.assertEqual(len(self.hints(sent)), 1)                          # once while ready
+        self.assertFalse([x for x in sent if x.startswith("SAYBATTLE !cv start") or x.startswith("SAYBATTLE !start")
+                          or "starting in" in x])
+        self.feed("SAIDBATTLE Alice !cv start", "CLIENTSTATUS %s 65" % HOST)   # the players start it
         self.assertEqual(self.launched, [("10.1.2.3", 8452, password)])
         self.assertEqual(self.c.state, "ingame")
         # The game ends: engine exits, founder leaves game; back to waiting, in the room.
@@ -280,14 +285,15 @@ class Starting(Harness):
         self.assertEqual(self.c.state, "waiting")
         self.assertIsNotNone(self.c.battle)
 
-    def test_unready_human_cancels_countdown(self):
+    def test_ready_again_gets_the_hint_again_at_most_once_a_minute(self):
         self.boss_and_setup()
         self.human()
         self.run_for(5)
         self.human(ready=0)
-        sent = self.run_for(30)
-        self.assertNotIn("SAYBATTLE !cv start", sent)
-        self.assertIsNone(self.c.countdown_end)
+        self.run_for(5)
+        self.human()
+        self.assertEqual(self.hints(self.run_for(5)), [])                   # within the minute
+        self.assertEqual(len(self.hints(self.run_for(60))), 1)
 
     def test_no_start_with_nobody_or_unsynced(self):
         self.boss_and_setup()
@@ -365,6 +371,185 @@ class HeadlessSeat(Harness):
         self.assertEqual(lc.unpack_battle_status(self.c.pending[0][1])["mode"], 0)
 
 
+class Boost(Harness):
+    """BARHOST_BOOST_BELOW: a player seat while few humans play (the battle
+    list counts players), a spectator from BARHOST_BOOST_UNTIL humans, in a
+    full room, once everyone is ready, or when a start is called."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_BOOST_BELOW="5", BARHOST_BOOST_UNTIL="7")
+
+    def set_up(self):
+        sent = self.boss_and_setup()
+        for x in sent:                                      # the server echoes the bots
+            if x.startswith("ADDBOT "):
+                w = x.split(" ")
+                self.feed("ADDBOT 12 %s %s %s 0 %s" % (w[1], ME, w[2], w[4]))
+        return sent + self.run_for(5)
+
+    def players(self, names, ready=0):
+        for n in names:
+            self.feed("JOINEDBATTLE 12 " + n,
+                      "CLIENTBATTLESTATUS %s %d 0" % (n, lc.battle_status(ready=ready, mode=1, sync=1)))
+        return self.run_for(5)
+
+    def leave(self, names):
+        for n in names:
+            self.feed("LEFTBATTLE 12 " + n)
+        return self.run_for(5)
+
+    def test_plays_in_an_empty_room_on_the_humans_side(self):
+        sent = self.set_up()
+        self.assertTrue(self.c.playing())
+        st = lc.unpack_battle_status(self.c.my_status)
+        bot_teams = {x["status"]["team"] for x in self.c.battle.bots.values()}
+        self.assertEqual(st["ally"], 0)
+        self.assertNotIn(st["team"], bot_teams)
+        self.assertEqual(st["ready"], 0)
+        self.assertEqual(len([x for x in sent if x.startswith("ADDBOT")]), 8)
+
+    def test_bots_added_while_seated_take_other_teams(self):
+        self.c = self.client(BARHOST_BOOST_BELOW="5", BARHOST_FOLLOW=OWNER)
+        self.set_up()
+        self.players(["Alice"])
+        self.assertTrue(self.c.playing())
+        mine = lc.unpack_battle_status(self.c.my_status)["team"]
+        self.feed("SAIDPRIVATE %s !bots 12" % OWNER)
+        adds = [x.split(" ") for x in self.run_for(30) if x.startswith("ADDBOT")]
+        self.assertEqual(len(adds), 4)
+        self.assertNotIn(mine, {lc.unpack_battle_status(a[2])["team"] for a in adds})
+
+    def test_spectates_from_seven_and_plays_again_below_five(self):
+        self.set_up()
+        self.players(["P1", "P2", "P3", "P4"])
+        self.assertTrue(self.c.playing())                    # 4: boosting
+        self.players(["P5", "P6"])
+        self.assertTrue(self.c.playing())                    # 6: kept
+        self.players(["P7"])
+        self.assertFalse(self.c.playing())                   # 7: a spectator
+        self.leave(["P7", "P6"])
+        self.assertFalse(self.c.playing())                   # 5: kept
+        self.leave(["P5"])
+        self.assertTrue(self.c.playing())                    # 4: boosting again
+
+    def test_a_full_room_spectates(self):
+        self.set_up()
+        self.c.battle.max_players = 12                       # 8 bots + 3 humans + Clyde
+        self.players(["P1", "P2", "P3"])
+        self.assertFalse(self.c.playing())
+        self.leave(["P3"])
+        self.assertTrue(self.c.playing())
+
+    def test_everyone_ready_spectates_and_stays_so(self):
+        self.set_up()
+        sent = self.players(["Alice"], ready=1)
+        self.assertFalse(self.c.playing())
+        self.assertIn("SAYBATTLE " + lc.START_HINT, sent)
+        self.assertNotIn(1, my_modes(self.run_for(60)))
+
+    def test_a_start_called_spectates_first_and_holds(self):
+        self.set_up()
+        self.players(["Alice"])
+        self.assertTrue(self.c.playing())
+        self.feed("SAIDBATTLE Alice !cv start")
+        self.assertEqual(lc.unpack_battle_status(self.c.pending[0][1])["mode"], 0)
+        self.assertNotIn(1, my_modes(self.run_for(lc.START_HOLD - 10)))
+        self.assertIn(1, my_modes(self.run_for(20)))        # no game came: boosting again
+
+    def test_not_during_a_game(self):
+        self.set_up()
+        self.players(["Alice"], ready=1)
+        self.feed("SAIDBATTLE Alice !cv start", "CLIENTSTATUS %s 65" % HOST)
+        self.leave(["Alice"])
+        self.assertEqual(my_modes(self.run_for(300)), [])
+
+    def test_off_by_default(self):
+        self.c = self.client()
+        self.boss_and_setup()
+        self.assertFalse(self.c.playing())
+        self.assertEqual(my_modes(self.run_for(30)), [])
+
+
+
+class Promote(Harness):
+    """BARHOST_PROMOTE_EVERY: !promote by PM to the autohost while the player
+    team is not full, as often as its cooldown allows."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_PROMOTE_EVERY="600")
+
+    def promotes(self, sent):
+        return [x for x in sent if x == "SAYPRIVATE %s !promote" % HOST]
+
+    def answer(self, text):
+        self.feed("SAIDPRIVATE %s %s" % (HOST, text))
+
+    def test_promotes_by_pm_once_set_up(self):
+        sent = self.boss_and_setup() + self.run_for(10)
+        self.assertEqual(len(self.promotes(sent)), 1)
+        self.assertFalse([x for x in sent if x.startswith("SAYBATTLE") and "promote" in x])
+
+    def test_waits_out_the_cooldown_the_autohost_names(self):
+        self.boss_and_setup()
+        self.run_for(10)
+        self.answer("Please wait 4 minutes and 10 seconds before promoting battle (promote flood protection)")
+        self.assertEqual(self.promotes(self.run_for(250)), [])
+        self.assertEqual(len(self.promotes(self.run_for(10))), 1)
+
+    def test_after_a_promote_waits_the_delay(self):
+        self.boss_and_setup()
+        self.run_for(10)
+        self.answer("Promoting battle in #main")
+        self.assertEqual(self.promotes(self.run_for(595)), [])
+        self.assertEqual(len(self.promotes(self.run_for(15))), 1)
+
+    def test_someone_elses_promote_restarts_the_wait(self):
+        self.boss_and_setup()
+        self.run_for(10)
+        self.answer("Please wait 10 seconds before promoting battle (promote flood protection)")
+        self.feed("SAIDBATTLEEX %s * Promoting battle in #main" % HOST)
+        self.assertEqual(self.promotes(self.run_for(300)), [])
+
+    def test_a_refusal_retries_later(self):
+        self.boss_and_setup()
+        self.run_for(10)
+        self.answer("Unable to promote battle, battle lobby is locked")
+        self.assertEqual(self.promotes(self.run_for(lc.PROMOTE_RETRY - 5)), [])
+        self.assertEqual(len(self.promotes(self.run_for(10))), 1)
+
+    def test_not_when_the_team_is_full(self):
+        self.boss_and_setup()
+        self.answer("Please wait 1 second before promoting battle (promote flood protection)")
+        self.c.battle.max_players = len(self.c.battle.bots) + 2   # the bots + 2 humans
+        for n in ("P1", "P2"):
+            self.feed("JOINEDBATTLE 12 " + n,
+                      "CLIENTBATTLESTATUS %s %d 0" % (n, lc.battle_status(mode=1, sync=1)))
+        self.assertEqual(self.promotes(self.run_for(30)), [])
+        self.feed("LEFTBATTLE 12 P2")
+        self.assertEqual(len(self.promotes(self.run_for(10))), 1)
+
+    def test_not_a_private_room(self):
+        self.boss_and_setup()
+        self.c.battle.passworded = True
+        self.c.privacy = "private"
+        self.assertEqual(self.promotes(self.run_for(30)), [])
+
+    def test_not_when_everyone_is_ready_or_in_a_game(self):
+        self.boss_and_setup()
+        self.feed("JOINEDBATTLE 12 Alice",
+                  "CLIENTBATTLESTATUS Alice %d 0" % lc.battle_status(ready=1, mode=1, sync=1))
+        self.assertEqual(self.promotes(self.run_for(30)), [])
+        self.feed("SAIDBATTLE Alice !cv start", "CLIENTSTATUS %s 65" % HOST)
+        self.assertEqual(self.promotes(self.run_for(600)), [])
+
+    def test_off_by_default(self):
+        self.c = self.client()
+        sent = self.boss_and_setup() + self.run_for(30)
+        self.assertEqual(self.promotes(sent), [])
+
+
 class Privacy(Harness):
     """!public / !private, remembered on the data volume; a private room is
     opened as Chobby does, through a region manager's !privatehost."""
@@ -429,15 +614,14 @@ class Privacy(Harness):
         self.assertTrue([x for x in sent if "after this game" in x], sent)
         self.assertNotIn("LEAVEBATTLE", sent)
 
-    def test_not_moved_during_a_countdown_either(self):
+    def test_not_moved_while_a_start_may_be_under_way(self):
         self.boss_and_setup()
         self.feed("JOINEDBATTLE 12 Alice",
                   "CLIENTBATTLESTATUS Alice %d 0" % lc.battle_status(ready=1, mode=1, sync=1))
-        self.run_for(5)
-        self.assertEqual(self.c.state, "countdown")
-        sent = self.pm("!private")
-        self.assertTrue([x for x in sent if "after this game" in x], sent)
-        self.assertNotIn("LEAVEBATTLE", sent)
+        self.run_for(5)                                     # everyone ready: the start hint
+        self.feed("ADDUSER %s XX 0 9" % MANAGER)
+        self.assertNotIn("LEAVEBATTLE", self.pm("!private") + self.run_for(60))
+        self.assertIn("LEAVEBATTLE", self.run_for(90))      # no game came
 
     def test_reconnecting_during_a_game_takes_no_room_until_it_ends(self):
         self.boss_and_setup()
@@ -494,14 +678,14 @@ class MapRotation(Harness):
         self.assertIn("SAYBATTLE !map All That Simmers", sent)
         self.feed("JOINEDBATTLE 12 Alice",
                   "CLIENTBATTLESTATUS Alice %d 0" % lc.battle_status(ready=1, mode=1, sync=1))
-        self.assertFalse([x for x in self.run_for(5) if "starting in" in x])    # map not switched yet
+        self.assertFalse([x for x in self.run_for(5) if "To start the game" in x])    # map not switched yet
         self.map_is("All That Simmers v1.2")
         sent = self.run_for(5)
         self.assertEqual(lc.unpack_battle_status(
             [x for x in sent if x.startswith("MYBATTLESTATUS")][0].split(" ")[1])["sync"], 2)
-        self.assertFalse([x for x in sent if "starting in" in x])               # downloading
+        self.assertFalse([x for x in sent if "To start the game" in x])               # downloading
         self.c.fetched(self.c.battle, True)
-        self.assertTrue([x for x in self.run_for(5) if "starting in" in x])
+        self.assertTrue([x for x in self.run_for(5) if "To start the game" in x])
 
     def test_next_map_after_each_game_and_the_place_is_kept(self):
         self.boss()
@@ -573,6 +757,17 @@ class Guard(Harness):
         self.boss_and_setup()
         self.assertTrue(self.ended("unboss " + FRIEND.lower()))
 
+    def test_shames_a_vote_to_unboss_clyde_or_everyone(self):
+        self.boss_and_setup()
+        for command in ("unboss " + ME, "unboss"):
+            self.feed(vote("Troll", command))
+            sent = self.run_for(4)
+            self.assertEqual(sent[sent.index("SAYBATTLE !ev") + 1], "SAYBATTLE Shame on you, Troll!")
+        self.feed(vote("Troll", "unboss " + FRIEND))
+        sent = self.run_for(4)
+        self.assertIn("SAYBATTLE !ev", sent)
+        self.assertFalse([x for x in sent if "Shame" in x])
+
     def test_leaves_other_votes_alone(self):
         self.boss_and_setup()
         self.assertFalse(self.ended("unboss SomeTroll"))
@@ -595,6 +790,20 @@ class Guard(Harness):
         sent = self.run_for(5)
         self.assertIn("SAYBATTLE !boss " + FRIEND, sent)
         self.assertFalse([x for x in sent if x == "SAYBATTLE !boss Stranger"])
+
+    def test_bosses_and_guards_auto_boss_users_who_get_no_commands(self):
+        self.c = self.client(BARHOST_FOLLOW=OWNER, BARHOST_AUTO_BOSS="Trusted, Pal")
+        self.boss_and_setup()
+        self.feed("JOINEDBATTLE 12 Trusted", "JOINEDBATTLE 12 Pal", "JOINEDBATTLE 12 " + OWNER)
+        sent = self.run_for(10)
+        for n in ("Trusted", "Pal", OWNER):
+            self.assertIn("SAYBATTLE !boss " + n, sent)
+        self.feed("SAIDPRIVATE Trusted !private", "SAIDPRIVATE Trusted !status")
+        sent = self.run_for(10)
+        self.assertFalse([x for x in sent if x.startswith("SAYPRIVATE Trusted")])
+        self.assertEqual(self.c.privacy, "public")
+        self.assertTrue(self.ended("unboss trusted"))
+        self.assertFalse([x for x in self.run_for(4) if "Shame" in x])
 
     def test_bosses_authorised_users_who_rejoin(self):
         self.boss_and_setup()
@@ -744,12 +953,12 @@ class AIUpdate(Harness):
         self.assertTrue(self.c.need_ai_update)                          # right after it
         self.feed("JOINEDBATTLE 12 Alice",
                   "CLIENTBATTLESTATUS Alice %d 0" % lc.battle_status(ready=1, mode=1, sync=1))
-        self.assertFalse([x for x in self.run_for(70) if "starting in" in x])   # updating
+        self.assertFalse([x for x in self.run_for(70) if "To start the game" in x])   # updating
         self.c.ai_updated(["github:o/r@latest: v1.958-prod -> v1.960-prod"], [])
         sent = self.run_for(5)
         self.assertTrue([x for x in sent if x.startswith("SAYPRIVATE %s AI release updated (v1.958-prod -> "
                                                          "v1.960-prod)" % OWNER)], sent)
-        self.assertTrue([x for x in sent if "starting in" in x])
+        self.assertTrue([x for x in sent if "To start the game" in x])
 
     def test_checked_every_interval_while_idle(self):
         self.boss_and_setup()                                  # waiting in its room, no game

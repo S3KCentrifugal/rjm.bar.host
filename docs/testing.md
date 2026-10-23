@@ -47,9 +47,12 @@ with lobby lines and a fake clock. It covers:
 - the boss guard (`Guard`): `!ev` at once for a vote to unboss the client,
   everyone, or an authorised user (any case), not for other votes, not for
   vote text said by anyone but the autohost, and not before being boss;
+  "Shame on you, <caller>!" after ending a vote to unboss the client or
+  everyone, not one for an authorised user;
   authorised users made boss when they join, or once boss if already in;
+  `BARHOST_AUTO_BOSS` users made boss and guarded too, with no PM commands;
 - AI release updates (`AIUpdate`): checked after each game and on the
-  interval while idle, never during a game, no countdown while updating, the
+  interval while idle, never during a game, no start hint while updating, the
   authorised users told, a failed check changing nothing, 0 turning it off
   (`test_install_ai.py` `Update`: the installed tag recorded, an unchanged
   release not downloaded, a new one swapped in, a broken one leaving the
@@ -85,7 +88,7 @@ with lobby lines and a fake clock. It covers:
   not for the autohost, itself, or text that is not a ring;
 - the engine's exit in the client log (`EngineExit`): one line for a clean
   exit, the console's tail for a crash while the game goes on, once per game;
-- the map rotation (`MapRotation`): the first map once boss, no countdown
+- the map rotation (`MapRotation`): the first map once boss, no start hint
   until the autohost has switched and the map is downloaded, the next map
   after each game with the place kept across a restart, wrapping around, and
   skipping a map that is not taken or cannot be downloaded (not leaving the
@@ -94,6 +97,18 @@ with lobby lines and a fake clock. It covers:
   once boss, a player only around bot adds, a spectator whatever the number
   of humans and after a game, never left in a player seat, and spectating
   first when a start is called while seated;
+- the boost seat (`Boost`, `BARHOST_BOOST_BELOW`): a player on the humans'
+  ally team, unready, on a team no bot uses, in an empty room; kept from 5 to
+  6 humans, a spectator from 7 and again a player below 5; a spectator in a
+  full room; a spectator once everyone is ready and when a start is called,
+  held for `START_HOLD`; no seat change during a game; bots added while
+  seated take other teams; off by default;
+- promoting (`Promote`, `BARHOST_PROMOTE_EVERY`): `!promote` by PM to the
+  autohost once set up, never in room chat; the next try after the cooldown
+  its "Please wait" answer names, after the delay once done (also when
+  someone else promoted), and `PROMOTE_RETRY` after a refusal; none with the
+  player team full, in a private room, with everyone ready, or in a game;
+  off by default;
 - bots named as Chobby with simple AI names off (`BARbstable(1)`), side 2
   (Random) by default, cycling when `BARHOST_BOT_SIDES` is set;
   `BARHOST_BOT_SETUP` sent after every add (setup, more bots), not after
@@ -101,13 +116,14 @@ with lobby lines and a fake clock. It covers:
 - `!public` / `!private` (`Privacy`): the choice kept across a restart, a
   private room asked of the region manager with `!privatehost`, joined with
   its password, spectated, the password PM'd; leaving the other kind of room
-  between games but not during one or its countdown; after reconnecting
+  between games but not during one, nor while a start may be under way; after reconnecting
   mid-game, no room taken until the engine's game ends; no manager online, and a silent manager
   timing out then asked again; replies sent during a game;
 - flood spacing;
 - setup without a boss confirmation;
-- the countdown, its cancellation, and no start before content is ready or
-  with unsynced players;
+- the start hint (`Starting`): once everyone is ready, never a `!cv start`
+  or `!start` of its own, again after a re-ready at most once a minute, and
+  none before content is ready or with unsynced players;
 - the engine launch with the battle's address and script password;
 - the post-game cooldown;
 - taking another room when kicked, and leaving on a failed download;
