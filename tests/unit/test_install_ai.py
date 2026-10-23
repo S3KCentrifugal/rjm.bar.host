@@ -267,5 +267,139 @@ class Update(Env):
         self.assertEqual(self.fetched, [])
 
 
+class Channels(Env):
+    """AI channels: each channel's release kept in its own folder (the data
+    volume), the engine pointed at one of them by a symlink."""
+
+    CHANNELS = {"barb": ("BARb", ""),
+                "smrt-prod": ("SMRTBARb", "github:o/r@latest"),
+                "smrt-test": ("SMRTBARb", "github:o/r@newest#*-test-linux.tar.gz")}
+
+    def setUp(self):
+        super().setUp()
+        self.cache = self.tmp / "data" / "ai-releases"
+        self.served = {}            # channel kind -> tag
+        self.broken = set()
+        self.fetched = []
+
+    def build(self, tag):
+        src = self.tmp / ("src-" + tag)
+        if not src.exists():
+            make_ai(src, "SMRTBARb")
+            (src / "SMRTBARb" / "stable" / "release.txt").write_text(tag)
+        return tar_of(src, ["SMRTBARb"], self.tmp / ("SMRTBARb-%s-linux.tar.gz" % tag)).read_bytes()
+
+    def fetch(self, url, accept=""):
+        self.fetched.append(url)
+        api = "https://api.github.com/repos/o/r/releases"
+        if url == api + "/latest":
+            tag = self.served["prod"]
+            return json.dumps(release(tag, ["SMRTBARb-%s-linux.tar.gz" % tag])).encode()
+        if url.startswith(api + "?per_page"):
+            tag = self.served["test"]
+            return json.dumps([release(tag, ["SMRTBARb-%s-linux.tar.gz" % tag,
+                                             "SMRTBARb-%s-linux-dbg.tar.gz" % tag], True)]).encode()
+        for tag in self.served.values():
+            if url == "https://github.com/dl/SMRTBARb-%s-linux.tar.gz" % tag:
+                return b"not a tarball" if tag in self.broken else self.build(tag)
+        raise AssertionError("unexpected URL " + url)
+
+    def update(self):
+        with mock.patch.object(install_ai, "fetch", side_effect=self.fetch):
+            return install_ai.update_channels(self.CHANNELS, self.cache, self.skirmish)
+
+    def active(self):
+        return (self.skirmish / "SMRTBARb" / "stable" / "release.txt").read_text()
+
+    def test_parse(self):
+        self.assertEqual(install_ai.parse_channels(
+            " barb=BARb ; Smrt-Prod=SMRTBARb:github:o/r@latest;smrt-test=SMRTBARb:github:o/r@newest#*-test-linux.tar.gz;"),
+            self.CHANNELS)
+        for bad in ("barb", "=BARb", "x=", "x=SMRT BARb", "x=A:https://e.com/a.tar.gz", "-x=A"):
+            with self.assertRaises(ValueError, msg=bad):
+                install_ai.parse_channels(bad)
+
+    def test_each_channel_is_downloaded_into_its_own_folder(self):
+        self.served = {"prod": "v2-prod", "test": "v3-test"}
+        changes, errors, releases = self.update()
+        self.assertEqual(errors, [])
+        self.assertEqual(changes, ["smrt-prod: none -> v2-prod", "smrt-test: none -> v3-test"])
+        self.assertEqual(releases, {"smrt-prod": "v2-prod", "smrt-test": "v3-test"})
+        for channel, tag in releases.items():
+            self.assertEqual((self.cache / channel / tag / "SMRTBARb" / "stable" / "release.txt").read_text(), tag)
+        self.assertFalse((self.skirmish / "SMRTBARb").exists())     # the engine is untouched
+
+    def test_an_unchanged_release_is_not_downloaded_again(self):
+        self.served = {"prod": "v2-prod", "test": "v3-test"}
+        self.update()
+        self.fetched.clear()
+        self.assertEqual(self.update()[:2], ([], []))
+        self.assertEqual(len(self.fetched), 2)                      # the two release lookups
+
+    def test_activation_swaps_the_engine_between_releases(self):
+        self.served = {"prod": "v2-prod", "test": "v3-test"}
+        self.update()
+        self.assertEqual(install_ai.activate_channel(self.cache, "smrt-test", self.CHANNELS, self.skirmish), "v3-test")
+        self.assertTrue((self.skirmish / "SMRTBARb").is_symlink())
+        self.assertEqual(self.active(), "v3-test")
+        self.assertEqual(install_ai.activate_channel(self.cache, "smrt-prod", self.CHANNELS, self.skirmish), "v2-prod")
+        self.assertEqual(self.active(), "v2-prod")
+        self.assertEqual(install_ai.activate_channel(self.cache, "barb", self.CHANNELS, self.skirmish), "")
+        self.assertTrue((self.skirmish / "BARb" / "stable" / "AIInfo.lua").exists())   # the game's own, untouched
+        self.assertFalse([p for p in self.skirmish.iterdir() if p.name.startswith(".")])
+
+    def test_activation_replaces_an_installed_folder(self):
+        make_ai(self.skirmish, "SMRTBARb")                          # from BARHOST_AI_ARCHIVES at start
+        self.served = {"prod": "v2-prod", "test": "v3-test"}
+        self.update()
+        install_ai.activate_channel(self.cache, "smrt-prod", self.CHANNELS, self.skirmish)
+        self.assertEqual(self.active(), "v2-prod")
+        self.assertFalse([p for p in self.skirmish.iterdir() if p.name.startswith(".")])
+
+    def test_activation_of_a_release_not_downloaded_fails(self):
+        with self.assertRaises(ValueError):
+            install_ai.activate_channel(self.cache, "smrt-test", self.CHANNELS, self.skirmish)
+
+    def test_a_new_release_keeps_the_one_the_engine_runs(self):
+        self.served = {"prod": "v2-prod", "test": "v3-test"}
+        self.update()
+        install_ai.activate_channel(self.cache, "smrt-test", self.CHANNELS, self.skirmish)
+        self.served["test"] = "v4-test"
+        self.assertEqual(self.update()[0], ["smrt-test: v3-test -> v4-test"])
+        self.assertEqual(self.active(), "v3-test")                  # until activated between games
+        self.served["test"] = "v5-test"
+        self.update()                                               # v3 is still linked: kept
+        self.assertEqual(sorted(p.name for p in (self.cache / "smrt-test").iterdir() if p.is_dir()),
+                         ["v3-test", "v4-test", "v5-test"])
+        install_ai.activate_channel(self.cache, "smrt-test", self.CHANNELS, self.skirmish)
+        self.assertEqual(self.active(), "v5-test")
+        self.served["test"] = "v6-test"
+        self.update()
+        self.assertEqual(sorted(p.name for p in (self.cache / "smrt-test").iterdir() if p.is_dir()),
+                         ["v5-test", "v6-test"])
+
+    def test_a_broken_release_keeps_what_was_there(self):
+        self.served = {"prod": "v2-prod", "test": "v3-test"}
+        self.update()
+        self.served["test"] = "v4-test"
+        self.broken.add("v4-test")
+        changes, errors, releases = self.update()
+        self.assertEqual(changes, [])
+        self.assertTrue(errors and errors[0].startswith("smrt-test: "))
+        self.assertEqual(releases["smrt-test"], "v3-test")
+        self.assertEqual([p.name for p in (self.cache / "smrt-test").iterdir() if p.is_dir()], ["v3-test"])
+
+    def test_releases_survive_a_restart(self):
+        self.served = {"prod": "v2-prod", "test": "v3-test"}
+        self.update()
+        self.assertEqual(install_ai.channel_release(self.cache, "smrt-test"), "v3-test")
+        self.served = {}                                            # GitHub unreachable
+        with mock.patch.object(install_ai, "fetch", side_effect=OSError("no network")):
+            changes, errors, releases = install_ai.update_channels(self.CHANNELS, self.cache, self.skirmish)
+        self.assertEqual(len(errors), 2)
+        self.assertEqual(releases, {"smrt-prod": "v2-prod", "smrt-test": "v3-test"})
+        self.assertEqual(install_ai.activate_channel(self.cache, "smrt-test", self.CHANNELS, self.skirmish), "v3-test")
+
+
 if __name__ == "__main__":
     unittest.main()

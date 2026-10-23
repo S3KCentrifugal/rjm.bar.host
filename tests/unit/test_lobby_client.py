@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.environ.get("RJM_BIN", "/opt/rjm-bar-host/bin"))
 import lobby_client as lc  # noqa: E402
@@ -763,14 +764,48 @@ class Guard(Harness):
             self.feed(vote("Troll", command))
             sent = self.run_for(4)
             self.assertEqual(sent[sent.index("SAYBATTLE !ev") + 1], "SAYBATTLE Shame on you, Troll!")
-        self.feed(vote("Troll", "unboss " + FRIEND))
-        sent = self.run_for(4)
-        self.assertIn("SAYBATTLE !ev", sent)
-        self.assertFalse([x for x in sent if "Shame" in x])
+        for command in ("unboss " + FRIEND, "boss Troll", "boss " + ME):
+            self.feed(vote("Troll", command))
+            sent = self.run_for(4)
+            self.assertIn("SAYBATTLE !ev", sent)
+            self.assertFalse([x for x in sent if "Shame" in x])
+
+    def test_ends_every_boss_vote_from_a_random_player(self):
+        self.boss_and_setup()
+        for command in ("boss Troll", "boss " + FRIEND, "BOSS troll", "unboss SomeTroll", "unboss"):
+            self.assertTrue(self.ended(command), command)
+
+    def test_trusted_players_may_vote_boss_changes_but_not_unboss_the_trusted(self):
+        self.c = self.client(BARHOST_FOLLOW="%s,%s" % (OWNER, FRIEND), BARHOST_AUTO_BOSS="Trusted")
+        self.boss_and_setup()
+        for caller in (FRIEND, "trusted"):
+            self.assertFalse(self.ended("boss Newbie", user=caller), caller)
+            self.assertFalse(self.ended("unboss SomeTroll", user=caller), caller)
+            for command in ("unboss " + ME, "unboss", "unboss " + OWNER, "unboss Trusted"):
+                self.assertTrue(self.ended(command, user=caller), (caller, command))
+
+    START_BOX_VOTES = ("addBox 0 0 50 200 1", "clearbox 2", "loadBoxes", "split h 25", "preset ffa",
+                       "bPreset default", "bSet mapmetadata_startbox_override 0", "bset startPosType 1",
+                       "mapmetadata_startboxes_set 1", "bSet mapmetadata_startpos 0", "startpostype 2")
+
+    def test_ends_a_random_players_vote_to_change_the_start_boxes(self):
+        self.boss_and_setup()
+        for command in self.START_BOX_VOTES:
+            self.assertTrue(self.ended(command), command)
+        self.assertFalse([x for x in self.run_for(4) if "Shame" in x])
+
+    def test_trusted_players_may_vote_start_box_changes(self):
+        self.c = self.client(BARHOST_FOLLOW=OWNER, BARHOST_AUTO_BOSS="Trusted")
+        self.boss_and_setup()
+        for caller in (OWNER, "Trusted"):
+            for command in self.START_BOX_VOTES:
+                self.assertFalse(self.ended(command, user=caller), (caller, command))
 
     def test_leaves_other_votes_alone(self):
         self.boss_and_setup()
-        self.assertFalse(self.ended("unboss SomeTroll"))
+        self.assertFalse(self.ended("bSet critters 0"))
+        self.assertFalse(self.ended("splitter"))
+        self.assertFalse(self.ended("bossy thing"))
         self.assertFalse(self.ended("set map Tetrad_V2"))
         self.assertFalse(self.ended("forcestart"))
 
@@ -872,15 +907,41 @@ class Welcome(Harness):
 
 
 class SwitchAI(Harness):
-    """!barb / !smrt: the bots' AI, remembered; switched as a player."""
+    """!ai <channel>: the bots' AI (the game's own, or a release kept on the
+    data volume), remembered; the engine follows between games, and the bots
+    are replaced (as a player) only when the AI's name changes."""
+
+    CHANNELS = ("barb=BARb;smrt-prod=SMRTBARb:github:o/r@latest;"
+                "smrt-test=SMRTBARb:github:o/r@newest#*-test-linux.tar.gz")
+    RELEASES = {"smrt-prod": "v2-prod", "smrt-test": "v3-test"}
 
     def setUp(self):
         super().setUp()
-        self.c = self.client(BARHOST_FOLLOW=OWNER)
+        self.c = self.make()
+
+    def make(self, **extra):
+        env = dict(BARHOST_FOLLOW=OWNER, BARHOST_AI_CHANNELS=self.CHANNELS)
+        env.update(extra)
+        c = self.client(**env)
+        self.activated = []
+        c.activate = self.activate
+        return c
+
+    def activate(self, channel):
+        self.activated.append(channel)
+        if self.c.s.ai_channels[channel][1] and channel not in self.c.ai_releases:
+            raise ValueError("%s is not downloaded yet" % channel)
+        return self.c.ai_releases.get(channel, "")
+
+    def fetched(self, releases=None, changes=()):
+        self.c.ai_updated(list(changes), [], dict(self.RELEASES if releases is None else releases))
 
     def pm(self, text):
         self.feed("SAIDPRIVATE %s %s" % (OWNER, text))
         return self.run_for(30)
+
+    def replies(self, sent):
+        return [x[len("SAYPRIVATE %s " % OWNER):] for x in sent if x.startswith("SAYPRIVATE %s " % OWNER)]
 
     def echo_bots(self, sent):
         for x in sent:
@@ -888,49 +949,182 @@ class SwitchAI(Harness):
                 w = x.split(" ")
                 self.feed("ADDBOT 12 %s %s %s 0 %s" % (w[1], ME, w[2], w[4]))
 
-    def test_switching_replaces_the_bots_as_a_player(self):
+    def set_up(self):
+        """In its room with 8 BARb bots, the releases fetched, spectating."""
+        self.fetched()
         self.echo_bots(self.boss_and_setup())
-        self.c.set_seat(False, "test")                       # a spectator, as with 8 humans
+        self.c.set_seat(False, "test")
         self.run_for(2)
-        sent = self.pm("!smrt")
-        self.assertTrue([x for x in sent if "switching the bots to SMRTBARb" in x], sent)
+        self.activated.clear()
+
+    def test_fetched_at_start_then_the_chosen_one_is_put_in_place(self):
+        self.assertTrue(self.c.need_ai_update)
+        self.fetched()
+        self.run_for(1)
+        self.assertEqual(self.activated, ["barb"])
+        self.assertEqual(self.c.ai_active, ("barb", ""))
+
+    def test_ai_lists_the_channels(self):
+        self.set_up()
+        reply = self.replies(self.pm("!ai"))
+        self.assertEqual(reply, ["AI now: barb (BARb, the game's own). Choose with !ai <name>: barb (BARb, the "
+                                 "game's own), smrt-prod (SMRTBARb v2-prod), smrt-test (SMRTBARb v3-test)."])
+
+    def test_another_ai_replaces_the_bots_as_a_player(self):
+        self.set_up()
+        sent = self.pm("!ai smrt-prod")
+        self.assertEqual(self.activated, ["smrt-prod"])
+        self.assertIn("OK: smrt-prod (SMRTBARb v2-prod) from the next game.", self.replies(sent))
+        self.assertIn("SAYBATTLE Reloading the AI for the next game: SMRTBARb version v2-prod.", sent)
         self.assertEqual(len([x for x in sent if x.startswith("REMOVEBOT")]), 8)
         adds = [i for i, x in enumerate(sent) if x.startswith("ADDBOT")]
         self.assertEqual({sent[i].split(" ")[4] for i in adds}, {"SMRTBARb"})
         self.assertEqual(len(adds), 8)
-        self.assertEqual(my_modes(sent)[0], 1)                # a player first
         mine = [i for i, x in enumerate(sent) if x.startswith("MYBATTLESTATUS")]
-        self.assertLess(mine[0], adds[0])
+        self.assertLess(mine[0], adds[0])                    # a player first
+
+    def test_test_and_prod_swap_without_touching_the_bots(self):
+        self.set_up()
+        self.echo_bots(self.pm("!ai smrt-prod"))
+        self.activated.clear()
+        sent = self.pm("!ai smrt-test")
+        self.assertEqual(self.activated, ["smrt-test"])
+        self.assertIn("SAYBATTLE Reloading the AI for the next game: SMRTBARb version v3-test.", sent)
+        self.assertFalse([x for x in sent if x.startswith(("REMOVEBOT", "ADDBOT"))])
 
     def test_the_choice_is_remembered(self):
-        self.boss_and_setup()
-        self.pm("!smrt")
-        self.assertEqual(self.client(BARHOST_FOLLOW=OWNER).bot_ai, "SMRTBARb")
-        self.pm("!barb")
-        self.assertEqual(self.client(BARHOST_FOLLOW=OWNER, BARHOST_BOT_AI="SMRTBARb").bot_ai, "BARb")
+        self.set_up()
+        self.pm("!ai smrt-test")
+        c = self.make()
+        self.assertEqual((c.ai_channel, c.bot_ai), ("smrt-test", "SMRTBARb"))
 
-    def test_same_ai_is_said_not_redone(self):
-        self.boss_and_setup()
-        sent = self.pm("!barb")
-        self.assertTrue([x for x in sent if "already run BARb" in x])
-        self.assertFalse([x for x in sent if x.startswith("REMOVEBOT")])
+    def test_the_same_ai_is_said_not_redone(self):
+        self.set_up()
+        sent = self.pm("!ai barb")
+        self.assertEqual(self.replies(sent), ["OK: the bots already run barb (BARb, the game's own)."])
+        self.assertEqual(self.activated, [])
+
+    def test_an_unknown_name_changes_nothing(self):
+        self.set_up()
+        sent = self.pm("!ai smrt-dev")
+        self.assertTrue(self.replies(sent)[0].startswith("No AI named smrt-dev. AI now: barb"))
+        self.assertEqual((self.c.ai_channel, self.activated), ("barb", []))
 
     def test_during_a_game_it_waits_for_the_game_to_end(self):
-        self.echo_bots(self.boss_and_setup())
+        self.set_up()
         self.feed("CLIENTSTATUS %s 65" % HOST)
-        sent = self.pm("!smrt")
-        self.assertTrue([x for x in sent if "after this game" in x], sent)
-        self.assertFalse([x for x in sent if x.startswith("REMOVEBOT") or x.startswith("ADDBOT")])
+        sent = self.pm("!ai smrt-prod")
+        self.assertIn("OK: smrt-prod (SMRTBARb v2-prod) after this game.", self.replies(sent))
+        self.assertEqual(self.activated, [])
+        self.assertFalse([x for x in sent if x.startswith(("REMOVEBOT", "ADDBOT"))])
         self.proc.code = 0
         self.feed("CLIENTSTATUS %s 64" % HOST)
+        self.run_for(2)
+        self.assertTrue(self.c.ai_updating)                    # the post-game check first
+        self.assertEqual(self.activated, [])
+        self.fetched()
         sent = self.run_for(30)
+        self.assertEqual(self.activated, ["smrt-prod"])
         self.assertEqual({x.split(" ")[4] for x in sent if x.startswith("ADDBOT")}, {"SMRTBARb"})
 
-    def test_strangers_cannot_switch(self):
-        self.boss_and_setup()
-        self.feed("SAIDPRIVATE Troll !smrt")
+    def test_a_release_not_downloaded_yet_is_fetched_first(self):
+        self.fetched({})
+        self.echo_bots(self.boss_and_setup())
+        self.activated.clear()
+        self.c.need_ai_update = False
+        sent = self.pm("!ai smrt-test")
+        self.assertIn("OK: smrt-test (SMRTBARb not downloaded yet) once it is downloaded.", self.replies(sent))
+        self.assertTrue(self.c.need_ai_update)
+        self.assertEqual(self.activated, [])
+        self.fetched({"smrt-test": "v3-test"}, ["smrt-test: none -> v3-test"])
         self.run_for(5)
+        self.assertEqual(self.activated, ["smrt-test"])
+        self.assertEqual(self.c.ai_active, ("smrt-test", "v3-test"))
+
+    def test_a_new_release_of_the_chosen_one_is_used_next_game(self):
+        self.set_up()
+        self.pm("!ai smrt-test")
+        self.activated.clear()
+        self.fetched({"smrt-prod": "v2-prod", "smrt-test": "v4-test"}, ["smrt-test: v3-test -> v4-test"])
+        sent = self.run_for(5)
+        self.assertIn("New AI release: smrt-test: v3-test -> v4-test; the next game uses it.", self.replies(sent))
+        self.assertEqual(self.activated, ["smrt-test"])
+        self.assertIn("SAYBATTLE Reloading the AI for the next game: SMRTBARb version v4-test.", sent)
+
+    def test_a_new_release_of_another_one_is_only_reported(self):
+        self.set_up()
+        self.fetched({"smrt-prod": "v5-prod", "smrt-test": "v3-test"}, ["smrt-prod: v2-prod -> v5-prod"])
+        sent = self.run_for(5)
+        self.assertIn("New AI release: smrt-prod: v2-prod -> v5-prod; PM me !ai smrt-prod to use it.",
+                      self.replies(sent))
+        self.assertFalse([x for x in sent if x.startswith(("SAYBATTLE Reloading", "REMOVEBOT"))])
+
+    def test_a_release_fetched_during_a_game_waits_for_the_end(self):
+        self.set_up()
+        self.pm("!ai smrt-test")
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.run_for(2)
+        self.activated.clear()
+        self.fetched({"smrt-prod": "v2-prod", "smrt-test": "v4-test"}, ["smrt-test: v3-test -> v4-test"])
+        self.run_for(30)
+        self.assertEqual(self.activated, [])
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        self.run_for(2)
+        self.fetched({"smrt-prod": "v2-prod", "smrt-test": "v4-test"})    # the post-game check
+        self.run_for(5)
+        self.assertEqual(self.activated, ["smrt-test"])
+
+    def test_a_failed_switch_keeps_the_bots_and_says_why(self):
+        self.set_up()
+        self.c.activate = lambda channel: (_ for _ in ()).throw(OSError("disk full"))
+        sent = self.pm("!ai smrt-prod")
+        self.assertFalse([x for x in sent if x.startswith(("REMOVEBOT", "ADDBOT"))])
         self.assertEqual(self.c.bot_ai, "BARb")
+        self.assertIn("disk full", self.c.last_error)
+
+    def test_bots_takes_a_count_and_an_ai(self):
+        self.set_up()
+        sent = self.pm("!bots 10 smrt-test")
+        self.assertIn("OK: 10 bots, smrt-test (SMRTBARb v3-test) from the next game.", self.replies(sent))
+        self.assertEqual(self.c.want_bots, 10)
+        self.assertEqual(self.c.ai_channel, "smrt-test")
+        sent = self.pm("!bots 4 nope")
+        self.assertTrue(self.replies(sent)[0].startswith("No AI named nope."))
+        self.assertEqual(self.c.want_bots, 10)
+
+    def test_old_commands_are_gone(self):
+        self.set_up()
+        self.assertEqual(self.replies(self.pm("!smrt")), ["Unknown command !smrt. PM me !help for the list."])
+        self.assertEqual(self.c.ai_channel, "barb")
+
+    def test_the_welcome_names_the_release_in_use(self):
+        self.c = self.make(BARHOST_WELCOME="Welcome.")
+        self.set_up()
+        self.feed("JOINEDBATTLE 12 Alice")
+        self.assertIn("SAYBATTLEPRIVATEEX Alice Welcome.", self.run_for(5))     # stock BARb: no version
+        self.pm("!ai smrt-test")
+        self.feed("JOINEDBATTLE 12 Bob")
+        self.assertIn("SAYBATTLEPRIVATEEX Bob Welcome. Current AI: SMRTBARb version v3-test.", self.run_for(5))
+
+    def test_back_to_the_games_own_ai_is_announced(self):
+        self.set_up()
+        self.echo_bots(self.pm("!ai smrt-prod"))
+        sent = self.pm("!ai barb")
+        self.assertIn("SAYBATTLE Reloading the AI for the next game: BARb (the game's own).", sent)
+        self.assertFalse([x for x in sent if "github" in x.lower() or "http" in x.lower()])
+
+    def test_strangers_cannot_switch(self):
+        self.set_up()
+        self.feed("SAIDPRIVATE Troll !ai smrt-test")
+        self.run_for(5)
+        self.assertEqual(self.c.ai_channel, "barb")
+
+    def test_a_bad_channel_list_stops_the_client(self):
+        with self.assertRaises(SystemExit):
+            self.client(BARHOST_AI_CHANNELS="smrt=SMRTBARb:https://example.com/a.tar.gz")
+        with self.assertRaises(SystemExit):
+            self.client(BARHOST_AI_CHANNELS=self.CHANNELS, BARHOST_AI_CHANNEL="nope")
 
 
 class AIUpdate(Harness):
@@ -1266,13 +1460,287 @@ class Perf(Harness):
     def test_perf_command_replies_with_the_last_game(self):
         self.boss_and_setup()
         self.feed("SAIDPRIVATE %s !perf" % OWNER)
-        self.assertTrue([x for x in self.run_for(3) if x == "SAYPRIVATE %s No game measured yet." % OWNER])
+        self.assertTrue([x for x in self.run_for(3)
+                         if x == "SAYPRIVATE %s No game measured yet. PM me !games for the list." % OWNER])
         self.feed("CLIENTSTATUS %s 65" % HOST)
         self.proc.code = 0
         self.feed("CLIENTSTATUS %s 64" % HOST)
         self.run_for(2)
         self.feed("SAIDPRIVATE %s !perf" % OWNER)
-        self.assertTrue([x for x in self.run_for(3) if x.startswith("SAYPRIVATE %s Last game 1" % OWNER)])
+        sent = self.run_for(10)
+        self.assertTrue([x for x in sent if x.startswith("SAYPRIVATE %s Game 1: All That Glitters v2.2.3" % OWNER)],
+                        sent)
+        self.assertTrue([x for x in sent if x.startswith("SAYPRIVATE %s Whole game: game 1 All That Glitters"
+                                                         % OWNER)], sent)
+
+
+class FakeMetrics:
+    def __init__(self):
+        self.started, self.stopped = [], 0
+
+    def start(self, run_dir, pid, now):
+        self.started.append((run_dir, pid))
+
+    def stop(self):
+        self.stopped += 1
+
+
+class GameRecord(Harness):
+    """Each game's lobby data and logs, written into its run dir, which is
+    handed to the archive once the engine exits."""
+
+    def setUp(self):
+        super().setUp()
+        self.run = Path(self.tmp.name) / "run"
+        self.run.mkdir()
+        self.proc.write_dir = self.run
+        self.proc.proc = type("P", (), {"pid": 777})()
+        self.metrics = FakeMetrics()
+        self.archived = []
+        self.c = lc.LobbyClient(lc.Settings({
+            "BARHOST_LOBBY_LOGIN": ME, "BARHOST_LOBBY_PASSWORD": "secret", "BAR_ENGINE_VERSION": ENGINE,
+            "BARHOST_LOBBY_CLUSTER": "EU", "BARHOST_FOLLOW": OWNER,
+            "BARHOST_STATUS_FILE": os.path.join(self.tmp.name, "status.json"),
+            "BARHOST_STATE_FILE": os.path.join(self.tmp.name, "state.json")}),
+            now=self.clock, launch=self.launch, metrics=self.metrics, archive=self.archived.append)
+        self.addCleanup(self.close_files)
+
+    def close_files(self):
+        """A game left running keeps its files open (module-wide for the log)."""
+        for f in (lc.GAME_LOG["file"], self.c.game_events):
+            if f is not None:
+                f.close()
+        lc.GAME_LOG["file"] = self.c.game_events = None
+
+    def play(self):
+        sent = self.boss_and_setup()
+        for x in sent:
+            if x.startswith("ADDBOT "):
+                w = x.split(" ")
+                self.feed("ADDBOT 12 %s %s %s 0 %s" % (w[1], ME, w[2], w[4]))
+        self.feed("SETSCRIPTTAGS game/modoptions/critters=2\tgame/players/alice/skill=[21.5]",
+                  "JOINEDBATTLE 12 Alice", "ADDUSER Alice US 1234",
+                  "CLIENTBATTLESTATUS Alice %d 0" % lc.battle_status(ready=1, mode=1, sync=1, team=3))
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+
+    def end(self):
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        self.run_for(2)
+
+    def test_the_room_is_recorded_at_the_start(self):
+        self.play()
+        g = json.loads((self.run / "game.json").read_text())
+        self.assertEqual((g["battle"], g["founder"], g["map"]), ("12", HOST, "All That Glitters v2.2.3"))
+        self.assertEqual(g["scriptTags"], {"game/modoptions/critters": "2", "game/players/alice/skill": "[21.5]"})
+        alice = [p for p in g["players"] if p["name"] == "Alice"][0]
+        self.assertEqual((alice["player"], alice["team"], alice["ready"], alice["accountId"]), (True, 3, 1, "1234"))
+        self.assertEqual(len(g["bots"]), 8)
+        self.assertEqual({b["ai"] for b in g["bots"]}, {"BARb"})
+        self.assertTrue(g["startedUtc"].endswith("Z"))
+        self.assertEqual(self.metrics.started, [(self.run, 777)])
+
+    def test_room_traffic_and_own_lines_are_kept_during_the_game(self):
+        self.play()
+        self.feed("SAIDBATTLE Alice gl hf", "SAIDBATTLE 13 elsewhere", "JOINEDBATTLE 99 Bob",
+                  "SAIDPRIVATE %s !status" % OWNER)
+        self.run_for(2)
+        self.end()
+        events = (self.run / "lobby-events.log").read_text()
+        self.assertIn(" SAIDBATTLE Alice gl hf", events)
+        self.assertNotIn("JOINEDBATTLE 99", events)                 # another room
+        self.assertNotIn("SAIDPRIVATE", events)                     # private messages are not room traffic
+        client = (self.run / "client.log").read_text()
+        self.assertIn("engine exited with code 0", client)
+        self.feed("SAIDBATTLE Alice after")                         # the game is over: no longer kept
+        self.assertNotIn("after", (self.run / "lobby-events.log").read_text())
+
+    def test_the_end_is_recorded_and_archived_once(self):
+        self.play()
+        self.end()
+        ended = json.loads((self.run / "ended.json").read_text())
+        self.assertEqual((ended["engineExit"], ended["resigned"]), (0, False))
+        self.assertEqual(self.archived, [self.run])
+        self.assertEqual(self.metrics.stopped, 1)
+        self.run_for(30)
+        self.assertEqual(self.archived, [self.run])
+
+
+class UsableCpus(unittest.TestCase):
+    """The CPUs the client may run on, as ranges (dedicated cores show here)."""
+
+    def cpus(self, ids):
+        from unittest import mock
+        with mock.patch.object(lc.os, "sched_getaffinity", create=True, return_value=set(ids)):
+            return lc.usable_cpus()
+
+    def test_ranges(self):
+        self.assertEqual(self.cpus([2, 3, 4, 5, 42, 43, 44, 45]), "2-5,42-45")
+        self.assertEqual(self.cpus([7]), "7")
+        self.assertEqual(self.cpus([1, 3, 4]), "1,3-4")
+
+
+class WriteDir(unittest.TestCase):
+    """The engine's write dir before a game: the metrics widget with the
+    client's settings, and the cache shared between games."""
+
+    def test_widget_and_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = lc.Settings({"BARHOST_LOBBY_LOGIN": ME, "BARHOST_LOBBY_PASSWORD": "x",
+                             "BARHOST_WORK_DIR": os.path.join(tmp, "work"), "BARHOST_METRICS_EVERY": "10",
+                             "BARHOST_ENGINE_PROFILER": "1"})
+            d = Path(tmp) / "work" / "run1"
+            d.mkdir(parents=True)
+            lc.prepare_write_dir(s, d)
+            widget = (d / "LuaUI" / "Widgets" / "rjm_host_metrics.lua").read_text()
+            self.assertIn("\nlocal EVERY = 10 ", widget)
+            self.assertIn("\nlocal RJM_PROFILER = true ", widget)
+            if (d / "cache").is_symlink():                          # needs symlink rights on Windows
+                self.assertEqual((d / "cache").resolve(), (Path(tmp) / "work" / ".engine-cache").resolve())
+
+    def test_metrics_off_installs_no_widget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = lc.Settings({"BARHOST_LOBBY_LOGIN": ME, "BARHOST_LOBBY_PASSWORD": "x",
+                             "BARHOST_WORK_DIR": tmp, "BARHOST_METRICS_EVERY": "0"})
+            d = Path(tmp) / "run1"
+            d.mkdir()
+            lc.prepare_write_dir(s, d)
+            self.assertFalse((d / "LuaUI").exists())
+
+
+class GamesAndPerf(Harness):
+    """!games: recent games newest first (the one running, ended ones, the
+    archive's); !perf [n]: one game's lag, CPU, memory; !help."""
+
+    def setUp(self):
+        super().setUp()
+        base = Path(self.tmp.name)
+        self.archive = base / "archive"
+        self.work = base / "work"
+        self.run = self.work / "run-now"
+        self.run.mkdir(parents=True)
+        self.proc.write_dir = self.run
+        self.proc.proc = type("P", (), {"pid": 777})()
+        self.c = lc.LobbyClient(lc.Settings({
+            "BARHOST_LOBBY_LOGIN": ME, "BARHOST_LOBBY_PASSWORD": "secret", "BAR_ENGINE_VERSION": ENGINE,
+            "BARHOST_LOBBY_CLUSTER": "EU", "BARHOST_FOLLOW": OWNER, "BARHOST_ARCHIVE_DIR": str(self.archive),
+            "BARHOST_ARCHIVE_SOURCE": "bar-lobbies.clyde", "BARHOST_WORK_DIR": str(self.work),
+            "BARHOST_STATUS_FILE": os.path.join(self.tmp.name, "status.json"),
+            "BARHOST_STATE_FILE": os.path.join(self.tmp.name, "state.json")}),
+            now=self.clock, launch=self.launch)
+        self.addCleanup(self.close_files)
+        for started, folder, mapname, lag, cores in (
+                ("2026-10-22T20:00:00.000000Z", "2026/10/22/a", "Cells v1", 2.0, 3.1),
+                ("2026-10-23T18:00:00.000000Z", "2026/10/23/b", "Bismuth Valley v2.4.1", 11.4, 8.4)):
+            self.archived(started, folder, mapname, lag, cores)
+
+    def close_files(self):
+        for f in (lc.GAME_LOG["file"], self.c.game_events):
+            if f is not None:
+                f.close()
+        lc.GAME_LOG["file"] = self.c.game_events = None
+
+    def archived(self, started, folder, mapname, lag, cores):
+        d = self.archive / folder
+        d.mkdir(parents=True)
+        (d / "manifest.json").write_text(json.dumps({
+            "startedUtc": started, "map": mapname, "outcome": "winner", "winningAllyTeams": [0],
+            "gameSeconds": 3720, "humans": ["Alice", "Bob"], "bots": 8,
+            "ai": {"name": "SMRTBARb", "release": "v1.1153-prod"},
+            "lag": {"behind_s": {"max": lag, "p95": 6.2, "avg": 1.3, "min": 0.0, "now": 0.1},
+                    "sim_fps": {"max": 60, "p95": 45, "avg": 29, "min": 12, "now": 30}},
+            "load": {"cores": {"max": 8.6, "p95": cores, "avg": 4.7, "min": 1.0, "now": 2.0},
+                     "main_thread_cores": {"max": 1.0, "p95": 0.98, "avg": 0.7, "min": 0.1, "now": 0.5},
+                     "io_pressure_pct": {"max": 0.2, "p95": 0.0, "avg": 0.0, "min": 0.0, "now": 0.0}},
+            "perf": {"label": "game 3 %s" % mapname, "seconds": 3727, "cores_avg": 4.68, "cores_p95": cores,
+                     "cores_peak_10s": 8.59, "cores_peak_1s": 16.0, "limit_cores": 16, "throttled_pct": 0.04,
+                     "throttled_s": 1.5, "mem_peak_gib": 7.75}}))
+        idx = self.archive / "_index" / "bar-lobbies.clyde.jsonl"
+        idx.parent.mkdir(parents=True, exist_ok=True)
+        with idx.open("a") as f:
+            f.write(json.dumps({"folder": folder, "run": folder.replace("/", "-"), "startedUtc": started,
+                                "map": mapname, "outcome": "winner", "gameSeconds": 3720, "humans": 2,
+                                "lagMaxS": lag, "coresP95": cores}) + "\n")
+
+    def pm(self, text, wait=40):
+        self.feed("SAIDPRIVATE %s %s" % (OWNER, text))
+        return [x[len("SAYPRIVATE %s " % OWNER):] for x in self.run_for(wait)
+                if x.startswith("SAYPRIVATE %s " % OWNER)]
+
+    def live(self):
+        self.boss_and_setup()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        (self.run / "engine-timeline.csv").write_text(
+            "unix_s,behind_s,sim_fps,ping_s,units\n1,0.5,30,0.2,800\n2,9.0,14,4.0,2100\n3,2.3,40,1.0,2200\n")
+        (self.run / "timeline.csv").write_text(
+            "unix_s,cores,main_thread_cores,main_preempt_per_s,mem_gib,throttled_pct\n"
+            "1,3.0,0.90,10,5.0,0\n2,6.0,1.00,200,6.5,0.5\n")
+        self.clock.t += 600
+
+    def test_games_newest_first_with_the_one_running(self):
+        self.live()
+        lines = self.pm("!games")
+        self.assertTrue(lines[0].startswith("0. NOW "), lines)
+        self.assertIn("All That Glitters v2.2.3, 10 min in; behind 2.3 s now, max 9.0 s", lines[0])
+        self.assertEqual(lines[1], "1. 10-23 18:00Z Bismuth Valley v2.4.1, 62 min, winner, 2 humans; "
+                                   "lag max 11.4 s; cores p95 8.4")
+        self.assertTrue(lines[2].startswith("2. 10-22 20:00Z Cells v1"))
+        self.assertEqual(lines[-1], "Details: !perf <number>.")
+
+    def test_games_count(self):
+        self.assertEqual(len(self.pm("!games 1")), 2)               # one game and the hint
+
+    def test_perf_now(self):
+        self.live()
+        lines = self.pm("!perf")
+        self.assertTrue(lines[0].startswith("Game 0 (now): All That Glitters v2.2.3, started "), lines)
+        self.assertEqual(lines[1], "Behind the server: now 2.3, max 9.0, p95 9.0, avg 3.9 s; sim speed now 40, "
+                                   "min 14, avg 28 frames/s (30 = real time); ping max 4.0 s.")
+        self.assertIn("main (sim) thread now 1.00, max 1.00", lines[2])
+        self.assertIn("pushed off its CPU p95 200/s", lines[2])
+        self.assertIn("Memory max 6.5 GiB", lines[-1])
+        self.assertIn("units max 2200", lines[-1])
+
+    def test_perf_of_an_archived_game(self):
+        lines = self.pm("!perf 1")
+        self.assertEqual(lines[0], "Game 1: 2026-10-23 18:00Z, Bismuth Valley v2.4.1, 62 min, winner (ally 0), "
+                                   "2 humans, 8 bots, SMRTBARb v1.1153-prod.")
+        self.assertTrue(lines[1].startswith("Behind the server: max 11.4, p95 6.2, avg 1.3 s; sim speed min 12"))
+        self.assertTrue([x for x in lines if x.startswith("Whole game: game 3 Bismuth Valley v2.4.1: 3727 s")])
+        self.assertEqual(lines[-1], "Files: 2026/10/23/b")
+
+    def test_a_game_ended_but_not_yet_archived(self):
+        self.live()
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        self.run_for(2)
+        lines = self.pm("!games")
+        self.assertTrue(lines[0].startswith("1. ") and "All That Glitters" in lines[0] and "being archived" in lines[0],
+                        lines)
+        report = self.pm("!perf 1")
+        self.assertIn("being archived", report[0])
+        self.assertTrue(report[1].startswith("Behind the server: max 9.0"))
+
+    def test_unknown_numbers_and_words(self):
+        self.assertEqual(self.pm("!perf 9"), ["No game 9. PM me !games for the list."])
+        self.assertEqual(self.pm("!perf last"),
+                         ["PM me !perf for the game now (or the last one), or !perf <number> from !games."])
+
+    def test_no_lag_data_is_said(self):
+        self.assertEqual(lc.perf_lines({}, {}, None), ["No lag data for this game (the engine's metrics widget "
+                                                       "wrote none)."])
+
+    def test_help(self):
+        lines = self.pm("!help")
+        self.assertEqual(len(lines), 4)
+        text = " ".join(lines)
+        for cmd in ("!status", "!games", "!perf", "!bots", "!public", "!private", "!stop", "!help"):
+            self.assertIn(cmd, text)
+        self.assertTrue(all(len(x) < 300 for x in lines))
+
+    def test_strangers_get_nothing(self):
+        self.feed("SAIDPRIVATE Troll !games", "SAIDPRIVATE Troll !help")
+        self.assertFalse([x for x in self.run_for(10) if x.startswith("SAYPRIVATE Troll")])
 
 
 class EngineExit(Harness):

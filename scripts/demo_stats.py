@@ -7,9 +7,11 @@ map with the same settings can be compared on these numbers rather than on who
 happened to win.
 
 File layout, from ``rts/System/LoadSave/DemoFile.h:53-72`` and
-``rts/System/LoadSave/DemoRecorder.cpp:296-317``:
+``rts/System/LoadSave/DemoRecorder.cpp:55-57, 278-317``:
 
-    DemoFileHeader | script | demo stream | player stats | team stats
+    DemoFileHeader | script | demo stream | winners | player stats | team stats
+
+The winners are one byte per winning ally team (``winningAllyTeamsSize``).
 
 and the team-stats chunk is ``numTeams`` little-endian uint32 sample counts,
 followed by that many packed ``TeamStatistics`` records per team, in team order
@@ -77,18 +79,22 @@ def read_demo(path: Path) -> dict:
             "changed upstream and this parser needs updating"
             % (team_stat_elem, struct.calcsize(TEAM_STAT)))
 
+    winners_at = header_size + script_size + stream_size
     out = {
         "file": str(path),
         "engine": version_string.split(b"\0", 1)[0].decode("utf-8", "replace"),
+        "gameId": game_id.hex(),
+        "unixTime": unix_time,
         "gameTimeSeconds": game_time,
         "wallclockSeconds": wallclock_time,
         "numPlayers": num_players,
         "numTeams": num_teams,
         "statsPeriodSeconds": team_stat_period,
+        "winningAllyTeams": list(raw[winners_at:winners_at + max(winners_size, 0)]),
         "teams": [],
     }
 
-    offset = header_size + script_size + stream_size + player_stat_size
+    offset = winners_at + max(winners_size, 0) + player_stat_size
     if team_stat_size <= 0 or num_teams <= 0:
         return out
 

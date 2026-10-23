@@ -30,9 +30,11 @@ Python `unittest` suites run inside the image against the installed code
 
 | File | Covers |
 | --- | --- |
-| `test_install_ai.py` | mounted folders, tar and zip archives, both archive layouts, Windows refusal, zip and tar path traversal, reporting every failed source, GitHub `latest`/`newest`/tag/glob resolution (mocked), token handling |
+| `test_install_ai.py` | mounted folders, tar and zip archives, both archive layouts, Windows refusal, zip and tar path traversal, reporting every failed source, GitHub `latest`/`newest`/tag/glob resolution (mocked), token handling, AI channels (`Channels`: parsing, one folder per channel and release, no download when unchanged, activation swapping the engine's link between releases and over an installed folder, the linked release kept when newer ones arrive, a broken release keeping the old, releases surviving a restart without GitHub) |
 | `test_run_match.py` | the observer team (on by default, and off), spectator host of every AI, interleaved and blocked teams, handicap, modoption defaults and removal, start boxes, loopback autohost, config validation, engine config |
 | `test_autopilot_guard.py` | the real Autopilot plugin under a stub SPADS API: boss votes refused in every form, the owner and autohost protected (including via aliases and case), room settings unvotable, only `set map` votable, ordinary votes allowed, every policy setting honoured, `commands.conf` makes `!boss` owner-only |
+| `test_game_archive.py` | `demo_stats.py` reading past the winners block (with and without winners, game id); `game_archive.py`: the folder layout and name, the manifest (outcome, winners, lag and load summaries, file list), the start script's password removed, gzipped logs, the index line, no partial folder left, an interrupted game, a game without a replay, archiving twice, `--pending` over a work dir |
+| `test_engine_metrics.py` | `engine_metrics.py` on fake /proc and cgroup files: one line per interval, container and engine cores, the main thread apart, preemptions, disk MB/s, PSI pressure, RSS, the busiest threads and per-name totals, an engine gone, off at 0, thread names with spaces and parentheses |
 | `test_lan_game.py` | LAN game spec validation (players, teams, AI hosts, names, passwords, allyteams, observer rules) and the host and client start scripts |
 | `test_spads_scripts.py` | `run_spads.sh --check` (config loads, prod ports, owner required, owner-name validation, password file, missing credentials), `archive_game.sh` (archiving, hostile arguments), `ready.sh` (the probe follows *this* SPADS process's lobby socket and ignores other processes'), `spadsctl` error handling |
 
@@ -44,11 +46,15 @@ with lobby lines and a fake clock. It covers:
   in game;
 - boss, setup commands, bots on their ally team with distinct teams and
   cycled sides, then still a player in a public room;
-- the boss guard (`Guard`): `!ev` at once for a vote to unboss the client,
-  everyone, or an authorised user (any case), not for other votes, not for
+- the boss guard (`Guard`): `!ev` at once for every boss or unboss vote an
+  untrusted player calls (any case), and for a trusted user's vote to unboss
+  the client, everyone or a trusted user, but not a trusted user's other boss
+  votes; an untrusted player's start box vote (box commands, presets,
+  start settings, by `bSet` or alone), never a trusted user's; not for
+  other votes, not for
   vote text said by anyone but the autohost, and not before being boss;
   "Shame on you, <caller>!" after ending a vote to unboss the client or
-  everyone, not one for an authorised user;
+  everyone, not one for anyone else or a boss vote;
   authorised users made boss when they join, or once boss if already in;
   `BARHOST_AUTO_BOSS` users made boss and guarded too, with no PM commands;
 - AI release updates (`AIUpdate`): checked after each game and on the
@@ -57,16 +63,34 @@ with lobby lines and a fake clock. It covers:
   (`test_install_ai.py` `Update`: the installed tag recorded, an unchanged
   release not downloaded, a new one swapped in, a broken one leaving the
   installed version, a fixed tag never checked);
-- `!barb` / `!smrt` (`SwitchAI`): the bots replaced as a player, the choice
-  kept across a restart, the same AI not redone, a switch during a game done
-  after it, strangers refused;
+- `!ai` (`SwitchAI`, `BARHOST_AI_CHANNELS`): channels fetched at start and
+  the chosen one put in place; `!ai` lists them with their releases; another
+  AI replaces the bots as a player, test and prod releases of one AI swap
+  without touching them; the choice kept across a restart; the same channel
+  not redone, an unknown one changing nothing; during a game, done after it
+  and after the post-game release check; a release not downloaded fetched
+  first; a new release of the chosen channel used next game (said in the
+  room), of another only reported; a failed switch keeping the bots;
+  `!bots <n> <channel>`; `!smrt` / `!barb` gone; strangers refused; a bad
+  channel list stopping the client;
 - the welcome (`Welcome`): said privately (SAYBATTLEPRIVATEEX) to each
   joiner, not to itself, the autohost or other rooms, nothing when unset;
 - per-game measurement (`Perf`): started with the engine, summarised in the
-  log at its exit, `!perf` replying with the last game
+  log at its exit, `!perf` replying with the last game; `!games` / `!perf`
+  / `!help` (`GamesAndPerf`): newest first with the game running as 0 and
+  live lag, archived games from the index, a game ended but not yet
+  archived, the count, live and archived reports, unknown numbers and
+  words, no lag data, the help lines, strangers refused
   (`test_cgroup_perf.py`: cgroup v2 and v1 counters, cores average, p95
   and 1 s / 10 s peaks, throttled share and time, memory peak, samples and
   the summary CSV, nothing readable);
+- the game record (`GameRecord`, `WriteDir`): the room at the start in
+  `game.json` (battle, script tags, players with account ids, bots with
+  their AI), the metrics sampler started on the engine's pid, the room's
+  lobby traffic and the client's own lines kept only during the game,
+  `ended.json` at the engine's exit and the run dir handed to the archive
+  once; the write dir given the metrics widget with the client's settings
+  and the shared engine cache, no widget with metrics off;
 - start boxes (`StartBoxes`): lookup by map name without version, `_` as a
   space, first variant of `BARHOST_START_BOX_KEYS` present; set once boss on
   the room's map, after every map change once per map, `0` for a map with

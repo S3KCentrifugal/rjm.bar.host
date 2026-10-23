@@ -37,6 +37,14 @@ The release tag each ``github:`` source installed is kept in
 ``AI/Skirmish/.rjm-releases.json``. ``update()`` (also ``install_ai.py
 --update``) reinstalls a source on a moving tag (``latest`` / ``newest``) when
 it now resolves to another release; the lobby client calls it between games.
+
+Channels (``BARHOST_AI_CHANNELS``, used by the lobby client) are named AI
+choices, ``name=AI`` (the engine's own AI) or ``name=AI:github:...`` (a
+release). Each channel's release is downloaded into its own folder on the
+data volume, ``<cache>/<channel>/<tag>/<AI>/<version>/``, so several releases
+of one AI (a test and a prod build, both ``SMRTBARb/stable``) are kept side
+by side and survive restarts; ``activate_channel`` points the engine's
+``AI/Skirmish/<AI>`` at one of them with a symlink.
 """
 
 from __future__ import annotations
@@ -44,6 +52,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -311,6 +320,170 @@ def update() -> "tuple[list[str], list[str]]":
             except Exception as exc:  # a failed check keeps what is installed
                 errors.append("%s: %s" % (spec, exc))
     return changes, errors
+
+
+# -- channels: named AI choices, their releases kept on the data volume -------
+
+CHANNEL_FILE = "release.json"   # in <cache>/<channel>: {"tag": the current release}
+CHANNEL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,30}$")
+AI_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}$")
+TAG_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,100}$")
+
+
+def parse_channels(text: str) -> "dict[str, tuple[str, str]]":
+    """``BARHOST_AI_CHANNELS``: ';'-separated ``name=AI`` (the engine's own
+    AI) or ``name=AI:github:OWNER/REPO@TAG[#GLOB]`` -> {name: (AI, source)},
+    in the order given. Names are lower case."""
+    out = {}
+    for part in text.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError("expected name=AI[:github:...], got %r" % part)
+        name, rest = (x.strip() for x in part.split("=", 1))
+        ai, _, source = (x.strip() for x in rest.partition(":"))
+        name = name.lower()
+        if not CHANNEL_NAME_RE.match(name) or not AI_NAME_RE.match(ai):
+            raise ValueError("bad AI channel %r" % part)
+        if source and not source.startswith("github:"):
+            raise ValueError("an AI channel's source must be github:OWNER/REPO@TAG[#GLOB]: %r" % part)
+        out[name] = (ai, source)
+    return out
+
+
+def channel_release(cache: Path, name: str) -> str:
+    """The release tag downloaded for a channel, "" if none."""
+    try:
+        data = json.loads((cache / name / CHANNEL_FILE).read_text())
+    except (OSError, ValueError):
+        return ""
+    tag = data.get("tag", "") if isinstance(data, dict) else ""
+    return tag if isinstance(tag, str) and TAG_RE.match(tag) and (cache / name / tag).is_dir() else ""
+
+
+def prune_channel(chan: Path, keep: set) -> None:
+    """Remove a channel's releases other than `keep`, and leftovers."""
+    for p in chan.iterdir():
+        if p.is_dir() and p.name not in keep:
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def linked_releases(chan: Path, dest: "Path | None") -> set:
+    """The channel's release folders the engine's AI links point into."""
+    used = set()
+    if dest is None or not dest.is_dir():
+        return used
+    root = chan.resolve()
+    for p in dest.iterdir():
+        if p.is_symlink():
+            target = p.resolve()
+            if root in target.parents:
+                used.add(target.relative_to(root).parts[0])
+    return used
+
+
+def fetch_channel(cache: Path, name: str, source: str, work: Path, dest: "Path | None" = None) -> "tuple[str, str]":
+    """Download a channel's release if it moved: (old tag, new tag), equal
+    when nothing changed. On any failure it raises, and the channel keeps
+    what it had. Never touches the engine: activate_channel does that."""
+    old = channel_release(cache, name)
+    tag, url = github_release(source)
+    if tag == old:
+        return old, old
+    if not TAG_RE.match(tag):
+        raise ValueError("unexpected release tag %r" % tag)
+    archive = work / ("ai.zip" if source.split("#", 1)[-1].endswith(".zip") else "ai.tar.gz")
+    log("downloading %s %s: %s" % (name, tag, url))
+    archive.write_bytes(fetch(url))
+    unpacked = work / "unpacked"
+    unpacked.mkdir()
+    extract(archive, unpacked)
+    ais = ai_dirs_in(unpacked)
+    if not ais:
+        raise ValueError("%s %s contains no <Name>/<version>/AIInfo.lua" % (name, tag))
+    problems = [p for ai in ais for p in check_ai_dir(ai)]
+    if problems:
+        raise ValueError("; ".join(problems))
+    chan = cache / name
+    chan.mkdir(parents=True, exist_ok=True)
+    new = chan / ("." + tag + ".new")
+    if new.exists():
+        shutil.rmtree(new)
+    new.mkdir()
+    for ai in ais:
+        shutil.copytree(ai, new / ai.name)
+    final = chan / tag
+    if final.exists():                          # an earlier try that was never recorded
+        shutil.rmtree(final)
+    new.rename(final)
+    tmp = chan / (CHANNEL_FILE + ".tmp")
+    tmp.write_text(json.dumps({"tag": tag, "source": source}))
+    tmp.replace(chan / CHANNEL_FILE)
+    # The release before stays until the next one, and any the engine still
+    # points at: the client activates the new one between games.
+    prune_channel(chan, {tag, old} | linked_releases(chan, dest))
+    log("%s: %s -> %s" % (name, old or "none", tag))
+    return old, tag
+
+
+def update_channels(channels: dict, cache: Path, dest: "Path | None" = None) -> "tuple[list[str], list[str], dict]":
+    """Fetch every channel with a source. Returns (changes as "<name>:
+    <old> -> <new>", errors, {name: current tag}). `dest` (AI/Skirmish)
+    keeps the releases the engine links to."""
+    changes, errors = [], []
+    with tempfile.TemporaryDirectory(prefix="install_ai.") as tmp:
+        for i, (name, (_ai, source)) in enumerate(channels.items()):
+            if not source:
+                continue
+            work = Path(tmp) / str(i)
+            work.mkdir()
+            try:
+                old, new = fetch_channel(cache, name, source, work, dest)
+                if new != old:
+                    changes.append("%s: %s -> %s" % (name, old or "none", new))
+            except Exception as exc:  # a failed check keeps what is there
+                errors.append("%s: %s" % (name, exc))
+    return changes, errors, {n: channel_release(cache, n) for n, (_a, s) in channels.items() if s}
+
+
+def activate_channel(cache: Path, name: str, channels: dict, dest: Path) -> str:
+    """Point the engine's ``AI/Skirmish/<AI>`` at the channel's release (a
+    symlink, swapped in one rename). A channel without a source uses the
+    engine's own AI: nothing to do. Returns the release tag ("" for none).
+    Call only between games: the engine loads the AI when a game starts."""
+    _ai, source = channels[name]
+    if not source:
+        return ""
+    tag = channel_release(cache, name)
+    if not tag:
+        raise ValueError("%s is not downloaded yet" % name)
+    release = cache / name / tag
+    for ai in sorted(p for p in release.iterdir() if p.is_dir()):
+        target = dest / ai.name
+        if target.is_symlink() and target.resolve() == ai.resolve():
+            continue
+        link = dest / ("." + ai.name + ".link")
+        if link.exists() or link.is_symlink():
+            replace_with(link, lambda _: None)
+        link.symlink_to(ai, target_is_directory=True)
+        if target.is_symlink() or target.is_file():
+            try:
+                os.replace(link, target)        # one atomic rename on Linux
+            except OSError:                     # Windows: not over a directory link
+                target.unlink()
+                link.rename(target)
+        elif target.is_dir():                   # installed by an earlier image or source
+            old = dest / ("." + ai.name + ".old")
+            if old.exists() or old.is_symlink():
+                replace_with(old, lambda _: None)
+            target.rename(old)
+            link.rename(target)
+            shutil.rmtree(old, ignore_errors=True)
+        else:
+            link.rename(target)
+        log("%s -> %s (%s %s)" % (target, ai, name, tag))
+    return tag
 
 
 def main() -> int:

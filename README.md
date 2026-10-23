@@ -82,10 +82,16 @@ The table leaves out two cases:
      a player's lag slows the whole game; a spectator's does not
      (`GameServer.cpp:905`).
   3. While boss, gives boss to `BARHOST_FOLLOW` users as they join, and ends
-     (`!ev`) any vote to unboss everyone, the client, or one of those users;
-     a vote against the client also gets "Shame on you, <caller>!".
-     `BARHOST_AUTO_BOSS` users are also made boss as they join, and votes to
-     unboss them are ended too, but they cannot PM it commands.
+     (`!ev`) any `boss` or `unboss` vote called by an untrusted player
+     (someone who won boss by vote could unboss the others and take the
+     room), and from anyone a vote to unboss the client, everyone, or a
+     trusted user (`BARHOST_FOLLOW`, `BARHOST_AUTO_BOSS`). A boss's direct
+     `!boss <name>` is not a vote and is left alone. An untrusted player's
+     vote to change the start boxes the client set is ended too: `addBox`,
+     `clearBox`, `loadBoxes`, `split`, `preset`, `bPreset`, and the start
+     settings (`mapmetadata_start*`, `startPosType`, by `bSet` or alone). A vote to unboss the client or everyone also gets "Shame on
+     you, <caller>!". `BARHOST_AUTO_BOSS` users are also made boss as they
+     join, but they cannot PM it commands.
      With `BARHOST_PROMOTE_EVERY`, it PMs the autohost `!promote` while a
      public room's player team is not full, as soon as each cooldown ends
      (it reads the autohost's "Please wait ..." answer).
@@ -93,9 +99,18 @@ The table leaves out two cases:
      is updated between games: checked after every game and every
      `BARHOST_AI_UPDATE_EVERY` seconds, installed only when no game runs, and
      no start hint is given until it is done.
-     Those users switch the bots' AI with `!barb` / `!smrt`, kept across
-     restarts and done as a player (after the game if one is running). Each
-     player who joins gets `BARHOST_WELCOME` privately in the room chat.
+     Those users pick the bots' AI with `!ai <name>` from
+     `BARHOST_AI_CHANNELS` (`!ai` alone lists them): the game's own BARb, or
+     a GitHub release such as SMRTBARb test or prod. Each channel's release
+     is kept under `BARHOST_AI_RELEASES_DIR` on the data volume, so it
+     survives restarts; every channel is fetched at start and checked between
+     games like the moving tags above, and the engine's `AI/Skirmish/<AI>` is
+     pointed at the chosen release (a symlink) only between games. The choice
+     is kept across restarts. Swapping releases of one AI (test and prod are
+     both `SMRTBARb/stable`) leaves the bots alone; another AI replaces them,
+     as a player (after the game if one is running). Each
+     player who joins gets `BARHOST_WELCOME` privately in the room chat,
+     with the AI release in use added ("Current AI: SMRTBARb version v1.1153-prod.").
      During a game, their `!stop` resigns the bots: the client's engine,
      which hosts them, leaves the game, so BAR wipes out the bots' ally team
      (`game_end.lua`: an AI host's AIs count as uncontrolled once it is gone)
@@ -111,7 +126,30 @@ The table leaves out two cases:
      throttling, memory; `scripts/cgroup_perf.py`, a few file reads a
      second): one `perf` line in the log, a row in
      `$BARHOST_OUT_DIR/client/perf-summary.csv`, per-second samples in the
-     game's `perf.csv`; `!perf` by PM repeats the last.
+     game's `perf.csv`. By PM, `!games [count]` lists recent games newest
+     first (the one running, those ended, then the archive's index), and
+     `!perf [number]` reports one: how far behind the server the engine
+     was, sim speed, CPU (the main thread apart), memory and pressure,
+     live for the game running. `!help` lists every command.
+     Each game also runs in its own engine write dir under
+     `BARHOST_WORK_DIR` (fast storage: the engine writes its logs there during
+     the game) and is diagnosed while it runs, every `BARHOST_METRICS_EVERY`
+     seconds: a widget the client installs in that write dir
+     (`scripts/rjm_host_metrics.lua`) logs how far the engine is behind the
+     server, its sim speed, ping, profiler shares and unit count
+     (`engine-timeline.csv`); the client logs the engine's CPU per thread
+     (the main thread runs the simulation), memory, disk and the container's
+     CPU / disk / memory pressure (`timeline.csv`, `threads.csv`;
+     `scripts/engine_metrics.py`), its own lines (`client.log`) and the
+     room's lobby traffic (`lobby-events.log`), and records the room at the
+     start (`game.json`: players, bots, script tags, AI). When the engine
+     exits, a low-priority process (`scripts/game_archive.py`) moves the
+     game into `BARHOST_ARCHIVE_DIR`: one folder per game,
+     `YYYY/MM/DD/<start>Z_<source>_<map>_<game id>/`, with the replay,
+     metrics, gzipped logs, lobby data and a `manifest.json` (outcome,
+     winners, lag and load summaries, files with sha256), plus a line per
+     game in `_index/<source>.jsonl`. The layout is the same for every
+     source, so one archive can gather games from many clients and pods.
      When a player mentions "bonus", says how to vote the AIs' bonus (all
      with `!cv setallaibonus <n>`, one with `!cv force %<AI> bonus <n>`); a
      passed bonus vote is applied to every AI and kept for later bot adds.
