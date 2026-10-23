@@ -35,6 +35,12 @@ class Proc:
     def poll(self):
         return self.code
 
+    def terminate(self):
+        self.terminated = getattr(self, "terminated", 0) + 1
+
+    def kill(self):
+        self.killed = getattr(self, "killed", 0) + 1
+
 
 class Harness(unittest.TestCase):
     def setUp(self):
@@ -892,7 +898,9 @@ class StartBoxes(Harness):
 
 
 class StopRequest(Harness):
-    """An authorised user's !stop: ask the players to vote; never act."""
+    """An authorised user's !stop: while this engine is in the game it leaves,
+    which resigns the bots; if it is not (the game goes on without it), the
+    players are asked to vote."""
 
     def setUp(self):
         super().setUp()
@@ -902,16 +910,50 @@ class StopRequest(Harness):
         self.feed("SAIDPRIVATE %s %s" % (user, text))
         return self.run_for(5)
 
-    def test_during_a_game_the_room_is_asked_once(self):
+    def test_in_a_game_the_bots_are_resigned(self):
         self.boss_and_setup()
         self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.assertEqual(len(self.launched), 1)
+        sent = self.pm("!stop")
+        self.assertEqual(getattr(self.proc, "terminated", 0), 1)
+        self.assertIn("SAYBATTLE %s ended this game: resigning the AI bots." % OWNER, sent)
+        self.assertTrue([x for x in sent if x.startswith("SAYPRIVATE %s Resigning the bots" % OWNER)])
+        self.assertFalse([x for x in sent if "!cv stop" in x])
+        again = self.pm("!stop")
+        self.assertEqual(self.proc.terminated, 1)
+        self.assertTrue([x for x in again if "Already resigning" in x])
+
+    def test_an_engine_that_does_not_quit_is_killed(self):
+        self.boss_and_setup()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.pm("!stop")
+        self.run_for(10)
+        self.assertFalse(getattr(self.proc, "killed", 0))
+        self.run_for(10)
+        self.assertEqual(self.proc.killed, 1)
+
+    def test_resigned_then_back_to_the_room_after_the_game(self):
+        self.boss_and_setup()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.pm("!stop")
+        self.proc.code = 0                       # the engine left
+        self.run_for(3)
+        self.assertEqual(self.c.state, "ingame")  # the autohost's game is still on
+        self.assertEqual(len(self.launched), 1)   # never rejoined
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        self.run_for(3)
+        self.assertEqual(self.c.state, "waiting")
+
+    def test_engine_gone_but_game_on_asks_for_a_vote_once(self):
+        self.boss_and_setup()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.proc.code = 0
+        self.run_for(3)
         sent = self.pm("!stop")
         self.assertIn("SAYBATTLE %s asks to end this game: a player can type !cv stop, then the others "
                       "!vote y." % OWNER, sent)
-        self.assertTrue([x for x in sent if x.startswith("SAYPRIVATE %s Asked the players" % OWNER)])
-        self.assertFalse([x for x in sent if x in ("SAYBATTLE !stop", "SAYBATTLE !cv stop")])
+        self.assertFalse(getattr(self.proc, "terminated", 0))
         again = self.pm("!stop")
-        self.assertFalse([x for x in again if x.startswith("SAYBATTLE")])
         self.assertTrue([x for x in again if "less than a minute ago" in x])
 
     def test_no_game_no_message(self):
@@ -924,6 +966,43 @@ class StopRequest(Harness):
         self.boss_and_setup()
         self.feed("CLIENTSTATUS %s 65" % HOST)
         self.assertEqual(self.pm("!stop", user="Troll"), [])
+        self.assertFalse(getattr(self.proc, "terminated", 0))
+
+
+class FriendRequests(Harness):
+    """BARHOST_FRIEND_JOINERS=1: a friend request to each player joining the
+    room, by account id, once per account across restarts."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_FRIEND_JOINERS="1")
+
+    def joins(self, name, aid):
+        self.feed("ADDUSER %s US %s 0" % (name, aid), "JOINEDBATTLE 12 " + name)
+        return [x for x in self.run_for(5) if x.startswith("c.user.add_friend")]
+
+    def test_each_joiner_once_and_kept(self):
+        self.boss_and_setup()
+        self.assertEqual(self.joins("Alice", "4242"), ["c.user.add_friend 4242"])
+        self.feed("LEFTBATTLE 12 Alice")
+        self.assertEqual(self.joins("Alice", "4242"), [])
+        self.assertEqual(self.joins("Bob", "77"), ["c.user.add_friend 77"])
+        self.assertEqual(self.client(BARHOST_FRIEND_JOINERS="1").friended, {"4242", "77"})
+
+    def test_not_the_autohost_itself_or_unknown_ids(self):
+        self.boss_and_setup()
+        self.feed("ADDUSER Ghost US x 0", "JOINEDBATTLE 12 Ghost")
+        self.assertFalse([x for x in self.run_for(5) if x.startswith("c.user.add_friend")])
+
+    def test_off_by_default(self):
+        self.c = self.client()
+        self.boss_and_setup()
+        self.assertEqual(self.joins("Alice", "4242"), [])
+
+    def test_a_refusal_is_only_logged(self):
+        self.boss_and_setup()
+        self.feed("s.user.add_friend 4242	failure	existing friend request")
+        self.assertEqual(self.c.state, "waiting")
 
 
 class FakePerf:

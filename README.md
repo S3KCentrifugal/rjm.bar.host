@@ -86,9 +86,13 @@ The table leaves out two cases:
      Those users switch the bots' AI with `!barb` / `!smrt`, kept across
      restarts and done as a player (after the game if one is running). Each
      player who joins gets `BARHOST_WELCOME` privately in the room chat.
-     During a game, their `!stop` makes the client ask the players to vote
-     `!cv stop`: the autohost lets only players stop a game, and both the
-     host and the client spectate.
+     During a game, their `!stop` resigns the bots: the client's engine,
+     which hosts them, leaves the game, so BAR wipes out the bots' ally team
+     (`game_end.lua`: an AI host's AIs count as uncontrolled once it is gone)
+     and the game ends. If its engine has already left a game that goes on,
+     it asks the players to vote `!cv stop` instead (only players may).
+     With `BARHOST_FRIEND_JOINERS=1`, each player who joins the room gets one
+     friend request (once per account, kept across restarts).
      After every map change (its rotation's or a boss's), sets the map's start
      boxes from `BARHOST_START_BOXES_FILE` with `!bSet
      mapmetadata_startbox_override`, or the map's defaults (`0`) for a map

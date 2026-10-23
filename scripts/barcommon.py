@@ -268,6 +268,15 @@ class Engine:
     def returncode(self):
         return self.proc.returncode
 
+    def terminate(self) -> None:
+        """Ask the engine to quit, without waiting (SIGTERM)."""
+        if self.proc.poll() is None:
+            self.proc.terminate()
+
+    def kill(self) -> None:
+        if self.proc.poll() is None:
+            self.proc.kill()
+
     def stop(self, grace: float = 30) -> None:
         if self.proc.poll() is None:
             self.proc.terminate()

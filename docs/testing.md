@@ -72,9 +72,14 @@ with lobby lines and a fake clock. It covers:
   "bonuses", not the autohost or itself), once a minute; a passed vote for
   all or one AI applied to every AI and kept for later adds in the room;
   only the autohost's pass message counts;
-- `!stop` (`StopRequest`): during a game, one line asking the players to
-  vote `!cv stop`, no command of its own, once a minute; nothing without a
-  game; strangers ignored;
+- `!stop` (`StopRequest`): in a game, the engine is told to quit (the bots
+  resign), a line in the room, once; killed if still running 20 s later;
+  never rejoined, back to the room when the autohost's game ends; with the
+  engine already gone, one line asking for `!cv stop`, once a minute; nothing
+  without a game; strangers ignored;
+- friend requests (`FriendRequests`): `c.user.add_friend <account id>` to
+  each joiner, once per account and kept across restarts; not without an
+  account id or when off; a refusal only logged;
 - the ring hint (`RingHint`): one line on voting an away player to
   spectator after a `!ring`, no command of its own, at most once a minute,
   not for the autohost, itself, or text that is not a ring;

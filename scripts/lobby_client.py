@@ -90,6 +90,8 @@ Settings (environment):
   BARHOST_BOT_PROFILE     optional JSON sent as !aiProfile for every bot
   BARHOST_BOT_SETUP       ';'-separated chat commands sent each time after the
                           client adds bots, e.g. "!setallaibonus 50"
+  BARHOST_FRIEND_JOINERS  room mode: send a friend request to each player who
+                          joins the room, once per account (0; 1 = on)
   BARHOST_MIN_HUMANS      humans needed before an auto-start (1; 0 = never)
   BARHOST_START_DELAY     countdown in seconds once all are ready (20)
   BARHOST_POSTGAME_DELAY  no auto-start for this many seconds after a game (60)
@@ -149,6 +151,9 @@ SETALL_RE = re.compile(r"^!setallaibonus\s+\d+\s*$", re.IGNORECASE)
 # vote, and leave it to them. At most once a minute.
 STOP_HINT = "%s asks to end this game: a player can type !cv stop, then the others !vote y."
 STOP_HINT_EVERY = 60
+# !stop while this engine is in the game: it leaves, which resigns the bots.
+RESIGN_SAY = "%s ended this game: resigning the AI bots."
+RESIGN_KILL_AFTER = 20
 # Authorised users switch the bots' AI by PM; the choice is kept.
 AI_COMMANDS = {"!barb": "BARb", "!smrt": "SMRTBARb"}
 
@@ -226,6 +231,9 @@ class Settings:
         # source on a moving tag (@latest / @newest), only between games; also
         # checked after every game. 0 = never.
         self.ai_update_every = int(g("BARHOST_AI_UPDATE_EVERY", "900"))
+        # Room mode: a friend request to each player who joins the room, once
+        # per account (Teiserver c.user.add_friend <account id>).
+        self.friend_joiners = g("BARHOST_FRIEND_JOINERS", "0") == "1"
         self.min_humans = int(g("BARHOST_MIN_HUMANS", "1"))
         self.start_delay = int(g("BARHOST_START_DELAY", "20"))
         self.postgame_delay = int(g("BARHOST_POSTGAME_DELAY", "60"))
@@ -308,6 +316,9 @@ class LobbyClient:
         self.map_index = state.get("map_index", 0)
         # The bots' AI, as last chosen by !barb / !smrt (or !bots n AI); kept.
         self.bot_ai = state.get("bot_ai", s.bot_ai)
+        # Accounts already sent a friend request; kept so each gets one.
+        self.friended = set(str(i) for i in state.get("friended", []))
+        self.account_ids = {}       # user name -> account id, from ADDUSER
         self.ai_switch_due = False  # a switch asked during a game, done after it
         # New AI releases: checked between games by the I/O layer (install_ai.update).
         self.next_ai_check = self.now() + s.ai_update_every
@@ -329,6 +340,8 @@ class LobbyClient:
             out["map_index"] = st["map_index"]
         if isinstance(st.get("bot_ai"), str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", st["bot_ai"]):
             out["bot_ai"] = st["bot_ai"]
+        if isinstance(st.get("friended"), list):
+            out["friended"] = [str(i) for i in st["friended"] if str(i).isdigit()]
         return out
 
     def save_state(self):
@@ -336,7 +349,7 @@ class LobbyClient:
             self.s.state_file.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.s.state_file.with_suffix(".tmp")
             tmp.write_text(json.dumps({"privacy": self.privacy, "map_index": self.map_index,
-                                       "bot_ai": self.bot_ai}))
+                                       "bot_ai": self.bot_ai, "friended": sorted(self.friended)}))
             tmp.replace(self.s.state_file)
         except OSError as e:
             log("could not save %s: %s" % (self.s.state_file, e))
@@ -384,6 +397,7 @@ class LobbyClient:
         self.map_skips = 0          # maps skipped in a row (not accepted or not downloadable)
         self.ring_hint_after = 0.0  # room mode: no ring hint before this time
         self.stop_hint_after = 0.0  # no !stop request posted before this
+        self.resign_kill_at = getattr(self, "resign_kill_at", None)  # !stop: kill the engine if still running then
         self.bonus_hint_after = 0.0  # no bonus hint before this
         self.voted_bonus = None     # the AI bonus this room voted in, if any
         self.vacant = None          # room mode: the joined room was found free
@@ -441,6 +455,9 @@ class LobbyClient:
         if not line:
             return
         cmd = line.split(" ", 1)[0]
+        if cmd == "s.user.add_friend":
+            self.on_friend_reply(line)
+            return
         handler = getattr(self, "on_" + cmd, None)
         if handler:
             handler(line)
@@ -477,9 +494,29 @@ class LobbyClient:
         log("login queued by the server")
 
     def on_ADDUSER(self, line):
+        # ADDUSER userName country accountID [lobbyID] (Chobby interface.lua _OnAddUser)
         w = line.split(" ")
         if len(w) > 1:
             self.users.setdefault(w[1], 0)
+            if len(w) > 3 and w[3].isdigit():
+                self.account_ids[w[1]] = w[3]
+
+    def friend(self, user):
+        """Room mode: one friend request per account, ever (kept in the state
+        file). Teiserver takes it by account id (spring_user_in.ex add_friend)
+        and answers s.user.add_friend <id> success / failure <reason>."""
+        aid = self.account_ids.get(user)
+        if not self.s.friend_joiners or self.s.mode != "room" or not aid or aid in self.friended:
+            return
+        self.friended.add(aid)
+        self.save_state()
+        log("friend request to %s (%s)" % (user, aid))
+        self.pending.append(("c.user.add_friend", aid))
+
+    def on_friend_reply(self, line):
+        w = line.replace("	", " ").split(" ", 2)
+        if len(w) >= 3 and not w[2].startswith("success"):
+            log("friend request %s: %s" % (w[1], w[2]))
 
     def on_REMOVEUSER(self, line):
         self.users.pop(line.split(" ")[1], None)
@@ -563,6 +600,8 @@ class LobbyClient:
                 # send it (Teiserver SAYBATTLEPRIVATEEX, lobby.ex allow?).
                 if self.s.mode == "room" and self.s.welcome and p[2] not in (b.founder, self.s.login):
                     self.pending.append(("SAYBATTLEPRIVATEEX", p[2], self.s.welcome))
+                if p[2] not in (b.founder, self.s.login):
+                    self.friend(p[2])
 
     def on_LEFTBATTLE(self, line):
         p = line.split(" ")
@@ -1002,6 +1041,8 @@ class LobbyClient:
             b = self.battle
             if not b or not (self.state == "ingame" or self.users.get(b.founder, 0) & 1):
                 self.tell(user, "No game is running in my room.")
+            elif self.game_proc is not None and self.game_proc.poll() is None and hasattr(self.game_proc, "terminate"):
+                self.resign(user)
             elif self.now() < self.stop_hint_after:
                 self.tell(user, "I asked the room less than a minute ago.")
             else:
@@ -1204,9 +1245,25 @@ class LobbyClient:
         self.game_proc = self.launch(b, self.script_password)
         self.game_launched_at = self.now()
         self.engine_exit_logged = False
+        self.resign_kill_at = None
         if self.perf is not None:
             self.perf.start("game %d %s" % (self.games, b.map), getattr(self.game_proc, "write_dir", None),
                             now=self.now())
+
+    def resign(self, user):
+        """Resign the bots: this engine hosts them, so it leaves the game. BAR
+        then counts the bots' teams as uncontrolled and wipes out their ally
+        team (game_end.lua UpdateAllyTeamIsDead: playerQuitIsDead and not
+        isControlled; CheckPlayer marks an AI host's AIs uncontrolled when it is
+        inactive), so the game ends; the client never rejoins mid-game."""
+        if self.resign_kill_at is not None:
+            self.tell(user, "Already resigning the bots.")
+            return
+        log("resigning the bots at %s's request: leaving the game" % user)
+        self.game_proc.terminate()
+        self.resign_kill_at = self.now() + RESIGN_KILL_AFTER
+        self.say(RESIGN_SAY % user)
+        self.tell(user, "Resigning the bots: I am leaving the game, so BAR ends their team.")
 
     def log_engine_exit(self):
         """Once per game: the engine's exit, in the pod log (its console is
@@ -1240,6 +1297,10 @@ class LobbyClient:
         if self.state == "ingame":
             # Replies to private messages still go out during a game.
             if self.game_proc is not None and self.game_proc.poll() is None:
+                if self.resign_kill_at is not None and now >= self.resign_kill_at and hasattr(self.game_proc, "kill"):
+                    log("the engine did not quit; killing it")
+                    self.game_proc.kill()
+                    self.resign_kill_at = now + RESIGN_KILL_AFTER
                 self.flush_pending()
                 return
             self.log_engine_exit()
