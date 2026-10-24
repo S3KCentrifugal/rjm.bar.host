@@ -262,6 +262,12 @@ class Starting(Harness):
         self.feed("JOINEDBATTLE 12 " + name,
                   "CLIENTBATTLESTATUS %s %d 0" % (name, lc.battle_status(ready=ready, mode=1, sync=sync)))
 
+    def echo_bots(self, sent):
+        for x in sent:                                      # the server echoes the bots
+            if x.startswith("ADDBOT "):
+                w = x.split(" ")
+                self.feed("ADDBOT 12 %s %s %s 0 %s" % (w[1], ME, w[2], w[4]))
+
     def hints(self, sent):
         return [x for x in sent if x == "SAYBATTLE " + lc.START_HINT]
 
@@ -308,6 +314,77 @@ class Starting(Harness):
         self.run_for(40)
         self.human()
         self.assertNotIn("SAYBATTLE !cv start", self.run_for(60))
+
+    def test_matched_teams_waits_for_as_many_humans_as_bots(self):
+        self.c = self.client(BARHOST_MATCHED_TEAMS="1")
+        self.echo_bots(self.boss_and_setup())
+        self.assertEqual(len(self.c.battle.bots), 8)
+        for k in range(1, 8):                                # 7 ready humans against 8 bots
+            self.human("P%d" % k)
+        self.assertEqual(self.hints(self.run_for(10)), [])
+        self.human("P8")                                     # 8 against 8
+        self.assertEqual(len(self.hints(self.run_for(5))), 1)
+
+    def test_matched_teams_counts_the_bots_in_the_room(self):
+        self.c = self.client(BARHOST_MATCHED_TEAMS="1", BARHOST_BOT_COUNT="2")
+        self.echo_bots(self.boss_and_setup())
+        self.assertEqual(len(self.c.battle.bots), 2)
+        self.human("P1")
+        self.assertEqual(self.hints(self.run_for(10)), [])
+        self.human("P2")
+        self.assertEqual(len(self.hints(self.run_for(5))), 1)
+
+    def rings(self, sent):
+        return [x for x in sent if x == "SAYBATTLE !ring"]
+
+    def test_matched_teams_ring_the_unready(self):
+        self.c = self.client(BARHOST_MATCHED_TEAMS="1", BARHOST_BOT_COUNT="2", BARHOST_RING_EVERY="60")
+        self.echo_bots(self.boss_and_setup())
+        self.human("P1", ready=0)
+        self.assertEqual(self.rings(self.run_for(120)), [])          # 1 against 2: no ring
+        self.human("P2")
+        self.assertEqual(self.rings(self.run_for(55)), [])           # not before 60 s
+        self.assertEqual(len(self.rings(self.run_for(10))), 1)
+        self.assertEqual(len(self.rings(self.run_for(60))), 1)       # again a minute later
+        self.human("P1")                                             # everyone ready: no more
+        sent = self.run_for(120)
+        self.assertEqual(self.rings(sent), [])
+        self.assertEqual(len(self.hints(sent)), 1)
+        self.feed("SAIDBATTLE %s !ring" % ME)                        # its own ring gets no answer
+        self.assertFalse([x for x in self.run_for(5) if x.startswith("SAYBATTLE ")])
+
+    def balances(self, sent):
+        return [x for x in sent if x == "SAYBATTLE !balance"]
+
+    def test_balance_after_setup_and_when_the_team_fills(self):
+        self.c = self.client(BARHOST_BALANCE="1", BARHOST_BOT_COUNT="2")
+        sent = self.boss_and_setup()
+        self.assertEqual(len(self.balances(sent)), 1)
+        adds = [i for i, x in enumerate(sent) if x.startswith("ADDBOT ")]
+        self.assertTrue(adds and sent.index("SAYBATTLE !balance") > adds[-1])    # after the bots
+        self.echo_bots(sent)
+        self.human("P1", ready=0)
+        self.assertEqual(self.balances(self.run_for(30)), [])       # 1 against 2
+        self.human("P2", ready=0)
+        self.assertEqual(len(self.balances(self.run_for(5))), 1)    # 2 against 2: full
+        self.assertEqual(self.balances(self.run_for(60)), [])       # once while full
+        self.feed("LEFTBATTLE 12 P2")
+        self.run_for(5)
+        self.human("P2", ready=0)
+        self.assertEqual(len(self.balances(self.run_for(5))), 1)    # full again
+
+    def test_no_balance_by_default(self):
+        self.c = self.client(BARHOST_BOT_COUNT="1")
+        sent = self.boss_and_setup()
+        self.echo_bots(sent)
+        self.human("P1", ready=0)
+        self.assertEqual(self.balances(sent + self.run_for(30)), [])
+
+    def test_no_ring_by_default(self):
+        self.c = self.client(BARHOST_BOT_COUNT="1")
+        self.echo_bots(self.boss_and_setup())
+        self.human("P1", ready=0)
+        self.assertEqual(self.rings(self.run_for(300)), [])
 
 
 MANAGER = "Host[EU1]"
@@ -549,6 +626,59 @@ class Promote(Harness):
         self.c = self.client()
         sent = self.boss_and_setup() + self.run_for(30)
         self.assertEqual(self.promotes(sent), [])
+
+    def set_up_with_bots(self):
+        sent = self.boss_and_setup()
+        for x in sent:                                      # the server echoes the bots
+            if x.startswith("ADDBOT "):
+                w = x.split(" ")
+                self.feed("ADDBOT 12 %s %s %s 0 %s" % (w[1], ME, w[2], w[4]))
+        self.c.battle.max_players = 16
+        return sent + self.run_for(5)
+
+    def humans_join(self, names, ready=0):
+        for n in names:
+            self.feed("JOINEDBATTLE 12 " + n,
+                      "CLIENTBATTLESTATUS %s %d 0" % (n, lc.battle_status(ready=ready, mode=1, sync=1)))
+
+    def test_until_as_many_humans_as_bots(self):
+        self.set_up_with_bots()
+        self.assertEqual(len(self.c.battle.bots), 8)
+        self.humans_join(["P%d" % k for k in range(1, 8)])  # 7 against 8, room not full
+        self.answer("Please wait 1 second before promoting battle (promote flood protection)")
+        self.assertEqual(len(self.promotes(self.run_for(10))), 1)
+        self.humans_join(["P8"])                             # 8 against 8: matched
+        self.answer("Please wait 1 second before promoting battle (promote flood protection)")
+        self.assertEqual(self.promotes(self.run_for(60)), [])
+        self.feed("LEFTBATTLE 12 P8")
+        self.assertEqual(len(self.promotes(self.run_for(10))), 1)
+
+    def play_a_game(self, seconds=60):
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.run_for(seconds)
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+
+    def test_promotes_as_soon_as_a_game_is_over(self):
+        self.set_up_with_bots()
+        self.humans_join(["P1"])
+        self.answer("Unable to promote battle, battle lobby is locked")   # a retry in 120 s
+        self.play_a_game()
+        self.assertEqual(len(self.promotes(self.run_for(3))), 1)
+
+    def test_after_a_game_still_waits_out_a_named_cooldown(self):
+        self.set_up_with_bots()
+        self.humans_join(["P1"])
+        self.answer("Promoting battle in #main")             # the next one in 605 s
+        self.play_a_game(100)
+        self.assertEqual(self.promotes(self.run_for(480)), [])
+        self.assertEqual(len(self.promotes(self.run_for(40))), 1)
+
+    def test_not_allowed_waits_the_full_delay(self):
+        self.set_up_with_bots()
+        self.answer('%s, you are not allowed to call command "promote" in current context.' % ME)
+        self.assertEqual(self.promotes(self.run_for(590)), [])
+        self.assertEqual(len(self.promotes(self.run_for(20))), 1)
 
 
 class Privacy(Harness):

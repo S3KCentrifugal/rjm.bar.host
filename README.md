@@ -93,8 +93,10 @@ The table leaves out two cases:
      you, <caller>!". `BARHOST_AUTO_BOSS` users are also made boss as they
      join, but they cannot PM it commands.
      With `BARHOST_PROMOTE_EVERY`, it PMs the autohost `!promote` while a
-     public room's player team is not full, as soon as each cooldown ends
-     (it reads the autohost's "Please wait ..." answer).
+     public room has fewer humans than bots (with no bots, a free seat): once
+     the room is set up, as soon as a game is over, and again as soon as each
+     cooldown ends (it reads the autohost's "Please wait ..." answer; every
+     answer it gets by PM is logged).
      An AI from `BARHOST_AI_ARCHIVES` on a moving tag (`@latest`, `@newest`)
      is updated between games: checked after every game and every
      `BARHOST_AI_UPDATE_EVERY` seconds, installed only when no game runs, and
@@ -163,7 +165,12 @@ The table leaves out two cases:
      downloaded before a game can start.
   4. Never starts a game itself: once every human is ready (and the content
      is downloaded) it says how to vote the start (`!cv start`), at most once
-     a minute. It never leaves a room or takes a new one while its engine
+     a minute; with `BARHOST_MATCHED_TEAMS=1`, only once at least as many
+     humans play as there are bots. With `BARHOST_RING_EVERY`, once the teams
+     are matched it says `!ring` (the autohost rings every unready player)
+     that often until all are ready. With `BARHOST_BALANCE=1`, it says
+     `!balance` once the room is set up and each time the player team
+     fills. It never leaves a room or takes a new one while its engine
      is in a game, including after reconnecting mid-game; a `!public` /
      `!private` switch waits for a room with no game in progress, and for two
      minutes after a start is called or everyone is ready.

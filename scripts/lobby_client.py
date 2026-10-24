@@ -61,11 +61,14 @@ room (the client hosts by itself)
      When a player rings another (`!ring <name>`), say
      how to vote an away player to spectator, at most once a minute; the room
      decides.
-  5. When enough humans are in, ready and synced, say how to vote the start
-     (`!cv start`). It never starts a game itself: the players vote it.
-     With BARHOST_PROMOTE_EVERY set, while a public room's player team is
-     not full and no start is near, PM the autohost `!promote` (it
-     advertises the room in #main) each time its cooldown allows.
+  5. When enough humans are in, ready and synced (with BARHOST_MATCHED_TEAMS,
+     at least as many as the bots), say how to vote the start (`!cv start`).
+     It never starts a game itself: the players vote it. With
+     BARHOST_RING_EVERY, `!ring` the unready once the teams are matched.
+     With BARHOST_PROMOTE_EVERY set, while a public room has fewer humans
+     than bots (no bots: a free seat) and no start is near, PM the autohost
+     `!promote` (it advertises the room in #main): once the room is set up,
+     as soon as a game is over, and each time its cooldown allows.
   6. When the autohost's game starts, launch spring-headless as a spectator
      client of it. The engine runs the bots, because this client owns them.
   7. After the game, stay in the room and go back to 5. If the room is lost,
@@ -132,10 +135,11 @@ Settings (environment):
                           this play, so the room lists more players (0 = never)
   BARHOST_BOOST_UNTIL     ... and spectate again once this many humans play, or
                           the room is full (7). In between, the seat is kept.
-  BARHOST_PROMOTE_EVERY   room mode: `!promote` a public room whose player team
-                          is not full, this many seconds apart (the autohost's
-                          promoteDelay; its "Please wait" answer sets the next
-                          try). 0 = never (default)
+  BARHOST_PROMOTE_EVERY   room mode: `!promote` a public room with fewer humans
+                          than bots, once set up, after each game and this many
+                          seconds apart (the autohost's promoteDelay; its
+                          "Please wait" answer sets the next try). 0 = never
+                          (default)
   BARHOST_OUT_DIR         the client's files (perf-summary.csv) go under
                           $BARHOST_OUT_DIR/client/
   BARHOST_WORK_DIR        each game's engine write dir, one per game
@@ -254,6 +258,8 @@ PROMOTE_UNIT_RE = re.compile(r"(\d+) (year|day|hour|minute|second)s?")
 PROMOTE_UNITS = {"year": 31536000, "day": 86400, "hour": 3600, "minute": 60, "second": 1}
 PROMOTE_DONE = "Promoting battle in"
 PROMOTE_REFUSED_RE = re.compile(r"Unable to promote battle|Promote command is disabled")
+# A command this client may not call (spads.pl:3280-3287).
+PROMOTE_DENIED_RE = re.compile(r'not allowed to call command "promote"', re.IGNORECASE)
 PROMOTE_RETRY = 120         # after a refusal, or no answer
 PROMOTE_MARGIN = 5          # past the cooldown the autohost names
 # !stop while this engine is in the game: it leaves, which resigns the bots.
@@ -368,6 +374,14 @@ class Settings:
         # per account (Teiserver c.user.add_friend <account id>).
         self.friend_joiners = g("BARHOST_FRIEND_JOINERS", "0") == "1"
         self.min_humans = int(g("BARHOST_MIN_HUMANS", "1"))
+        # Room mode: no start hint until at least as many humans play as bots.
+        self.matched_teams = g("BARHOST_MATCHED_TEAMS", "0") == "1"
+        # Room mode: `!ring` (the autohost rings every unready player) once the
+        # teams are matched and someone is not ready, every this many seconds.
+        self.ring_every = int(g("BARHOST_RING_EVERY", "0"))
+        # Room mode: `!balance` once the room is set up (the bots' team ids)
+        # and each time the player team fills (as many humans as bots).
+        self.balance = g("BARHOST_BALANCE", "0") == "1"
         self.postgame_delay = int(g("BARHOST_POSTGAME_DELAY", "60"))
         # Room mode: a player seat while few humans play (the battle list
         # counts players), a spectator again from boost_until or a full room.
@@ -559,6 +573,7 @@ class LobbyClient:
         self.start_hint_after = 0.0
         self.start_hold_until = 0.0  # room mode: a start may be under way until then
         self.promote_after = 0.0    # room mode: no !promote before this (its cooldown)
+        self.promote_known = 0.0    # the end of a cooldown the autohost named
         # follow mode; survives a reconnect
         self.want_bots = getattr(self, "want_bots", self.s.bot_count)
         self.bot_ai = getattr(self, "bot_ai", self.s.bot_ai)
@@ -577,6 +592,8 @@ class LobbyClient:
         self.map_deadline = None
         self.map_skips = 0          # maps skipped in a row (not accepted or not downloadable)
         self.ring_hint_after = 0.0  # room mode: no ring hint before this time
+        self.ring_after = None      # room mode: when to !ring the unready players
+        self.balanced_full = False  # room mode: !balance said for this time the team is full
         self.stop_hint_after = 0.0  # no !stop request posted before this
         self.resign_kill_at = getattr(self, "resign_kill_at", None)  # !stop: kill the engine if still running then
         self.bonus_hint_after = 0.0  # no bonus hint before this
@@ -1116,10 +1133,15 @@ class LobbyClient:
             self.say(c)
         self.boss_authorised(b.users)
         self.sync_bots()
+        if self.s.balance:
+            self.say("!balance")        # after the bots: their team ids
+        self.balanced_full = False
         if b.passworded:
             for u in sorted(self.s.follow):
                 self.tell(u, "Private room %s is up on %s; password %s." % (b.id, b.founder, self.room_password_now))
         self.state = "waiting"
+        self.promote_known = 0.0    # a new room: its autohost's cooldown is unknown
+        self.promote_soon("the room is set up")
         self.rotate_map()
 
     def switch_bots(self):
@@ -1250,7 +1272,9 @@ class LobbyClient:
             req["until"] = self.now() + PRIVATE_WAIT
             log("%s is opening a private room" % user)
             return
-        if self.battle and user == self.battle.founder and self.promote_answer(msg):
+        if self.battle and user == self.battle.founder:
+            if not self.promote_answer(msg):
+                log("%s says: %s" % (user, msg[:160]))    # the autohost answers PM commands by PM
             return
         if user not in self.s.follow:
             return
@@ -1703,7 +1727,27 @@ class LobbyClient:
         humans = self.humans()
         if self.s.min_humans <= 0 or len(humans) < self.s.min_humans:
             return False
+        if self.s.matched_teams and not self.teams_matched():
+            return False                    # the human team is not yet as big as the AI team
         return all(self.statuses[h].get("ready") and self.statuses[h].get("sync") == 1 for h in humans)
+
+    def teams_matched(self) -> bool:
+        """At least one human plays and at least as many as the bots."""
+        humans = self.humans()
+        return bool(humans) and len(humans) >= len(self.battle.bots)
+
+    def ring_due(self) -> bool:
+        """Room mode: the teams are matched but someone is not ready, for
+        ring_every seconds since then or since the last ring."""
+        now = self.now()
+        if self.s.ring_every <= 0 or not self.synced or self.map_wanted or self.ai_updating \
+                or not self.teams_matched() \
+                or all(self.statuses[h].get("ready") for h in self.humans()):
+            self.ring_after = None
+            return False
+        if self.ring_after is None:
+            self.ring_after = now + self.s.ring_every
+        return now >= self.ring_after
 
     def game_started(self):
         b = self.battle
@@ -1887,6 +1931,8 @@ class LobbyClient:
             self.game_proc = None
             self.state = "waiting" if self.battle else "lobby"
             self.quiet_until = now + self.s.postgame_delay
+            if self.battle:
+                self.promote_soon("the game is over")
             if self.s.mode == "follow" and self.battle:
                 self.sync_bots()        # a !bots sent during the game
             self.next_ai_check = now    # look for a new AI release before the next game
@@ -1961,6 +2007,18 @@ class LobbyClient:
                     self.set_seat(False, "a headless host spectates")
         # The players start the game by vote; the client only says how.
         if self.s.mode == "room" and self.state == "waiting" and self.boss and now >= self.quiet_until:
+            full = self.synced and bool(self.humans()) and not self.players_wanted()
+            if not full:
+                self.balanced_full = False
+            elif self.s.balance and not self.balanced_full:
+                self.balanced_full = True
+                log("balancing: the player team is full (%d playing, %d bots)"
+                    % (len(self.humans()), len(self.battle.bots)))
+                self.say("!balance")
+            if self.ring_due():             # the teams are matched: ring whoever is not ready
+                self.ring_after = now + self.s.ring_every
+                log("ringing the unready players (%d playing, %d bots)" % (len(self.humans()), len(self.battle.bots)))
+                self.say("!ring")
             if not self.ready_to_start():
                 self.start_hint_given = False
             elif not self.start_hint_given and now >= self.start_hint_after:
@@ -1987,7 +2045,22 @@ class LobbyClient:
         if now < self.promote_after or now < self.start_hold_until or b.passworded \
                 or self.game_running() or self.users.get(b.founder, 0) & 1:
             return False
-        return not self.team_full() and not self.ready_to_start()
+        return self.players_wanted() and not self.ready_to_start()
+
+    def players_wanted(self) -> bool:
+        """The player team wants more: fewer humans than bots (the teams not
+        matched), or with no bots, a free player seat."""
+        b = self.battle
+        if self.team_full():
+            return False
+        return len(self.humans()) < len(b.bots) if b.bots else True
+
+    def promote_soon(self, why: str):
+        """Promote at the next chance (set up, a game over), but never inside
+        a cooldown the autohost named."""
+        if self.s.mode == "room" and self.s.promote_every > 0:
+            self.promote_after = max(self.now(), self.promote_known)
+            log("promote due: %s" % why)
 
     def promote_answer(self, msg) -> bool:
         """The autohost's answer to a !promote: set when to try next."""
@@ -1995,13 +2068,16 @@ class LobbyClient:
         wait = PROMOTE_WAIT_RE.search(msg)
         if wait:
             secs = sum(int(n) * PROMOTE_UNITS[u] for n, u in PROMOTE_UNIT_RE.findall(wait.group(1)))
-            self.promote_after = now + secs + PROMOTE_MARGIN
+            self.promote_after = self.promote_known = now + secs + PROMOTE_MARGIN
         elif PROMOTE_DONE in msg:
-            self.promote_after = now + max(self.s.promote_every, 0) + PROMOTE_MARGIN
+            self.promote_after = self.promote_known = now + max(self.s.promote_every, 0) + PROMOTE_MARGIN
         elif PROMOTE_REFUSED_RE.search(msg):
             self.promote_after = now + PROMOTE_RETRY
+        elif PROMOTE_DENIED_RE.search(msg):
+            self.promote_after = now + max(self.s.promote_every, PROMOTE_RETRY)
         else:
             return False
+        log("promote: %s says %s" % (self.battle.founder if self.battle else "the autohost", msg[:160]))
         return True
 
     def team_full(self) -> bool:

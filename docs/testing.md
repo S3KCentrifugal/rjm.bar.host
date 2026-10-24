@@ -136,7 +136,15 @@ with lobby lines and a fake clock. It covers:
   its "Please wait" answer names, after the delay once done (also when
   someone else promoted), and `PROMOTE_RETRY` after a refusal; none with the
   player team full, in a private room, with everyone ready, or in a game;
-  off by default;
+  while fewer humans than bots play (7 against 8 yes, 8 against 8 no); at
+  once after a game, unless the autohost named a longer cooldown; the full
+  delay after a "not allowed" answer; off by default;
+- the vote-start hint with `BARHOST_MATCHED_TEAMS` only once as many humans
+  as bots play; `!ring` with `BARHOST_RING_EVERY` once the teams are matched
+  and someone is not ready, then that often, never by default;
+- `!balance` with `BARHOST_BALANCE` after the setup's bot adds, and once
+  each time the player team fills (again after it empties and refills);
+  never by default;
 - bots named as Chobby with simple AI names off (`BARbstable(1)`), side 2
   (Random) by default, cycling when `BARHOST_BOT_SIDES` is set;
   `BARHOST_BOT_SETUP` sent after every add (setup, more bots), not after
