@@ -267,6 +267,20 @@ class Update(Env):
         self.assertEqual(self.fetched, [])
 
 
+class PinSource(unittest.TestCase):
+    """!ai <channel> <tag>: the channel's source with an exact tag."""
+
+    def test_the_tag_replaces_the_moving_one_and_the_glob_stays(self):
+        self.assertEqual(install_ai.pin_source("github:o/r@newest#*-test-linux.tar.gz", "v1.1150-test"),
+                         "github:o/r@v1.1150-test#*-test-linux.tar.gz")
+        self.assertEqual(install_ai.pin_source("github:o/r@latest", "v1.1153-prod"), "github:o/r@v1.1153-prod")
+
+    def test_a_bad_tag_is_refused(self):
+        for tag in ("", "v1/../x", "a b", "x" * 101):
+            with self.assertRaises(ValueError):
+                install_ai.pin_source("github:o/r@latest", tag)
+
+
 class Channels(Env):
     """AI channels: each channel's release kept in its own folder (the data
     volume), the engine pointed at one of them by a symlink."""

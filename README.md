@@ -108,7 +108,10 @@ The table leaves out two cases:
      survives restarts; every channel is fetched at start and checked between
      games like the moving tags above, and the engine's `AI/Skirmish/<AI>` is
      pointed at the chosen release (a symlink) only between games. The choice
-     is kept across restarts. Swapping releases of one AI (test and prod are
+     is kept across restarts. `!ai <name> <tag>` holds a release channel to
+     that exact release tag (`!ai smrt-test v1.1150-test`), kept across
+     restarts too, until `!ai <name>` has it follow its newest again; a tag
+     that cannot be downloaded is said and dropped. Swapping releases of one AI (test and prod are
      both `SMRTBARb/stable`) leaves the bots alone; another AI replaces them,
      as a player (after the game if one is running). Each
      player who joins gets `BARHOST_WELCOME` privately in the room chat,
@@ -139,8 +142,10 @@ The table leaves out two cases:
      the game) and is diagnosed while it runs, every `BARHOST_METRICS_EVERY`
      seconds: a widget the client installs in that write dir
      (`scripts/rjm_host_metrics.lua`) logs how far the engine is behind the
-     server, its sim speed, ping, profiler shares and unit count
-     (`engine-timeline.csv`); the client logs the engine's CPU per thread
+     server, its sim speed, ping, profiler shares and unit count, and with
+     `BARHOST_ENGINE_PROFILER=1` every engine timer's time per interval
+     (`LuaUI/Config/rjm-engine-*.csv`: BAR lets user widgets write only under
+     `LuaUI/Config/`; archived as `metrics/engine-*.csv`); the client logs the engine's CPU per thread
      (the main thread runs the simulation), memory, disk and the container's
      CPU / disk / memory pressure (`timeline.csv`, `threads.csv`;
      `scripts/engine_metrics.py`), its own lines (`client.log`) and the
@@ -168,9 +173,13 @@ The table leaves out two cases:
      a minute; with `BARHOST_MATCHED_TEAMS=1`, only once at least as many
      humans play as there are bots. With `BARHOST_RING_EVERY`, once the teams
      are matched it says `!ring` (the autohost rings every unready player)
-     that often until all are ready. With `BARHOST_BALANCE=1`, it says
+     after `BARHOST_RING_FIRST` seconds, then that often until all are ready. With `BARHOST_BALANCE=1`, it says
      `!balance` once the room is set up and each time the player team
-     fills. It never leaves a room or takes a new one while its engine
+     fills. With `BARHOST_BONUS_VOTE=1`, it runs the players' AI bonus vote
+     itself (`aibonus <0-100>`, then `y` / `n`; SPADS lets no non-boss
+     vote it while the client is boss), once per caller every
+     `BARHOST_BONUS_VOTE_COOLDOWN` seconds, and says how after every game.
+     It never leaves a room or takes a new one while its engine
      is in a game, including after reconnecting mid-game; a `!public` /
      `!private` switch waits for a room with no game in progress, and for two
      minutes after a start is called or everyone is ready.

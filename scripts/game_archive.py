@@ -30,6 +30,8 @@ games from every app and pod sit side by side:
                          seconds: sim frame, how far behind the server, sim
                          speed, ping, profiler shares, units),
                          engine-events.csv (game start, game over),
+                         engine-profile.csv (with BARHOST_ENGINE_PROFILER:
+                         every engine timer's time per interval),
                          timeline.csv and threads.csv (from the client, same
                          interval: CPU, engine threads, memory, disk,
                          pressure), perf.csv (per-second cgroup samples)
@@ -68,13 +70,21 @@ SCHEMA = "rjm-bar-archive/game/1"
 # Written by the engine in the write dir, not worth keeping: caches it rebuilds.
 SKIP_DIRS = {"cache", "temp", "pool", "packages", "rapid", "maps", "games", "engine"}
 TEXT = {".txt", ".log", ".csv", ".json", ".cfg", ".lua", ".jsonl", ".tsv", ".ini", ".xml", ".yaml", ".yml"}
-# Run-dir files with a fixed place in the archive: name -> archive path.
+# The metrics widget's files (rjm_host_metrics.lua): BAR lets user widgets
+# write only under LuaUI/Config/ (luaui/barwidgets.lua, game test-31723);
+# before that sandbox they were at the run dir's top.
+ENGINE_TIMELINE = "LuaUI/Config/rjm-engine-timeline.csv"
+ENGINE_TIMELINE_OLD = "engine-timeline.csv"
+# Run-dir files with a fixed place in the archive: path in the run dir -> archive path.
 PLACED = {
     "game.json": "lobby.json",
     "timeline.csv": "metrics/timeline.csv",
     "threads.csv": "metrics/threads.csv",
-    "engine-timeline.csv": "metrics/engine-timeline.csv",
+    ENGINE_TIMELINE_OLD: "metrics/engine-timeline.csv",
     "engine-events.csv": "metrics/engine-events.csv",
+    ENGINE_TIMELINE: "metrics/engine-timeline.csv",
+    "LuaUI/Config/rjm-engine-events.csv": "metrics/engine-events.csv",
+    "LuaUI/Config/rjm-engine-profile.csv": "metrics/engine-profile.csv",
     "perf.csv": "metrics/perf.csv",
     "infolog.txt": "logs/infolog.txt",
     "engine-console.log": "logs/engine-console.log",
@@ -172,6 +182,12 @@ def summarise_timeline(path: Path, columns) -> dict:
     return summarise_rows(read_rows(path), columns)
 
 
+def engine_timeline(run: Path) -> Path:
+    """The metrics widget's timeline in a run dir (where an older widget put it, if so)."""
+    new = run / ENGINE_TIMELINE
+    return new if new.is_file() or not (run / ENGINE_TIMELINE_OLD).is_file() else run / ENGINE_TIMELINE_OLD
+
+
 def index_path(root: Path, source: str) -> Path:
     return root / "_index" / ("%s.jsonl" % slug(source, 64))
 
@@ -228,10 +244,10 @@ def archive_run(run: Path, root: Path, source: str, keep: bool = False) -> "Path
             copy_into(src, incoming / rel, rel in GZIP_PLACED)
     for r in replays:
         copy_into(r, incoming / "replay" / r.name, False)
-    taken = set(PLACED) | {"ended.json", "demos"}
     for src in sorted(run.rglob("*")):
         rel = src.relative_to(run)
-        if rel.parts[0] in taken or rel.parts[0] in SKIP_DIRS or not src.is_file() or src.is_symlink():
+        if rel.as_posix() in PLACED or rel.parts[0] in ("ended.json", "demos") or rel.parts[0] in SKIP_DIRS \
+                or not src.is_file() or src.is_symlink():
             continue
         copy_into(src, incoming / "files" / rel, src.suffix.lower() in TEXT)
 
@@ -269,7 +285,7 @@ def archive_run(run: Path, root: Path, source: str, keep: bool = False) -> "Path
         "ai": lobby.get("ai"),
         "host": {"pod": lobby.get("pod") or socket.gethostname(), "client": lobby.get("client"),
                  "engineExit": ended.get("engineExit"), "resigned": ended.get("resigned")},
-        "lag": summarise_timeline(run / "engine-timeline.csv", LAG_COLUMNS),
+        "lag": summarise_timeline(engine_timeline(run), LAG_COLUMNS),
         "load": summarise_timeline(run / "timeline.csv", LOAD_COLUMNS),
         "perf": ended.get("perf"),
         "teams": demo.get("teams", []),

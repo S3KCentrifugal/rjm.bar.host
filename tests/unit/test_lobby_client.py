@@ -343,9 +343,10 @@ class Starting(Harness):
         self.human("P1", ready=0)
         self.assertEqual(self.rings(self.run_for(120)), [])          # 1 against 2: no ring
         self.human("P2")
-        self.assertEqual(self.rings(self.run_for(55)), [])           # not before 60 s
+        self.assertEqual(self.rings(self.run_for(12)), [])           # not before 15 s
+        self.assertEqual(len(self.rings(self.run_for(6))), 1)
+        self.assertEqual(self.rings(self.run_for(55)), [])           # then a minute apart
         self.assertEqual(len(self.rings(self.run_for(10))), 1)
-        self.assertEqual(len(self.rings(self.run_for(60))), 1)       # again a minute later
         self.human("P1")                                             # everyone ready: no more
         sent = self.run_for(120)
         self.assertEqual(self.rings(sent), [])
@@ -372,6 +373,41 @@ class Starting(Harness):
         self.run_for(5)
         self.human("P2", ready=0)
         self.assertEqual(len(self.balances(self.run_for(5))), 1)    # full again
+
+    def test_ring_and_balance_also_in_the_post_game_delay(self):
+        self.c = self.client(BARHOST_BALANCE="1", BARHOST_BOT_COUNT="2", BARHOST_RING_EVERY="60",
+                             BARHOST_MATCHED_TEAMS="1")
+        self.echo_bots(self.boss_and_setup())
+        self.human("P1", ready=0)
+        self.human("P2", ready=0)
+        self.run_for(40)
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.run_for(30)
+        self.proc.code = 0
+        self.feed("LEFTBATTLE 12 P2", "CLIENTSTATUS %s 64" % HOST)   # a game; P2 leaves after it
+        self.run_for(1)
+        self.c.ai_updated([], [], None)                              # the after-game AI check ends
+        self.run_for(3)
+        self.human("P2", ready=0)                                    # inside the 60 s post-game delay
+        sent = self.run_for(25)
+        self.assertEqual(len(self.rings(sent)), 1)
+        self.assertEqual(len(self.balances(sent)), 1)
+
+    def test_at_most_one_balance_per_30_s(self):
+        self.c = self.client(BARHOST_BALANCE="1", BARHOST_BOT_COUNT="2")
+        sent = self.boss_and_setup()
+        self.echo_bots(sent)
+        self.run_for(30)
+        self.human("P1", ready=0)
+        self.human("P2", ready=0)
+        sent = self.run_for(5)
+        for _ in range(4):                                           # the seat changes hands
+            self.feed("LEFTBATTLE 12 P2")
+            sent += self.run_for(3)
+            self.human("P2", ready=0)
+            sent += self.run_for(3)
+        self.assertEqual(len(self.balances(sent)), 1)                # 29 s: one
+        self.assertEqual(len(self.balances(self.run_for(10))), 1)    # still full: one more after 30 s
 
     def test_no_balance_by_default(self):
         self.c = self.client(BARHOST_BOT_COUNT="1")
@@ -1097,8 +1133,8 @@ class SwitchAI(Harness):
     def test_ai_lists_the_channels(self):
         self.set_up()
         reply = self.replies(self.pm("!ai"))
-        self.assertEqual(reply, ["AI now: barb (BARb, the game's own). Choose with !ai <name>: barb (BARb, the "
-                                 "game's own), smrt-prod (SMRTBARb v2-prod), smrt-test (SMRTBARb v3-test)."])
+        self.assertEqual(reply, ["AI now: barb (BARb, the game's own). Choose with !ai <name> [version]: barb "
+                                 "(BARb, the game's own), smrt-prod (SMRTBARb v2-prod), smrt-test (SMRTBARb v3-test)."])
 
     def test_another_ai_replaces_the_bots_as_a_player(self):
         self.set_up()
@@ -1204,6 +1240,86 @@ class SwitchAI(Harness):
         self.fetched({"smrt-prod": "v2-prod", "smrt-test": "v4-test"})    # the post-game check
         self.run_for(5)
         self.assertEqual(self.activated, ["smrt-test"])
+
+    def test_a_version_pins_the_channel_to_that_release(self):
+        self.set_up()
+        sent = self.pm("!ai smrt-test v1-test")
+        self.assertIn("OK: smrt-test v1-test, pinned, once it is downloaded.", self.replies(sent))
+        self.assertTrue(self.c.need_ai_update)
+        self.assertEqual(self.activated, [])                # not before the download
+        self.assertEqual(self.c.channel_sources()["smrt-test"],
+                         ("SMRTBARb", "github:o/r@v1-test#*-test-linux.tar.gz"))
+        self.assertEqual(self.c.channel_sources()["smrt-prod"], ("SMRTBARb", "github:o/r@latest"))
+        self.fetched({"smrt-prod": "v2-prod", "smrt-test": "v1-test"}, ["smrt-test: v3-test -> v1-test"])
+        sent = self.run_for(5)
+        self.assertIn("Pinned AI release in place: smrt-test: v3-test -> v1-test; the next game uses it.",
+                      self.replies(sent))
+        self.assertEqual(self.c.ai_active, ("smrt-test", "v1-test"))
+        self.assertIn("SAYBATTLE Reloading the AI for the next game: SMRTBARb version v1-test.", sent)
+        self.assertIn("smrt-test (SMRTBARb v1-test, pinned)", self.replies(self.pm("!ai"))[0])
+
+    def test_a_pin_is_remembered(self):
+        self.set_up()
+        self.pm("!ai smrt-test v1-test")
+        c = self.make()
+        self.assertEqual((c.ai_channel, c.ai_pins), ("smrt-test", {"smrt-test": "v1-test"}))
+        self.assertEqual(c.channel_sources()["smrt-test"][1], "github:o/r@v1-test#*-test-linux.tar.gz")
+
+    def test_the_name_alone_follows_the_newest_again(self):
+        self.set_up()
+        self.pm("!ai smrt-test v1-test")
+        self.fetched({"smrt-prod": "v2-prod", "smrt-test": "v1-test"})
+        self.run_for(5)
+        sent = self.pm("!ai smrt-test")
+        self.assertIn("OK: smrt-test, following its newest release, once it is downloaded.", self.replies(sent))
+        self.assertEqual(self.c.ai_pins, {})
+        self.assertEqual(self.c.channel_sources()["smrt-test"][1], "github:o/r@newest#*-test-linux.tar.gz")
+        self.assertTrue(self.c.need_ai_update)
+
+    def test_newest_or_latest_also_unpins(self):
+        self.set_up()
+        self.pm("!ai smrt-prod v1-prod")
+        self.fetched({"smrt-prod": "v1-prod", "smrt-test": "v3-test"})
+        self.run_for(5)
+        self.pm("!ai smrt-prod latest")
+        self.assertEqual(self.c.ai_pins, {})
+
+    def test_a_pin_asked_during_a_game_is_fetched_after_it(self):
+        self.set_up()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        sent = self.pm("!ai smrt-test v1-test")
+        self.assertIn("OK: smrt-test v1-test, pinned, after this game.", self.replies(sent))
+        self.assertFalse(self.c.ai_updating)
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        self.run_for(2)
+        self.assertTrue(self.c.ai_updating)
+        self.assertEqual(self.activated, [])
+
+    def test_a_bad_version_changes_nothing(self):
+        self.set_up()
+        self.assertEqual(self.replies(self.pm("!ai smrt-test v1/../x")),
+                         ["v1/../x is not a release tag (such as v1.1150-test)."])
+        self.assertEqual(self.replies(self.pm("!ai barb v1")), ["barb is the game's own AI: it has no versions."])
+        self.assertEqual((self.c.ai_pins, self.c.ai_channel), ({}, "barb"))
+
+    def test_a_release_that_cannot_be_had_is_said_and_unpinned(self):
+        self.set_up()
+        self.pm("!ai smrt-test v9-test")
+        self.c.ai_updated([], ["smrt-test: HTTP Error 404: Not Found"], dict(self.RELEASES))
+        sent = self.run_for(5)
+        self.assertIn("Could not get smrt-test v9-test (HTTP Error 404: Not Found); it follows its newest "
+                      "release again.", self.replies(sent))
+        self.assertEqual(self.c.ai_pins, {})
+
+    def test_a_later_failure_keeps_the_pin(self):
+        self.set_up()
+        self.pm("!ai smrt-test v1-test")
+        self.fetched({"smrt-prod": "v2-prod", "smrt-test": "v1-test"})
+        self.run_for(5)
+        self.c.ai_updated([], ["smrt-test: timed out"], {"smrt-prod": "v2-prod", "smrt-test": "v1-test"})
+        self.run_for(5)
+        self.assertEqual(self.c.ai_pins, {"smrt-test": "v1-test"})
 
     def test_a_failed_switch_keeps_the_bots_and_says_why(self):
         self.set_up()
@@ -1364,6 +1480,91 @@ class Bonus(Harness):
         self.boss_and_setup()
         self.feed('SAIDBATTLE Troll * Vote for command "setallaibonus 100" passed.')
         self.assertNotIn("SAYBATTLE !setallaibonus 100", self.run_for(3))
+
+
+class AiBonusVote(Harness):
+    """BARHOST_BONUS_VOTE: the players vote the AI bonus through the client
+    (`aibonus <n>`, then `y` / `n`): SPADS lets no non-boss vote it while
+    the client is boss."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_BOT_SETUP="!setallaibonus 50", BARHOST_BONUS_VOTE="1")
+
+    def players(self, *names):
+        for n in names:
+            self.feed("JOINEDBATTLE 12 " + n,
+                      "CLIENTBATTLESTATUS %s %d 0" % (n, lc.battle_status(mode=1, sync=1)))
+
+    def say(self, user, text, seconds=6):
+        self.feed("SAIDBATTLE %s %s" % (user, text))
+        return self.run_for(seconds)
+
+    def applied(self, sent):
+        return [x for x in sent if x.startswith("SAYBATTLE !setallaibonus")]
+
+    def test_a_majority_of_the_players_passes_it(self):
+        self.boss_and_setup()
+        self.players("A", "B", "C", "D")
+        sent = self.say("A", "aibonus 30")
+        self.assertTrue([x for x in sent if "called a vote: every AI to 30% bonus" in x], sent)
+        self.assertEqual(self.applied(sent), [])
+        self.assertEqual(self.applied(self.say("B", "y")), [])        # 2 of 4: not a majority
+        sent = self.say("C", "yes")
+        self.assertEqual(self.applied(sent), ["SAYBATTLE !setallaibonus 30"])
+        self.assertEqual(self.c.voted_bonus, 30)
+
+    def test_enough_no_fails_it_and_the_deadline_counts_the_votes(self):
+        self.boss_and_setup()
+        self.players("A", "B", "C", "D")
+        self.say("A", "aibonus 90")
+        self.say("B", "n")
+        sent = self.say("C", "no")
+        self.assertTrue([x for x in sent if "vote failed (1 yes, 2 no)" in x], sent)
+        self.say("B", "aibonus 10")                                    # B's own call
+        self.say("C", "y")
+        sent = self.run_for(lc.AIBONUS_VOTE_TIME)                     # 2 yes, 0 no at the deadline
+        self.assertEqual(self.applied(sent), ["SAYBATTLE !setallaibonus 10"])
+
+    def test_alone_it_passes_at_once_and_each_caller_waits_five_minutes(self):
+        self.boss_and_setup()
+        self.players("A")
+        self.assertEqual(self.applied(self.say("A", "!aibonus 20")), ["SAYBATTLE !setallaibonus 20"])
+        sent = self.say("A", "aibonus 40")
+        self.assertTrue([x for x in sent if "you can call another AI bonus vote in 4:5" in x], sent)
+        self.assertEqual(self.applied(sent), [])
+        self.run_for(300)
+        self.assertEqual(self.applied(self.say("A", "aibonus 40")), ["SAYBATTLE !setallaibonus 40"])
+
+    def test_not_from_spectators_or_out_of_range(self):
+        self.boss_and_setup()
+        self.players("A")
+        self.feed("JOINEDBATTLE 12 Spec")
+        sent = self.say("Spec", "aibonus 30") + self.say("A", "aibonus 300")
+        self.assertEqual(self.applied(sent), [])
+        self.assertTrue([x for x in sent if "only players" in x])
+        self.assertTrue([x for x in sent if "0 to 100" in x])
+        self.assertEqual(self.say("A", "y"), [])                      # no vote: plain chat
+
+    def test_the_word_bonus_points_to_the_command(self):
+        self.boss_and_setup()
+        self.players("A")
+        sent = self.say("A", "more bonus please")
+        self.assertIn("SAYBATTLE " + lc.AIBONUS_HINT % "50%", sent)
+        self.say("A", "aibonus 70")
+        self.run_for(60)
+        self.assertIn("SAYBATTLE " + lc.AIBONUS_HINT % "70%", self.say("A", "bonus?"))
+
+    def test_reminded_after_each_game(self):
+        self.boss_and_setup()
+        self.players("A")
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.run_for(30)
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        sent = self.run_for(10)
+        self.assertEqual(sent.count("SAYBATTLE " + lc.AIBONUS_HINT % "50%"), 1)
+        self.assertNotIn("SAYBATTLE " + lc.AIBONUS_HINT % "50%", self.run_for(120))
 
 
 class StartBoxes(Harness):
@@ -1798,6 +1999,11 @@ class WriteDir(unittest.TestCase):
             widget = (d / "LuaUI" / "Widgets" / "rjm_host_metrics.lua").read_text()
             self.assertIn("\nlocal EVERY = 10 ", widget)
             self.assertIn("\nlocal RJM_PROFILER = true ", widget)
+            # BAR's sandbox: user widgets write only under LuaUI/Config/ (game_archive places them).
+            self.assertIn('\nlocal DIR = "LuaUI/Config/"', widget)
+            for path in ("rjm-engine-timeline.csv", "rjm-engine-events.csv", "rjm-engine-profile.csv"):
+                self.assertIn('DIR .. "%s"' % path, widget)
+                self.assertIn("LuaUI/Config/" + path, lc.game_archive.PLACED)
             if (d / "cache").is_symlink():                          # needs symlink rights on Windows
                 self.assertEqual((d / "cache").resolve(), (Path(tmp) / "work" / ".engine-cache").resolve())
 

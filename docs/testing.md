@@ -71,6 +71,12 @@ with lobby lines and a fake clock. It covers:
   and after the post-game release check; a release not downloaded fetched
   first; a new release of the chosen channel used next game (said in the
   room), of another only reported; a failed switch keeping the bots;
+  `!ai <channel> <tag>` pinning a release channel (the pinned source passed
+  to the download, the release said as pinned in place, kept across a
+  restart; asked during a game, fetched after it), `!ai <channel>` or
+  `latest` / `newest` unpinning, a bad tag or a version for the game's own
+  AI refused, a tag that cannot be downloaded said and unpinned while a
+  later failed check keeps the pin (`test_install_ai.py` `PinSource`);
   `!bots <n> <channel>`; `!smrt` / `!barb` gone; strangers refused; a bad
   channel list stopping the client;
 - the welcome (`Welcome`): said privately (SAYBATTLEPRIVATEEX) to each
@@ -94,6 +100,7 @@ with lobby lines and a fake clock. It covers:
   lobby traffic and the client's own lines kept only during the game,
   `ended.json` at the engine's exit and the run dir handed to the archive
   once; the write dir given the metrics widget with the client's settings
+  (writing under `LuaUI/Config/`, the paths `game_archive` places)
   and the shared engine cache, no widget with metrics off;
 - start boxes (`StartBoxes`): lookup by map name without version, `_` as a
   space, first variant of `BARHOST_START_BOX_KEYS` present; set once boss on
@@ -140,11 +147,18 @@ with lobby lines and a fake clock. It covers:
   once after a game, unless the autohost named a longer cooldown; the full
   delay after a "not allowed" answer; off by default;
 - the vote-start hint with `BARHOST_MATCHED_TEAMS` only once as many humans
-  as bots play; `!ring` with `BARHOST_RING_EVERY` once the teams are matched
+  as bots play; `!ring` with `BARHOST_RING_EVERY` `BARHOST_RING_FIRST` s
+  after the teams are matched (also in the post-game delay)
   and someone is not ready, then that often, never by default;
 - `!balance` with `BARHOST_BALANCE` after the setup's bot adds, and once
-  each time the player team fills (again after it empties and refills);
+  each time the player team fills (again after it empties and refills),
+  at most once per `BALANCE_GAP`, also in the post-game delay;
   never by default;
+- the AI bonus vote (`AiBonusVote`, `BARHOST_BONUS_VOTE`): a majority of
+  the players passes it at once, enough no fails it, the deadline counts
+  the votes; alone it passes at once; a caller waits the cooldown; not
+  from spectators, not above 100; `y` with no vote is plain chat; the
+  word "bonus" and the end of each game get the how-to with the bonus now;
 - bots named as Chobby with simple AI names off (`BARbstable(1)`), side 2
   (Random) by default, cycling when `BARHOST_BOT_SIDES` is set;
   `BARHOST_BOT_SETUP` sent after every add (setup, more bots), not after

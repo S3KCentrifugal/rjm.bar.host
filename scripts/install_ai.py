@@ -352,6 +352,16 @@ def parse_channels(text: str) -> "dict[str, tuple[str, str]]":
     return out
 
 
+def pin_source(source: str, tag: str) -> str:
+    """A channel's ``github:OWNER/REPO@TAG[#GLOB]`` source with TAG replaced
+    by an exact release tag (``!ai <channel> <tag>``); the asset GLOB stays."""
+    if not TAG_RE.match(tag) or not source.startswith("github:") or "@" not in source:
+        raise ValueError("cannot pin %r to %r" % (source, tag))
+    head, _, rest = source.partition("@")
+    glob = rest.partition("#")[2]
+    return "%s@%s%s" % (head, tag, ("#" + glob) if glob else "")
+
+
 def channel_release(cache: Path, name: str) -> str:
     """The release tag downloaded for a channel, "" if none."""
     try:

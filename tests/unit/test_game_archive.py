@@ -106,6 +106,25 @@ class Archive(unittest.TestCase):
         self.assertEqual(len(m["files"]), 8)
         self.assertFalse(self.run.exists())                         # moved off the work disk
 
+    def test_the_widget_files_under_luaui_config_are_placed(self):
+        """BAR's sandbox keeps user widgets' writes under LuaUI/Config/; the
+        AIs' own files there stay under files/."""
+        (self.run / "engine-timeline.csv").unlink()
+        cfg = self.run / "LuaUI" / "Config"
+        (cfg / "BARb").mkdir(parents=True)
+        (cfg / "rjm-engine-timeline.csv").write_text("unix_s,behind_s\n1,0.5\n2,42.0\n")
+        (cfg / "rjm-engine-events.csv").write_text("unix_s,game_frame,event,detail\n1,0,game_start,\n")
+        (cfg / "rjm-engine-profile.csv").write_text("unix_s,game_frame,frames,wall_ms,timer,ms\n1,150,150,5000,AI,2500\n")
+        (cfg / "BARb" / "map.txt").write_text("map\n")
+        folder = self.archive()
+        names = sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file())
+        for name in ("metrics/engine-timeline.csv", "metrics/engine-events.csv", "metrics/engine-profile.csv",
+                     "files/LuaUI/Config/BARb/map.txt.gz"):
+            self.assertIn(name, names)
+        self.assertFalse([n for n in names if "rjm-engine" in n])
+        m = json.loads((folder / "manifest.json").read_text())
+        self.assertEqual(m["lag"]["behind_s"]["max"], 42.0)
+
     def test_password_is_removed(self):
         folder = self.archive()
         script = (folder / "config" / "script.txt").read_text()

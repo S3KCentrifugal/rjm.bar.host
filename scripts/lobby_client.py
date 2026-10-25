@@ -215,6 +215,19 @@ BONUS_RE = re.compile(r"\bbonus\b", re.IGNORECASE)
 BONUS_HINT = ("Bonus: vote for all AI with !cv setallaibonus <0-100>, or one with "
               "!cv force %<AI name> bonus <0-100>, then !vote y.")
 BONUS_HINT_EVERY = 60
+# BARHOST_BONUS_VOTE: the client's own AI bonus vote. While anyone is boss,
+# SPADS counts every other player as level 0 (spads.pl:8549), and BAR's
+# setAllAiBonus needs level 10 to vote (spads_config_bar BarManagerCmd.conf),
+# so the players cannot vote it there. Plain words, not `!` commands: SPADS
+# answers any unknown `!word` with "Invalid command" (spads.pl:3232), and
+# `!y` / `!n` are its own vote aliases (spads.pl:296, :305).
+AIBONUS_RE = re.compile(r"^!?aibonus\s+(\d{1,3})\s*$", re.IGNORECASE)
+AIBONUS_VOTE_RE = re.compile(r"^!?(y|yes|n|no)\s*$", re.IGNORECASE)
+AIBONUS_HINT = "AI bonus (now %s): call a vote with aibonus <0-100>, then the players say y or n."
+AIBONUS_VOTE_TIME = 60
+# BARHOST_BALANCE: at most one !balance per this many seconds (a seat that
+# changes hands would otherwise balance the room on every change).
+BALANCE_GAP = 30
 BONUS_PASSED_RE = re.compile(r'Vote for command "(?:setallaibonus|force \S+ bonus) (\d{1,3})" passed', re.IGNORECASE)
 SETALL_RE = re.compile(r"^!setallaibonus\s+\d+\s*$", re.IGNORECASE)
 # An authorised user's `!stop` by PM: a spectator (host or this client) may
@@ -379,6 +392,11 @@ class Settings:
         # Room mode: `!ring` (the autohost rings every unready player) once the
         # teams are matched and someone is not ready, every this many seconds.
         self.ring_every = int(g("BARHOST_RING_EVERY", "0"))
+        self.ring_first = int(g("BARHOST_RING_FIRST", "15"))   # the first ring, this long after
+        # Room mode: the players vote the AI bonus through this client
+        # (`aibonus <n>`), at most once per this many seconds per caller.
+        self.bonus_vote = g("BARHOST_BONUS_VOTE", "0") == "1"
+        self.bonus_vote_cooldown = int(g("BARHOST_BONUS_VOTE_COOLDOWN", "300"))
         # Room mode: `!balance` once the room is set up (the bots' team ids)
         # and each time the player team fills (as many humans as bots).
         self.balance = g("BARHOST_BALANCE", "0") == "1"
@@ -500,6 +518,11 @@ class LobbyClient:
         self.ai_channel = state.get("ai_channel") if state.get("ai_channel") in s.ai_channels else s.ai_channel
         self.bot_ai = s.ai_channels[self.ai_channel][0] if s.ai_channels else state.get("bot_ai", s.bot_ai)
         self.ai_releases = {}       # channel -> release tag downloaded (from the I/O layer)
+        # Channel -> the exact release `!ai <channel> <tag>` holds it to (kept);
+        # without one a channel follows its moving tag (latest / newest).
+        self.ai_pins = {k: v for k, v in state.get("ai_pins", {}).items()
+                        if k in s.ai_channels and s.ai_channels[k][1]}
+        self.pin_asked = {}         # channel -> who pinned it, until the download is done
         self.ai_active = None       # (channel, tag) the engine was last pointed at
         # Point the engine at the channel between games; at start, once the
         # releases are fetched.
@@ -531,6 +554,9 @@ class LobbyClient:
             out["bot_ai"] = st["bot_ai"]
         if isinstance(st.get("ai_channel"), str):
             out["ai_channel"] = st["ai_channel"]
+        if isinstance(st.get("ai_pins"), dict):
+            out["ai_pins"] = {k: v for k, v in st["ai_pins"].items()
+                              if isinstance(k, str) and isinstance(v, str) and install_ai.TAG_RE.match(v)}
         if isinstance(st.get("friended"), list):
             out["friended"] = [str(i) for i in st["friended"] if str(i).isdigit()]
         return out
@@ -541,6 +567,7 @@ class LobbyClient:
             tmp = self.s.state_file.with_suffix(".tmp")
             tmp.write_text(json.dumps({"privacy": self.privacy, "map_index": self.map_index,
                                        "bot_ai": self.bot_ai, "ai_channel": self.ai_channel,
+                                       "ai_pins": self.ai_pins,
                                        "friended": sorted(self.friended)}))
             tmp.replace(self.s.state_file)
         except OSError as e:
@@ -594,10 +621,14 @@ class LobbyClient:
         self.ring_hint_after = 0.0  # room mode: no ring hint before this time
         self.ring_after = None      # room mode: when to !ring the unready players
         self.balanced_full = False  # room mode: !balance said for this time the team is full
+        self.balance_after = 0.0    # room mode: no !balance before this (BALANCE_GAP)
         self.stop_hint_after = 0.0  # no !stop request posted before this
         self.resign_kill_at = getattr(self, "resign_kill_at", None)  # !stop: kill the engine if still running then
         self.bonus_hint_after = 0.0  # no bonus hint before this
         self.voted_bonus = None     # the AI bonus this room voted in, if any
+        self.aibonus_vote = None    # room mode: the AI bonus vote running, if any
+        self.aibonus_called = {}    # caller (lower case) -> when they last called one
+        self.aibonus_remind = False  # remind how to vote the bonus once the next map is in
         self.vacant = None          # room mode: the joined room was found free
         self.vacancy_check_at = None
         self.room_password_now = ""  # the private room's password, once in it
@@ -609,6 +640,7 @@ class LobbyClient:
             "state": self.state, "mode": self.s.mode, "login": self.s.login, "games": self.games,
             "follow": sorted(self.s.follow), "autoBoss": sorted(self.s.auto_boss), "wantBots": self.want_bots, "botAI": self.bot_ai,
             "aiChannel": self.ai_channel or None, "aiRelease": self.ai_active[1] if self.ai_active else None,
+            "aiPins": dict(self.ai_pins),
             "paused": self.paused, "privacy": self.privacy if self.s.mode == "room" else None,
             "battle": None if not b else {
                 "id": b.id, "founder": b.founder, "title": b.title, "map": b.map, "game": b.game,
@@ -996,10 +1028,13 @@ class LobbyClient:
             log("a bonus vote passed: every AI to %d" % self.voted_bonus)
             self.say("!setallaibonus %d" % self.voted_bonus)
             return
+        if self.s.mode == "room" and self.s.bonus_vote and user not in (self.battle.founder, self.s.login) \
+                and self.aibonus_chat(user, msg.strip()):
+            return
         if self.s.mode == "room" and user not in (self.battle.founder, self.s.login) \
                 and BONUS_RE.search(msg) and self.now() >= self.bonus_hint_after:
             self.bonus_hint_after = self.now() + BONUS_HINT_EVERY
-            self.say(BONUS_HINT)
+            self.say(self.bonus_hint())
         ring = RING_RE.match(msg.strip())
         if ring and self.s.mode == "room" and user not in (self.battle.founder, self.s.login) \
                 and self.now() >= self.ring_hint_after:
@@ -1019,6 +1054,85 @@ class LobbyClient:
             w = m.group(1).split()
             if caller and w[0].lower() == "unboss" and (len(w) == 1 or w[1].lower() == self.s.login.lower()):
                 self.pending.insert(1, SHAME_SAY % caller.group(1))   # it would unboss this client
+
+    def bonus_hint(self) -> str:
+        if not self.s.bonus_vote:
+            return BONUS_HINT
+        now = self.current_bonus()
+        return AIBONUS_HINT % ("%d%%" % now if now is not None else "as set")
+
+    def current_bonus(self):
+        """The AI bonus in this room: a voted one, else the configured one."""
+        if self.voted_bonus is not None:
+            return self.voted_bonus
+        for c in self.s.bot_setup:
+            if SETALL_RE.match(c):
+                return int(c.split()[1])
+        return None
+
+    def aibonus_chat(self, user: str, msg: str) -> bool:
+        """`aibonus <n>` (a call) or `y` / `n` (a vote) from a player; True if
+        it was one of those."""
+        call = AIBONUS_RE.match(msg)
+        vote = AIBONUS_VOTE_RE.match(msg) if self.aibonus_vote else None
+        if not call and not vote:
+            return False
+        if user not in self.humans():
+            if call:
+                self.say("%s, only players can call an AI bonus vote." % user)
+            return True
+        now = self.now()
+        if vote:
+            v = self.aibonus_vote
+            yes = vote.group(1).lower().startswith("y")
+            (v["yes"] if yes else v["no"]).add(user)
+            (v["no"] if yes else v["yes"]).discard(user)
+            self.aibonus_count()
+            return True
+        value = int(call.group(1))
+        if not self.boss or self.state != "waiting" or self.game_running():
+            self.say("%s, the AI bonus can be changed between games." % user)
+        elif value > 100:
+            self.say("%s, the AI bonus is 0 to 100." % user)
+        elif self.aibonus_vote:
+            self.say("%s, an AI bonus vote is already running (%d%%): say y or n."
+                     % (user, self.aibonus_vote["value"]))
+        elif now < self.aibonus_called.get(user.lower(), -1e9) + self.s.bonus_vote_cooldown:
+            left = int(self.aibonus_called[user.lower()] + self.s.bonus_vote_cooldown - now) + 1
+            self.say("%s, you can call another AI bonus vote in %d:%02d." % (user, left // 60, left % 60))
+        else:
+            self.aibonus_called[user.lower()] = now
+            self.aibonus_vote = {"value": value, "caller": user, "yes": {user}, "no": set(),
+                                 "until": now + AIBONUS_VOTE_TIME}
+            log("%s called an AI bonus vote: %d" % (user, value))
+            self.say("%s called a vote: every AI to %d%% bonus. Players, say y or n (%d s)."
+                     % (user, value, AIBONUS_VOTE_TIME))
+            self.aibonus_count()
+        return True
+
+    def aibonus_count(self):
+        """Decide the AI bonus vote: a majority of the players yes passes it,
+        enough no that yes cannot reach one fails it; at the deadline, more
+        yes than no passes it. A game starting drops it."""
+        v = self.aibonus_vote
+        if v is None:
+            return
+        if self.state != "waiting" or not self.battle:
+            self.aibonus_vote = None
+            return
+        players = set(self.humans())
+        yes, no = len(v["yes"] & players), len(v["no"] & players)
+        n = len(players)
+        if yes * 2 > n or (self.now() >= v["until"] and yes > no):
+            self.aibonus_vote = None
+            self.voted_bonus = v["value"]
+            log("the AI bonus vote passed (%d yes, %d no): every AI to %d" % (yes, no, v["value"]))
+            self.say("The AI bonus vote passed (%d yes, %d no): every AI to %d%%." % (yes, no, v["value"]))
+            self.say("!setallaibonus %d" % v["value"])
+        elif no * 2 >= n or self.now() >= v["until"]:
+            self.aibonus_vote = None
+            log("the AI bonus vote failed (%d yes, %d no)" % (yes, no))
+            self.say("The AI bonus vote failed (%d yes, %d no)." % (yes, no))
 
     def trusted(self, name: str) -> bool:
         """An authorised or auto-boss user (any case)."""
@@ -1135,6 +1249,7 @@ class LobbyClient:
         self.sync_bots()
         if self.s.balance:
             self.say("!balance")        # after the bots: their team ids
+            self.balance_after = self.now() + BALANCE_GAP
         self.balanced_full = False
         if b.passworded:
             for u in sorted(self.s.follow):
@@ -1364,7 +1479,7 @@ class LobbyClient:
             if len(w) < 2:
                 self.tell(user, self.ai_summary())
             else:
-                self.choose_ai(user, w[1].lower())
+                self.choose_ai(user, w[1].lower(), version=w[2] if len(w) >= 3 else "")
         elif cmd in ("!public", "!private") and self.s.mode == "room":
             self.privacy = cmd[1:]
             self.save_state()
@@ -1441,7 +1556,8 @@ class LobbyClient:
     def help_lines(self) -> "list[str]":
         """!help: every command, a few PM lines."""
         if self.s.ai_channels:
-            ai = ("!ai [name]: list the AIs, or pick one for the next games. "
+            ai = ("!ai [name] [version]: list the AIs, or pick one for the next games; a version (a release "
+                  "tag, such as v1.1150-test) holds it to that release, !ai <name> follows the newest again. "
                   "!bots <0-16> [AI name]: how many bots, and optionally which AI.")
         else:
             ai = "!bots <0-16> [AI]: how many bots, and optionally which AI."
@@ -1494,7 +1610,7 @@ class LobbyClient:
         when = (g.get("startedUtc") or "")[5:16].replace("T", " ") + "Z"
         what = (g.get("map") or "?")
         if g["kind"] == "live":
-            lag = game_archive.summarise_timeline(g["run"] / "engine-timeline.csv", ("behind_s",)).get(
+            lag = game_archive.summarise_timeline(game_archive.engine_timeline(g["run"]), ("behind_s",)).get(
                 "behind_s") if g["run"] else None
             mins = (self.now() - g["since"]) / 60
             return "0. NOW %s %s, %d min in%s" % (when, what, mins, (
@@ -1539,7 +1655,7 @@ class LobbyClient:
             tail = ["Files: %s" % g["folder"]]
         else:
             run = g["run"]
-            lag = game_archive.summarise_timeline(run / "engine-timeline.csv", game_archive.LAG_COLUMNS) if run else {}
+            lag = game_archive.summarise_timeline(game_archive.engine_timeline(run), game_archive.LAG_COLUMNS) if run else {}
             load = game_archive.summarise_timeline(run / "timeline.csv", game_archive.LOAD_COLUMNS) if run else {}
             perf = g.get("perf")
             live = g["kind"] == "live"
@@ -1558,17 +1674,62 @@ class LobbyClient:
         ai, source = self.s.ai_channels[channel]
         if not source:
             return "%s (%s, the game's own)" % (channel, ai)
-        return "%s (%s %s)" % (channel, ai, self.ai_releases.get(channel) or "not downloaded yet")
+        pin = self.ai_pins.get(channel)
+        got = self.ai_releases.get(channel)
+        if pin and got != pin:
+            return "%s (%s %s, pinned to %s, not downloaded yet)" % (channel, ai, got or "none", pin)
+        return "%s (%s %s%s)" % (channel, ai, got or "not downloaded yet", ", pinned" if pin else "")
+
+    def channel_sources(self) -> dict:
+        """BARHOST_AI_CHANNELS with each pinned channel's tag in its source."""
+        return {n: (ai, install_ai.pin_source(src, self.ai_pins[n]) if src and n in self.ai_pins else src)
+                for n, (ai, src) in self.s.ai_channels.items()}
 
     def ai_summary(self) -> str:
-        return "AI now: %s. Choose with !ai <name>: %s." % (
+        return "AI now: %s. Choose with !ai <name> [version]: %s." % (
             self.ai_label(self.ai_channel), ", ".join(self.ai_label(c) for c in self.s.ai_channels))
 
-    def choose_ai(self, user, channel, prefix=""):
-        """!ai <channel>: kept across restarts; the engine and the bots
-        follow between games."""
+    def choose_ai(self, user, channel, prefix="", version=""):
+        """!ai <channel> [version]: kept across restarts; the engine and the
+        bots follow between games. A version pins a release channel to that
+        release tag; none (or latest / newest) has it follow its newest."""
         if channel not in self.s.ai_channels:
             self.tell(user, "No AI named %s. %s" % (channel, self.ai_summary()))
+            return
+        source = self.s.ai_channels[channel][1]
+        if version.lower() in ("latest", "newest"):
+            version = ""
+        if version and not source:
+            self.tell(user, "%s is the game's own AI: it has no versions." % channel)
+            return
+        if version and not install_ai.TAG_RE.match(version):
+            self.tell(user, "%s is not a release tag (such as v1.1150-test)." % version)
+            return
+        if source and self.ai_pins.get(channel, "") != version:
+            if version:
+                self.ai_pins[channel] = version
+                self.pin_asked[channel] = user
+            else:
+                self.ai_pins.pop(channel, None)
+                self.pin_asked.pop(channel, None)
+            self.ai_channel = channel
+            self.save_state()
+            self.ai_activate_due = True
+            # Fetched between games: the game-over check, now, or right
+            # after the check under way (the download never touches the
+            # engine; the switch is at activation).
+            if self.game_running() or self.state == "ingame":
+                when = "after this game"
+            elif not self.ai_updating:
+                self.need_ai_update = self.ai_updating = True
+                when = "once it is downloaded"
+            else:
+                self.next_ai_check = self.now()
+                when = "once the AI check under way ends"
+            what = ("%s %s, pinned" % (channel, version)) if version else \
+                "%s, following its newest release" % channel
+            self.tell(user, "OK: %s%s, %s." % (prefix, what, when))
+            log("%s %s %s" % (user, "pinned" if version else "unpinned", what))
             return
         if channel == self.ai_channel and not self.ai_activate_due:
             self.tell(user, "OK: %sthe bots already run %s." % (prefix, self.ai_label(channel)))
@@ -1695,6 +1856,8 @@ class LobbyClient:
         self.target_room = ""       # !room names one room once; it is not rejoined
         self.start_boxes_map = None  # boxes are sent again in the next room
         self.voted_bonus = None     # a voted bonus belongs to that room
+        self.aibonus_vote = None
+        self.aibonus_remind = False
         self.bots_due = None
         if self.state != "ingame":
             self.state = "lobby"
@@ -1715,11 +1878,25 @@ class LobbyClient:
                 log("AI release downloaded: " + c)
                 channel = c.split(":", 1)[0]
                 use = "the next game uses it" if channel == self.ai_channel else "PM me !ai %s to use it" % channel
+                what = "Pinned AI release in place" if channel in self.ai_pins else "New AI release"
                 for u in sorted(self.s.follow):
-                    self.tell(u, "New AI release: %s; %s." % (c, use))
+                    self.tell(u, "%s: %s; %s." % (what, c, use))
             self.ai_activate_due = True     # the engine follows between games (tick)
         for e in errors:
             log("AI update check failed: " + e)
+            channel = e.split(":", 1)[0]
+            if channel in self.pin_asked and self.ai_pins.get(channel):
+                # Only right after the pin: a later failure is a network
+                # blip, and the release already downloaded stays in use.
+                tag = self.ai_pins.pop(channel)
+                who = self.pin_asked.pop(channel)
+                self.save_state()
+                self.next_ai_check = self.now()
+                self.tell(who, "Could not get %s %s (%s); it follows its newest release again."
+                          % (channel, tag, e.split(":", 1)[-1].strip()[:150]))
+        for channel, tag in (releases or {}).items():
+            if self.pin_asked.get(channel) and self.ai_pins.get(channel) == tag:
+                self.pin_asked.pop(channel)
 
     def ready_to_start(self) -> bool:
         if not self.synced or self.map_wanted or self.ai_updating:   # no start mid change
@@ -1738,7 +1915,7 @@ class LobbyClient:
 
     def ring_due(self) -> bool:
         """Room mode: the teams are matched but someone is not ready, for
-        ring_every seconds since then or since the last ring."""
+        ring_first seconds since then, or ring_every since the last ring."""
         now = self.now()
         if self.s.ring_every <= 0 or not self.synced or self.map_wanted or self.ai_updating \
                 or not self.teams_matched() \
@@ -1746,7 +1923,7 @@ class LobbyClient:
             self.ring_after = None
             return False
         if self.ring_after is None:
-            self.ring_after = now + self.s.ring_every
+            self.ring_after = now + self.s.ring_first
         return now >= self.ring_after
 
     def game_started(self):
@@ -1933,6 +2110,7 @@ class LobbyClient:
             self.quiet_until = now + self.s.postgame_delay
             if self.battle:
                 self.promote_soon("the game is over")
+                self.aibonus_remind = self.s.mode == "room" and self.s.bonus_vote
             if self.s.mode == "follow" and self.battle:
                 self.sync_bots()        # a !bots sent during the game
             self.next_ai_check = now    # look for a new AI release before the next game
@@ -2005,13 +2183,15 @@ class LobbyClient:
                     self.set_seat(True, "boosting the room (%d playing)" % len(self.humans()))
                 elif want is False and self.playing():
                     self.set_seat(False, "a headless host spectates")
-        # The players start the game by vote; the client only says how.
-        if self.s.mode == "room" and self.state == "waiting" and self.boss and now >= self.quiet_until:
+        # A full team is balanced, and its unready players rung, also in the
+        # post-game delay.
+        if self.s.mode == "room" and self.state == "waiting" and self.boss:
             full = self.synced and bool(self.humans()) and not self.players_wanted()
             if not full:
                 self.balanced_full = False
-            elif self.s.balance and not self.balanced_full:
+            elif self.s.balance and not self.balanced_full and now >= self.balance_after:
                 self.balanced_full = True
+                self.balance_after = now + BALANCE_GAP
                 log("balancing: the player team is full (%d playing, %d bots)"
                     % (len(self.humans()), len(self.battle.bots)))
                 self.say("!balance")
@@ -2019,6 +2199,8 @@ class LobbyClient:
                 self.ring_after = now + self.s.ring_every
                 log("ringing the unready players (%d playing, %d bots)" % (len(self.humans()), len(self.battle.bots)))
                 self.say("!ring")
+        # The players start the game by vote; the client only says how.
+        if self.s.mode == "room" and self.state == "waiting" and self.boss and now >= self.quiet_until:
             if not self.ready_to_start():
                 self.start_hint_given = False
             elif not self.start_hint_given and now >= self.start_hint_after:
@@ -2028,6 +2210,13 @@ class LobbyClient:
                 if self.playing():          # never an idle commander in the game
                     self.set_seat(False, "everyone is ready", first=True)
                 self.say(START_HINT)
+        if self.aibonus_vote is not None:
+            self.aibonus_count()        # the deadline, or a game started
+        if self.aibonus_remind and self.state == "waiting" and self.boss and self.synced \
+                and not self.map_wanted and not self.game_running():
+            self.aibonus_remind = False     # after a game, once the next map is in
+            self.bonus_hint_after = now + BONUS_HINT_EVERY
+            self.say(self.bonus_hint())
         if self.promote_due():
             self.promote_after = now + PROMOTE_RETRY    # until the autohost answers
             log("promoting the room (%d playing)" % len(self.humans()))
@@ -2115,7 +2304,7 @@ async def update_ais(c: LobbyClient):
     try:
         if s.ai_channels:
             changes, errors, releases = await asyncio.get_running_loop().run_in_executor(
-                None, install_ai.update_channels, s.ai_channels, s.ai_releases_dir, engine_skirmish_dir())
+                None, install_ai.update_channels, c.channel_sources(), s.ai_releases_dir, engine_skirmish_dir())
         else:
             changes, errors = await asyncio.get_running_loop().run_in_executor(None, install_ai.update)
     except Exception as e:  # a failed check keeps what is installed
