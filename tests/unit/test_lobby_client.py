@@ -1555,6 +1555,70 @@ class AiBonusVote(Harness):
         self.run_for(60)
         self.assertIn("SAYBATTLE " + lc.AIBONUS_HINT % "70%", self.say("A", "bonus?"))
 
+    def bots_in(self, sent, bonus):
+        names = []
+        for x in sent:
+            if x.startswith("ADDBOT "):
+                w = x.split(" ")
+                self.feed("ADDBOT 12 %s %s %d 0 %s" % (w[1], ME, lc.battle_status(
+                    ready=1, team=len(names) + 1, ally=1, mode=1, sync=1, bonus=bonus), w[4]))
+                names.append(w[1])
+        return names
+
+    def set_bonus(self, names, bonus):
+        for i, n in enumerate(names):
+            self.feed("UPDATEBOT 12 %s %d 0" % (n, lc.battle_status(
+                ready=1, team=i + 1, ally=1, mode=1, sync=1, bonus=bonus)))
+
+    def test_a_boss_setting_the_bonus_is_seen_and_kept_for_later_adds(self):
+        self.c = self.client(BARHOST_BOT_SETUP="!setallaibonus 50", BARHOST_BONUS_VOTE="1", BARHOST_FOLLOW=OWNER)
+        names = self.bots_in(self.boss_and_setup(), 30)
+        self.players("A")
+        self.assertIn("SAYBATTLE " + lc.AIBONUS_HINT % "30%", self.say("A", "bonus?"))
+        self.set_bonus(names, 70)                   # the boss: !setallaibonus 70
+        self.run_for(60)
+        self.assertIn("SAYBATTLE " + lc.AIBONUS_HINT % "70%", self.say("A", "bonus?"))
+        self.set_bonus(names[:1], 80)               # the boss: !force <one> bonus 80
+        self.run_for(60)
+        self.assertIn("SAYBATTLE " + lc.AIBONUS_HINT % "70-80%", self.say("A", "bonus?"))
+        self.feed("SAIDPRIVATE %s !bots %d" % (OWNER, len(names) + 2))
+        sent = self.run_for(30)
+        self.assertIn("SAYBATTLE !setallaibonus 70", sent)     # the last bonus all AIs had
+        self.assertNotIn("SAYBATTLE !setallaibonus 50", sent)
+
+    def test_the_title_follows_the_bonus(self):
+        self.c = self.client(BARHOST_BOT_SETUP="!setallaibonus 50", BARHOST_BONUS_VOTE="1",
+                             BARHOST_ROOM_NAME="Human vs SMRTBARb {bonus}+")
+        sent = self.boss_and_setup()
+        self.assertIn("SAYBATTLE !rename Human vs SMRTBARb 50+", sent)
+        names = self.bots_in(sent, 50)
+        self.assertEqual([x for x in self.run_for(30) if "!rename" in x], [])     # unchanged
+        self.set_bonus(names, 70)                   # a boss's !setallaibonus 70
+        sent = self.run_for(30)
+        self.assertEqual([x for x in sent if "!rename" in x], ["SAYBATTLE !rename Human vs SMRTBARb 70+"])
+        self.set_bonus(names[:1], 80)
+        self.assertIn("SAYBATTLE !rename Human vs SMRTBARb 70-80+", self.run_for(30))
+
+    def test_an_empty_player_team_resets_the_room_once(self):
+        names = self.bots_in(self.boss_and_setup(), 50)
+        self.assertNotIn("SAYBATTLE " + lc.IDLE_RESET_SAY, self.run_for(120))   # nobody played yet
+        self.players("A")
+        self.say("A", "aibonus 20")
+        self.set_bonus(names, 20)
+        self.run_for(30)
+        self.feed("CLIENTBATTLESTATUS A %d 0" % lc.battle_status(mode=0, sync=1))   # A spectates
+        self.assertNotIn("SAYBATTLE " + lc.IDLE_RESET_SAY, self.run_for(lc.IDLE_RESET_AFTER - 10))
+        sent = self.run_for(20)
+        self.assertIn("SAYBATTLE " + lc.IDLE_RESET_SAY, sent)
+        for c in ("!preset custom", "!bSet experimentallegionfaction 1", "!setallaibonus 50"):
+            self.assertIn("SAYBATTLE " + c, sent)
+        self.assertIsNone(self.c.voted_bonus)
+        self.assertNotIn("SAYBATTLE " + lc.IDLE_RESET_SAY, self.run_for(300))  # once per idle spell
+        self.feed("CLIENTBATTLESTATUS A %d 0" % lc.battle_status(mode=1, sync=1))   # A plays again
+        self.run_for(10)
+        self.feed("CLIENTBATTLESTATUS A %d 0" % lc.battle_status(mode=0, sync=1))
+        self.assertIn("SAYBATTLE " + lc.IDLE_RESET_SAY, self.run_for(lc.IDLE_RESET_AFTER + 10))
+
     def test_reminded_after_each_game(self):
         self.boss_and_setup()
         self.players("A")

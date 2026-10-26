@@ -94,7 +94,9 @@ Settings (environment):
                           (/bar/data/lobby-client-state.json)
   BARHOST_MAP_ROTATION    room mode: ';'-separated maps, one per game, in order
                           (its place is kept in BARHOST_STATE_FILE)
-  BARHOST_ROOM_NAME       room title, set with !rename (optional)
+  BARHOST_ROOM_NAME       room title, set with !rename (optional); {bonus} in it
+                          is the AIs' bonus (e.g. "30", "30-50" if they differ),
+                          renamed whenever it changes
   BARHOST_START_BOXES_FILE  room mode: JSON of start boxes per map, applied
                           after every map change (optional; see start_box_for)
   BARHOST_START_BOX_KEYS  ','-separated variants to use, first found wins
@@ -195,6 +197,13 @@ MANAGER_RE = re.compile(r"^Host\[([A-Za-z]+)\d+\]$")
 PRIVATE_WAIT = 30           # seconds to wait for the private room to appear
 VACANCY_WAIT = 3            # seconds after joining before judging a room free
 MAP_WAIT = 20               # seconds for the autohost to switch to a !map before skipping it
+# Room mode: the title follows the AIs' bonus once their updates have settled
+# (a !setallaibonus is one UPDATEBOT per AI).
+RENAME_SETTLE = 5
+# Room mode: with no human in the player team this long, the room goes back to
+# its default settings (anything voted in since is undone), once per idle spell.
+IDLE_RESET_AFTER = 60
+IDLE_RESET_SAY = "Nobody is playing: back to this room's default settings."
 VOTE_RE = re.compile(r'called a vote for command "([^"]*)"')
 # A game about to start (a player's command, or the autohost's vote): if it
 # holds a player seat (only ever to add bots) it spectates at once, so its
@@ -626,6 +635,11 @@ class LobbyClient:
         self.resign_kill_at = getattr(self, "resign_kill_at", None)  # !stop: kill the engine if still running then
         self.bonus_hint_after = 0.0  # no bonus hint before this
         self.voted_bonus = None     # the AI bonus this room voted in, if any
+        self.room_bonus = None      # the bonus every AI here was last seen with
+        self.title_sent = None      # room mode: the title last set with !rename
+        self.rename_after = 0.0     # room mode: no rename before this (RENAME_SETTLE)
+        self.idle_since = None      # room mode: since when no human plays
+        self.defaults_due = False   # room mode: a human played since the room was set up or reset
         self.aibonus_vote = None    # room mode: the AI bonus vote running, if any
         self.aibonus_called = {}    # caller (lower case) -> when they last called one
         self.aibonus_remind = False  # remind how to vote the bonus once the next map is in
@@ -985,18 +999,29 @@ class LobbyClient:
         if b:
             b.bots[p[2]] = {"owner": p[3], "status": unpack_battle_status(p[4]),
                             "ai": p[6] if len(p) > 6 else None}
+            if b is self.battle:
+                self.rename_after = self.now() + RENAME_SETTLE
 
     def on_REMOVEBOT(self, line):
         p = line.split(" ")
         b = self.battles.get(p[1])
         if b:
             b.bots.pop(p[2], None)
+            if b is self.battle:
+                self.rename_after = self.now() + RENAME_SETTLE
 
     def on_UPDATEBOT(self, line):
         p = line.split(" ")
         b = self.battles.get(p[1])
         if b and p[2] in b.bots:
             b.bots[p[2]]["status"] = unpack_battle_status(p[3])
+            if b is self.battle:
+                self.rename_after = self.now() + RENAME_SETTLE
+                # A bonus set by anyone (a boss's !setallaibonus or force, a
+                # vote): once every AI has it, later adds get it too.
+                alike = self.bots_bonus()
+                if alike is not None and alike[0] == alike[1]:
+                    self.room_bonus = alike[0]
 
     def on_SAIDBATTLEEX(self, line):
         self.on_SAIDBATTLE(line)
@@ -1024,7 +1049,7 @@ class LobbyClient:
             self.promote_answer(msg)        # someone else's !promote: the cooldown restarts
         passed = BONUS_PASSED_RE.search(msg) if user == self.battle.founder else None
         if passed and self.s.mode == "room" and self.boss and 0 <= int(passed.group(1)) <= 100:
-            self.voted_bonus = int(passed.group(1))
+            self.voted_bonus = self.room_bonus = int(passed.group(1))
             log("a bonus vote passed: every AI to %d" % self.voted_bonus)
             self.say("!setallaibonus %d" % self.voted_bonus)
             return
@@ -1058,11 +1083,64 @@ class LobbyClient:
     def bonus_hint(self) -> str:
         if not self.s.bonus_vote:
             return BONUS_HINT
-        now = self.current_bonus()
-        return AIBONUS_HINT % ("%d%%" % now if now is not None else "as set")
+        alike = self.bots_bonus()
+        if alike is not None:
+            now = "%d%%" % alike[0] if alike[0] == alike[1] else "%d-%d%%" % alike
+        else:
+            now = self.current_bonus()
+            now = "%d%%" % now if now is not None else "as set"
+        return AIBONUS_HINT % now
+
+    def bots_bonus(self):
+        """The lowest and highest bonus of the AIs in the room, as the server
+        last said; None without AIs."""
+        b = self.battle
+        vals = [x["status"].get("bonus", 0) for x in b.bots.values()] if b else []
+        return (min(vals), max(vals)) if vals else None
+
+    def room_title(self) -> str:
+        """BARHOST_ROOM_NAME with {bonus} as the AIs' bonus now: one number,
+        a range if they differ, the room's bonus without AIs."""
+        name = self.s.room_name
+        if "{bonus}" not in name:
+            return name
+        alike = self.bots_bonus()
+        if alike is not None:
+            text = "%d" % alike[0] if alike[0] == alike[1] else "%d-%d" % alike
+        else:
+            now = self.current_bonus()
+            text = "%d" % now if now is not None else ""
+        return " ".join(name.replace("{bonus}", text).split())
+
+    def restore_defaults(self):
+        """Room mode, as boss, nobody playing: undo whatever was voted in
+        (settings, the AI bonus, start boxes, the bot count) by applying the
+        room's setup again. The map and the owners' choices (AI, privacy)
+        stay."""
+        self.defaults_due = False
+        self.idle_since = None
+        log("nobody plays: back to the room's default settings")
+        self.say(IDLE_RESET_SAY)
+        self.voted_bonus = self.room_bonus = None
+        self.aibonus_vote = None
+        for c in self.s.setup:
+            self.say(c)
+        for c in self.s.bot_setup:
+            self.say(c)
+        self.want_bots = self.s.bot_count
+        self.sync_bots()
+        self.start_boxes_map = None
+        self.apply_start_boxes()
+        if self.s.balance:
+            self.say("!balance")
+            self.balance_after = self.now() + BALANCE_GAP
+        self.rename_after = self.now() + RENAME_SETTLE
 
     def current_bonus(self):
-        """The AI bonus in this room: a voted one, else the configured one."""
+        """The AI bonus for this room's bot adds: the one every AI was last
+        seen with, else a voted one, else the configured one."""
+        if self.room_bonus is not None:
+            return self.room_bonus
         if self.voted_bonus is not None:
             return self.voted_bonus
         for c in self.s.bot_setup:
@@ -1125,7 +1203,7 @@ class LobbyClient:
         n = len(players)
         if yes * 2 > n or (self.now() >= v["until"] and yes > no):
             self.aibonus_vote = None
-            self.voted_bonus = v["value"]
+            self.voted_bonus = self.room_bonus = v["value"]
             log("the AI bonus vote passed (%d yes, %d no): every AI to %d" % (yes, no, v["value"]))
             self.say("The AI bonus vote passed (%d yes, %d no): every AI to %d%%." % (yes, no, v["value"]))
             self.say("!setallaibonus %d" % v["value"])
@@ -1242,9 +1320,12 @@ class LobbyClient:
         # not a player's; only adding bots needs the seat, briefly (sync_bots).
         self.set_seat(False, "boss; a headless host spectates")
         if self.s.room_name:
-            self.say("!rename " + self.s.room_name)
+            self.title_sent = self.room_title()
+            self.say("!rename " + self.title_sent)
         for c in self.s.setup:
             self.say(c)
+        self.defaults_due = False   # set up just now: nothing to undo yet
+        self.idle_since = None
         self.boss_authorised(b.users)
         self.sync_bots()
         if self.s.balance:
@@ -1354,8 +1435,8 @@ class LobbyClient:
             # follows every add (setup, an AI switch, more bots). A bonus the
             # room voted in replaces the configured one in this room.
             for c in self.s.bot_setup:
-                if self.voted_bonus is not None and SETALL_RE.match(c):
-                    c = "!setallaibonus %d" % self.voted_bonus
+                if SETALL_RE.match(c):
+                    c = "!setallaibonus %d" % self.current_bonus()
                 self.say(c)
 
     def leave_battle(self, why):
@@ -1856,6 +1937,10 @@ class LobbyClient:
         self.target_room = ""       # !room names one room once; it is not rejoined
         self.start_boxes_map = None  # boxes are sent again in the next room
         self.voted_bonus = None     # a voted bonus belongs to that room
+        self.room_bonus = None      # so does the bonus its AIs were seen with
+        self.title_sent = None
+        self.idle_since = None
+        self.defaults_due = False
         self.aibonus_vote = None
         self.aibonus_remind = False
         self.bots_due = None
@@ -2210,6 +2295,23 @@ class LobbyClient:
                 if self.playing():          # never an idle commander in the game
                     self.set_seat(False, "everyone is ready", first=True)
                 self.say(START_HINT)
+        if self.s.mode == "room" and self.state == "waiting" and self.boss and self.battle                 and not self.game_running() and not (self.users.get(self.battle.founder, 0) & 1):
+            # The title follows the AIs' bonus, whoever changed it.
+            if self.s.room_name and now >= self.rename_after and not self.pending:
+                title = self.room_title()
+                if title != self.title_sent:
+                    self.title_sent = title
+                    log("renaming the room: %s" % title)
+                    self.say("!rename " + title)
+            # An idle spell (no human in the player team): back to the defaults.
+            if self.humans():
+                self.idle_since = None
+                self.defaults_due = True
+            elif self.defaults_due:
+                if self.idle_since is None:
+                    self.idle_since = now
+                elif now - self.idle_since >= IDLE_RESET_AFTER:
+                    self.restore_defaults()
         if self.aibonus_vote is not None:
             self.aibonus_count()        # the deadline, or a game started
         if self.aibonus_remind and self.state == "waiting" and self.boss and self.synced \
