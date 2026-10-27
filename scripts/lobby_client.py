@@ -162,7 +162,8 @@ Settings (environment):
                           overrides it from the next game, kept in
                           BARHOST_STATE_FILE until `!profiler default`
   BARHOST_BAR_WIDGETS     0 = BAR's own widgets off in games: only the metrics
-                          widget (and BAR's hidden helpers) load (0); 1 = on; a
+                          widget, BAR's Autoquit (it quits the engine after
+                          game over) and BAR's hidden helpers load (0); 1 = on; a
                           BARHOST_FOLLOW user's `!widgets on|off` overrides it
                           from the next game, kept until `!widgets default`
   BARHOST_WIDGET_NAMES_FILE  BAR's widget names, learnt after each game from
@@ -298,6 +299,11 @@ PROMOTE_MARGIN = 5          # past the cooldown the autohost names
 # !stop while this engine is in the game: it leaves, which resigns the bots.
 RESIGN_SAY = "%s ended this game: resigning the AI bots."
 RESIGN_KILL_AFTER = 20
+# Seconds after the autohost's game ends before the client stops its engine if
+# it is still running. BAR's Autoquit widget quits a headless engine 12 s after
+# game over (luaui/Widgets/cmd_autoquit.lua); without it the engine stays in
+# the ended game for good, holding its memory and CPU.
+ENGINE_QUIT_AFTER = 60
 # !rehost: end the game (as !stop), leave the room, take a new one.
 REHOST_GAME_SAY = "%s ended this game: resigning the AI bots and moving to a new room."
 REHOST_SAY = "%s asked me to rehost: moving to a new room."
@@ -669,6 +675,8 @@ class LobbyClient:
         self.balance_after = 0.0    # room mode: no !balance before this (BALANCE_GAP)
         self.stop_hint_after = 0.0  # no !stop request posted before this
         self.resign_kill_at = getattr(self, "resign_kill_at", None)  # !stop: kill the engine if still running then
+        # The autohost's game ended: stop the engine if it has not quit by then.
+        self.engine_quit_at = getattr(self, "engine_quit_at", None)
         self.bonus_hint_after = 0.0  # no bonus hint before this
         self.voted_bonus = None     # the AI bonus this room voted in, if any
         self.room_bonus = None      # the bonus every AI here was last seen with
@@ -836,6 +844,8 @@ class LobbyClient:
                 self.game_started()
             else:
                 log("the autohost's game ended")
+                if self.game_running():
+                    self.engine_quit_at = self.now() + ENGINE_QUIT_AFTER
 
     def on_BATTLEOPENED(self, line):
         p = line.split(" ", 11)
@@ -2089,6 +2099,12 @@ class LobbyClient:
 
     def game_started(self):
         b = self.battle
+        if self.game_running():
+            # The last game's engine never quit: stop it, record that game,
+            # then launch. Two engines would share the pod's CPU and memory.
+            log("my engine from the last game is still running; stopping it first")
+            self.stop_engine(wait=10)
+            self.log_engine_exit()
         self.state = "ingame"
         self.games += 1
         log("game %d starting on %s:%s" % (self.games, b.ip, b.port))
@@ -2096,6 +2112,7 @@ class LobbyClient:
         self.game_launched_at = self.now()
         self.engine_exit_logged = False
         self.resign_kill_at = None
+        self.engine_quit_at = None
         run_dir = getattr(self.game_proc, "write_dir", None)
         if self.perf is not None:
             self.perf.start("game %d %s" % (self.games, b.map), run_dir, now=self.now())
@@ -2218,6 +2235,24 @@ class LobbyClient:
         self.say(RESIGN_SAY % user)
         self.tell(user, "Resigning the bots: I am leaving the game, so BAR ends their team.")
 
+    def stop_engine(self, wait=0):
+        """SIGTERM the engine (it leaves the game), SIGKILL if it is still
+        there after `wait` seconds (0: leave that to tick())."""
+        p = self.game_proc
+        if p is None or p.poll() is not None or not hasattr(p, "terminate"):
+            return
+        p.terminate()
+        proc = getattr(p, "proc", None)
+        if wait and proc is not None:
+            try:
+                proc.wait(wait)
+            except Exception:       # subprocess.TimeoutExpired
+                p.kill()
+                try:
+                    proc.wait(5)
+                except Exception:
+                    pass
+
     def log_engine_exit(self):
         """Once per game: the engine's exit, in the pod log (its console is
         only on the volume). An odd exit (non-zero, or while the game goes
@@ -2255,6 +2290,11 @@ class LobbyClient:
                     log("the engine did not quit; killing it")
                     self.game_proc.kill()
                     self.resign_kill_at = now + RESIGN_KILL_AFTER
+                elif self.engine_quit_at is not None and now >= self.engine_quit_at and self.resign_kill_at is None                         and not (self.battle and self.users.get(self.battle.founder, 0) & 1):
+                    log("the game ended %d s ago and my engine is still running; stopping it" % ENGINE_QUIT_AFTER)
+                    self.engine_quit_at = None
+                    self.stop_engine()
+                    self.resign_kill_at = now + RESIGN_KILL_AFTER   # killed then if still running
                 self.flush_pending()
                 return
             self.log_engine_exit()
@@ -2599,6 +2639,9 @@ def perf_lines(lag: dict, load: dict, perf: "dict | None", now: bool = False) ->
 
 WIDGET = Path(__file__).resolve().parent / "rjm_host_metrics.lua"
 WIDGET_NAME = "rjm host metrics"    # its GetInfo name
+# BAR widgets kept on with BAR's widgets off: Autoquit quits a headless engine
+# 12 s after game over (cmd_autoquit.lua); without it the engine never exits.
+BAR_WIDGETS_KEPT = ("Autoquit",)
 # BAR's widget config in the write dir (luaui/barwidgets.lua CONFIG_FILENAME:
 # LuaUI/Config/<Game.gameShortName>.lua). Its `order` maps each widget's name
 # to its load order; 0 = off (barwidgets.lua LoadWidget "Enabling"); a name
@@ -2666,13 +2709,14 @@ def learn_widget_names(s: Settings, run_dir: Path) -> None:
 
 
 def bar_widgets_off_config(names: "list[str]") -> str:
-    """A BYAR.lua that turns every named widget off but the metrics widget."""
-    me = '"%s"' % WIDGET_NAME
+    """A BYAR.lua that turns every named widget off but the metrics widget
+    and BAR_WIDGETS_KEPT."""
+    keep = ['"%s"' % n for n in (WIDGET_NAME,) + BAR_WIDGETS_KEPT]
     lines = ["-- written by the lobby client (BARHOST_BAR_WIDGETS=0 / !widgets off):",
-             "-- every BAR widget off (order 0) but the host's metrics widget",
+             "-- every BAR widget off (order 0) but the host's metrics widget and Autoquit",
              "return {", "\tallowUserWidgets = true,", "\torder = {"]
-    lines += ["\t\t[%s] = 0," % n for n in sorted(set(names) - {me})]
-    lines += ["\t\t[%s] = 1," % me, "\t},", "}", ""]
+    lines += ["\t\t[%s] = 0," % n for n in sorted(set(names) - set(keep))]
+    lines += ["\t\t[%s] = %d," % (n, i + 1) for i, n in enumerate(keep)] + ["\t},", "}", ""]
     return "\n".join(lines)
 
 

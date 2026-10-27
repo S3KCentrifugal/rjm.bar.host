@@ -1851,6 +1851,36 @@ class StopRequest(Harness):
         self.assertEqual(self.proc.terminated, 1)
         self.assertTrue([x for x in again if "Already resigning" in x])
 
+    def test_an_engine_still_running_after_the_game_is_stopped(self):
+        """BAR's Autoquit quits the engine 12 s after game over; if it does not
+        (widget off, a hang), the client stops it a minute after the game."""
+        self.boss_and_setup()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.run_for(30)
+        self.feed("CLIENTSTATUS %s 64" % HOST)              # the autohost's game ends
+        self.run_for(lc.ENGINE_QUIT_AFTER - 5)
+        self.assertEqual(getattr(self.proc, "terminated", 0), 0)
+        self.run_for(10)
+        self.assertEqual(self.proc.terminated, 1)
+        self.run_for(lc.RESIGN_KILL_AFTER + 1)              # still there: killed
+        self.assertEqual(getattr(self.proc, "killed", 0), 1)
+        self.proc.code = -9
+        self.run_for(2)
+        self.assertEqual(self.c.state, "waiting")
+
+    def test_a_new_game_stops_the_last_games_engine_first(self):
+        self.boss_and_setup()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        old = self.proc
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        self.run_for(10)
+        self.proc = Proc()                                  # the next launch's engine
+        self.feed("CLIENTSTATUS %s 65" % HOST)              # a new game before the old engine quit
+        self.assertEqual(old.terminated, 1)
+        self.assertEqual(len(self.launched), 2)
+        self.assertIs(self.c.game_proc, self.proc)
+        self.assertEqual(self.c.state, "ingame")
+
     def test_an_engine_that_does_not_quit_is_killed(self):
         self.boss_and_setup()
         self.feed("CLIENTSTATUS %s 65" % HOST)
@@ -2131,7 +2161,7 @@ class WriteDir(unittest.TestCase):
     # The shape BAR's table.save writes (luaui/barwidgets.lua SaveConfigData).
     BYAR = ('-- Widget Custom data and order, order = 0 disabled widget\nreturn {\n\tallowUserWidgets = true,\n'
             '\tdata = {\n\t\t["Widget Selector"] = {\n\t\t\tshow = true,\n\t\t},\n\t},\n'
-            '\torder = {\n\t\tAdvPlayersList = 12,\n\t\t["Say \\"hi\\""] = 0,\n'
+            '\torder = {\n\t\tAdvPlayersList = 12,\n\t\tAutoquit = 69,\n\t\t["Say \\"hi\\""] = 0,\n'
             '\t\t["Widget Selector"] = 24,\n\t\t["rjm host metrics"] = 23,\n\t},\n}\n')
 
     def settings(self, tmp, **extra):
@@ -2148,7 +2178,8 @@ class WriteDir(unittest.TestCase):
             (ended / "LuaUI" / "Config" / "BYAR.lua").write_text(self.BYAR)
             lc.learn_widget_names(s, ended)                     # after a game
             self.assertEqual(json.loads(Path(tmp, "names.json").read_text()),
-                             ['"AdvPlayersList"', '"Say \\"hi\\""', '"Widget Selector"', '"rjm host metrics"'])
+                             ['"AdvPlayersList"', '"Autoquit"', '"Say \\"hi\\""', '"Widget Selector"',
+                              '"rjm host metrics"'])
             d = Path(tmp) / "run1"
             d.mkdir()
             lc.prepare_write_dir(s, d)
@@ -2157,6 +2188,8 @@ class WriteDir(unittest.TestCase):
             self.assertIn('\t\t["Say \\"hi\\""] = 0,\n', cfg)
             self.assertIn('\t\t["rjm host metrics"] = 1,\n', cfg)
             self.assertNotIn('["rjm host metrics"] = 0', cfg)
+            self.assertIn('\t\t["Autoquit"] = 2,\n', cfg)      # quits the engine after game over
+            self.assertNotIn('["Autoquit"] = 0', cfg)
             self.assertIn("allowUserWidgets = true", cfg)
             self.assertEqual(sorted(lc.widget_names_in(cfg)), sorted(lc.widget_names_in(self.BYAR)))
 
