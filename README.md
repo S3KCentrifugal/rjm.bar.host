@@ -135,7 +135,8 @@ The table leaves out two cases:
      first (the one running, those ended, then the archive's index), and
      `!perf [number]` reports one: how far behind the server the engine
      was, sim speed, CPU (the main thread apart), memory and pressure,
-     live for the game running. `!help` lists every command. `!rehost` ends any game (the bots resign, as
+     live for the game running. `!profiler on|off|default` and `!widgets on|off|default` switch the engine profiler and BAR's own
+     widgets (`BARHOST_BAR_WIDGETS`) from the next game (kept across restarts), `!say <text>` says it in the room. `!help` lists every command. `!rehost` ends any game (the bots resign, as
      with `!stop`), leaves the room and takes a new one, never the same.
      Each game also runs in its own engine write dir under
      `BARHOST_WORK_DIR` (fast storage: the engine writes its logs there during

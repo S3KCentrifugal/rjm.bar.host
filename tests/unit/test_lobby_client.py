@@ -818,6 +818,63 @@ class Privacy(Harness):
         self.assertIn("SAYPRIVATE %s !privatehost" % MANAGER, self.run_for(70))
 
 
+class ProfilerAndSay(Harness):
+    """!profiler on|off|default: the engine profiler for the next games, kept
+    across restarts; !say <text>: said in the room."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_FOLLOW=OWNER, BARHOST_ENGINE_PROFILER="1")
+
+    def pm(self, text, user=OWNER):
+        self.feed("SAIDPRIVATE %s %s" % (user, text))
+        return [x for x in self.run_for(5) if x.startswith("SAYPRIVATE %s " % user)]
+
+    def widget(self, client):
+        d = Path(self.tmp.name) / "run"
+        d.mkdir(exist_ok=True)
+        lc.prepare_write_dir(client.s, d)
+        return (d / "LuaUI" / "Widgets" / "rjm_host_metrics.lua").read_text()
+
+    def test_the_choice_reaches_the_widget_and_is_kept_across_a_restart(self):
+        self.log_in()
+        self.assertIn("Engine profiler: on (the default)", self.pm("!profiler")[0])
+        self.assertIn("Engine profiler: off (chosen by PM", self.pm("!profiler off")[0])
+        self.assertIn("\nlocal RJM_PROFILER = false ", self.widget(self.c))
+        again = self.client(BARHOST_FOLLOW=OWNER, BARHOST_ENGINE_PROFILER="1")
+        self.assertFalse(again.s.engine_profiler)
+        self.assertIn("\nlocal RJM_PROFILER = false ", self.widget(again))
+        self.c = again
+        self.assertIn("Engine profiler: on (the default)", self.pm("!profiler default")[0])
+        self.assertTrue(self.client(BARHOST_FOLLOW=OWNER, BARHOST_ENGINE_PROFILER="1").s.engine_profiler)
+        self.assertIn("!profiler on, !profiler off", self.pm("!profiler maybe")[0])
+
+    def test_only_authorised_users(self):
+        self.log_in()
+        self.assertEqual(self.pm("!profiler off", user="Mallory"), [])
+        self.assertEqual(self.pm("!widgets on", user="Mallory"), [])
+        self.assertTrue(self.c.s.engine_profiler)
+        self.assertFalse(self.c.s.bar_widgets)
+
+    def test_widgets_choice_is_kept_across_a_restart(self):
+        self.log_in()
+        self.assertIn("BAR's widgets: off (only my metrics widget) (the default)", self.pm("!widgets")[0])
+        self.assertIn("BAR's widgets: on (chosen by PM", self.pm("!widgets on")[0])
+        self.assertTrue(self.client(BARHOST_FOLLOW=OWNER).s.bar_widgets)
+        self.assertIn("BAR's widgets: off (only my metrics widget) (the default)", self.pm("!widgets default")[0])
+        self.assertTrue(self.client(BARHOST_FOLLOW=OWNER, BARHOST_BAR_WIDGETS="1").s.bar_widgets)
+        self.assertIn("!widgets on, !widgets off", self.pm("!widgets some")[0])
+
+    def test_say_in_the_room(self):
+        self.assertIn("I am not in a room", self.pm("!say hello")[0])
+        self.boss_and_setup()
+        self.feed("SAIDPRIVATE %s !say  Good luck, have fun!  " % OWNER)
+        sent = self.run_for(5)
+        self.assertIn("SAYBATTLE Good luck, have fun!", sent)
+        self.assertIn("SAYPRIVATE %s Said in room 12." % OWNER, sent)
+        self.assertIn("PM me !say <text>", self.pm("!say")[0])
+
+
 ROTATION = "All That Simmers;Cells;Forge"
 
 
@@ -2071,6 +2128,55 @@ class WriteDir(unittest.TestCase):
             if (d / "cache").is_symlink():                          # needs symlink rights on Windows
                 self.assertEqual((d / "cache").resolve(), (Path(tmp) / "work" / ".engine-cache").resolve())
 
+    # The shape BAR's table.save writes (luaui/barwidgets.lua SaveConfigData).
+    BYAR = ('-- Widget Custom data and order, order = 0 disabled widget\nreturn {\n\tallowUserWidgets = true,\n'
+            '\tdata = {\n\t\t["Widget Selector"] = {\n\t\t\tshow = true,\n\t\t},\n\t},\n'
+            '\torder = {\n\t\tAdvPlayersList = 12,\n\t\t["Say \\"hi\\""] = 0,\n'
+            '\t\t["Widget Selector"] = 24,\n\t\t["rjm host metrics"] = 23,\n\t},\n}\n')
+
+    def settings(self, tmp, **extra):
+        e = {"BARHOST_LOBBY_LOGIN": ME, "BARHOST_LOBBY_PASSWORD": "x", "BARHOST_WORK_DIR": tmp,
+             "BARHOST_WIDGET_NAMES_FILE": os.path.join(tmp, "names.json")}
+        e.update(extra)
+        return lc.Settings(e)
+
+    def test_bar_widgets_off_keeps_only_the_metrics_widget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.settings(tmp)                              # the default: off
+            ended = Path(tmp) / "run0"
+            (ended / "LuaUI" / "Config").mkdir(parents=True)
+            (ended / "LuaUI" / "Config" / "BYAR.lua").write_text(self.BYAR)
+            lc.learn_widget_names(s, ended)                     # after a game
+            self.assertEqual(json.loads(Path(tmp, "names.json").read_text()),
+                             ['"AdvPlayersList"', '"Say \\"hi\\""', '"Widget Selector"', '"rjm host metrics"'])
+            d = Path(tmp) / "run1"
+            d.mkdir()
+            lc.prepare_write_dir(s, d)
+            cfg = (d / "LuaUI" / "Config" / "BYAR.lua").read_text()
+            self.assertIn('\t\t["AdvPlayersList"] = 0,\n', cfg)
+            self.assertIn('\t\t["Say \\"hi\\""] = 0,\n', cfg)
+            self.assertIn('\t\t["rjm host metrics"] = 1,\n', cfg)
+            self.assertNotIn('["rjm host metrics"] = 0', cfg)
+            self.assertIn("allowUserWidgets = true", cfg)
+            self.assertEqual(sorted(lc.widget_names_in(cfg)), sorted(lc.widget_names_in(self.BYAR)))
+
+    def test_names_from_the_archive_when_none_learnt_yet(self):
+        import gzip
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.settings(tmp, BARHOST_BAR_WIDGETS="0", BARHOST_ARCHIVE_DIR=os.path.join(tmp, "archive"))
+            cfg = Path(tmp, "archive", "2026", "10", "26", "g1", "files", "LuaUI", "Config")
+            cfg.mkdir(parents=True)
+            (cfg / "BYAR.lua.gz").write_bytes(gzip.compress(self.BYAR.encode()))
+            self.assertIn('"AdvPlayersList"', lc.known_widget_names(s))
+
+    def test_bar_widgets_on_or_no_names_writes_no_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for value in ("1", "0"):                            # on; off with nothing learnt
+                d = Path(tmp) / ("run" + value)
+                d.mkdir()
+                lc.prepare_write_dir(self.settings(tmp, BARHOST_BAR_WIDGETS=value), d)
+                self.assertFalse((d / "LuaUI" / "Config" / "BYAR.lua").exists())
+
     def test_metrics_off_installs_no_widget(self):
         with tempfile.TemporaryDirectory() as tmp:
             s = lc.Settings({"BARHOST_LOBBY_LOGIN": ME, "BARHOST_LOBBY_PASSWORD": "x",
@@ -2205,9 +2311,10 @@ class GamesAndPerf(Harness):
 
     def test_help(self):
         lines = self.pm("!help")
-        self.assertEqual(len(lines), 4)
+        self.assertEqual(len(lines), 5)
         text = " ".join(lines)
-        for cmd in ("!status", "!games", "!perf", "!bots", "!public", "!private", "!stop", "!help"):
+        for cmd in ("!status", "!games", "!perf", "!bots", "!public", "!private", "!stop", "!help",
+                    "!profiler", "!say"):
             self.assertIn(cmd, text)
         self.assertTrue(all(len(x) < 300 for x in lines))
 

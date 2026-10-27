@@ -54,7 +54,9 @@ room (the client hosts by itself)
      across restarts and applied between games: the engine is pointed at
      the release, and the bots are replaced (as a player) only if the AI's
      name changes. `!stop` resigns the bots during a game (its
-     engine leaves the game). Each joiner gets BARHOST_WELCOME privately.
+     engine leaves the game). `!say <text>` says it in the room (a
+     `!command` is then the boss's). `!profiler` and `!widgets` switch the
+     engine profiler and BAR's own widgets for the next games. Each joiner gets BARHOST_WELCOME privately.
      A player's "bonus" gets one line on voting the AIs' bonus (all, or one),
      once a minute; a passed bonus vote is applied to every AI
      (`!setallaibonus`) and kept for the room's later bot adds.
@@ -156,7 +158,16 @@ Settings (environment):
                           rjm_host_metrics.lua) and its CPU, threads, memory,
                           disk and pressure (engine_metrics.py) (5; 0 = off)
   BARHOST_ENGINE_PROFILER 1 = engine profiler on in games, for the AIs' time
-                          share (0)
+                          share (0); a BARHOST_FOLLOW user's `!profiler on|off`
+                          overrides it from the next game, kept in
+                          BARHOST_STATE_FILE until `!profiler default`
+  BARHOST_BAR_WIDGETS     0 = BAR's own widgets off in games: only the metrics
+                          widget (and BAR's hidden helpers) load (0); 1 = on; a
+                          BARHOST_FOLLOW user's `!widgets on|off` overrides it
+                          from the next game, kept until `!widgets default`
+  BARHOST_WIDGET_NAMES_FILE  BAR's widget names, learnt after each game from
+                          its LuaUI/Config/BYAR.lua (first: the newest archived
+                          game's) (bar-widget-names.json next to BARHOST_STATE_FILE)
   BARHOST_STATUS_FILE     JSON status, rewritten on every change
                           (/tmp/lobby-client-status.json)
 """
@@ -431,6 +442,14 @@ class Settings:
         # 1 = turn the engine's profiler on in games, for the "AI" time share
         # (/debug 1 0; costs a timer around every AI call).
         self.engine_profiler = g("BARHOST_ENGINE_PROFILER", "0") == "1"
+        # 0 (default) = BAR's own widgets off in games: only the metrics
+        # widget (and BAR's hidden helpers, which always load); 1 = all on. A headless engine still
+        # runs every widget's Lua (unit events, Update, the draw call-ins with
+        # stubbed GL) on the sim thread.
+        self.bar_widgets = g("BARHOST_BAR_WIDGETS", "0") == "1"
+        # BAR's widget names, learnt from each game's LuaUI/Config/BYAR.lua.
+        self.widget_names_file = Path(g("BARHOST_WIDGET_NAMES_FILE",
+                                        str(self.state_file.parent / "bar-widget-names.json")))
         self.status_file = Path(g("BARHOST_STATUS_FILE", "/tmp/lobby-client-status.json"))
         if not self.login or not self.password:
             raise SystemExit("BARHOST_LOBBY_LOGIN and BARHOST_LOBBY_PASSWORD must be set")
@@ -532,6 +551,18 @@ class LobbyClient:
         self.ai_pins = {k: v for k, v in state.get("ai_pins", {}).items()
                         if k in s.ai_channels and s.ai_channels[k][1]}
         self.pin_asked = {}         # channel -> who pinned it, until the download is done
+        # The engine profiler: BARHOST_ENGINE_PROFILER until a user's
+        # `!profiler on|off` (kept; `!profiler default` forgets it). Each game's
+        # launch reads s.engine_profiler, so a change applies from the next game.
+        self.profiler_default = s.engine_profiler
+        self.profiler_choice = state.get("engine_profiler")
+        if self.profiler_choice is not None:
+            s.engine_profiler = self.profiler_choice
+        # BAR's widgets: BARHOST_BAR_WIDGETS until `!widgets on|off` (kept).
+        self.widgets_default = s.bar_widgets
+        self.widgets_choice = state.get("bar_widgets")
+        if self.widgets_choice is not None:
+            s.bar_widgets = self.widgets_choice
         self.ai_active = None       # (channel, tag) the engine was last pointed at
         # Point the engine at the channel between games; at start, once the
         # releases are fetched.
@@ -568,6 +599,9 @@ class LobbyClient:
                               if isinstance(k, str) and isinstance(v, str) and install_ai.TAG_RE.match(v)}
         if isinstance(st.get("friended"), list):
             out["friended"] = [str(i) for i in st["friended"] if str(i).isdigit()]
+        for key in ("engine_profiler", "bar_widgets"):
+            if isinstance(st.get(key), bool):
+                out[key] = st[key]
         return out
 
     def save_state(self):
@@ -577,6 +611,8 @@ class LobbyClient:
             tmp.write_text(json.dumps({"privacy": self.privacy, "map_index": self.map_index,
                                        "bot_ai": self.bot_ai, "ai_channel": self.ai_channel,
                                        "ai_pins": self.ai_pins,
+                                       "engine_profiler": self.profiler_choice,
+                                       "bar_widgets": self.widgets_choice,
                                        "friended": sorted(self.friended)}))
             tmp.replace(self.s.state_file)
         except OSError as e:
@@ -1556,6 +1592,43 @@ class LobbyClient:
                 self.stop_hint_after = self.now() + STOP_HINT_EVERY
                 self.say(STOP_HINT % user)
                 self.tell(user, "Asked the players to vote !cv stop.")
+        elif cmd == "!profiler":
+            arg = w[1].lower() if len(w) >= 2 else ""
+            if arg not in ("", "on", "off", "default"):
+                self.tell(user, "PM me !profiler on, !profiler off or !profiler default.")
+                return
+            if arg:
+                self.profiler_choice = None if arg == "default" else arg == "on"
+                self.s.engine_profiler = self.profiler_default if arg == "default" else self.profiler_choice
+                self.save_state()
+                log("engine profiler %s at %s's request" % ("on" if self.s.engine_profiler else "off", user))
+            why = "the default" if self.profiler_choice is None else "chosen by PM, kept across restarts"
+            when = (" from the next game" if arg and self.game_running() else "")
+            self.tell(user, "Engine profiler: %s%s (%s)." % ("on" if self.s.engine_profiler else "off", when, why))
+        elif cmd == "!widgets":
+            arg = w[1].lower() if len(w) >= 2 else ""
+            if arg not in ("", "on", "off", "default"):
+                self.tell(user, "PM me !widgets on, !widgets off or !widgets default.")
+                return
+            if arg:
+                self.widgets_choice = None if arg == "default" else arg == "on"
+                self.s.bar_widgets = self.widgets_default if arg == "default" else self.widgets_choice
+                self.save_state()
+                log("BAR's widgets %s at %s's request" % ("on" if self.s.bar_widgets else "off", user))
+            why = "the default" if self.widgets_choice is None else "chosen by PM, kept across restarts"
+            when = (" from the next game" if arg and self.game_running() else "")
+            what = "on" if self.s.bar_widgets else "off (only my metrics widget)"
+            self.tell(user, "BAR's widgets: %s%s (%s)." % (what, when, why))
+        elif cmd == "!say":
+            text = msg[len(w[0]):].strip() if w else ""
+            if not text:
+                self.tell(user, "PM me !say <text>: I say it in my room.")
+            elif self.battle is None:
+                self.tell(user, "I am not in a room.")
+            else:
+                log("saying for %s: %s" % (user, text[:160]))
+                self.say(text)
+                self.tell(user, "Said in room %s." % self.battle.id)
         elif cmd == "!ai" and self.s.ai_channels:
             if len(w) < 2:
                 self.tell(user, self.ai_summary())
@@ -1646,7 +1719,10 @@ class LobbyClient:
                  "newest first (5; up to %d)." % GAMES_KEPT,
                  "!perf [number]: how the game now (or the last one, or game <number> from !games) ran: how far "
                  "behind the server I was, sim speed, CPU, memory, pressure.",
-                 ai]
+                 ai,
+                 "!profiler [on|off|default]: the engine profiler (the AIs' share of the sim time); !widgets "
+                 "[on|off|default]: BAR's own widgets in my engine (off: only my metrics). Both from the next "
+                 "game, kept across restarts. !say <text>: I say it in my room (a !command too, as boss)."]
         if self.s.mode == "room":
             lines.append("!public / !private: the kind of room I host (I PM you a private room's password). "
                          "!stop: in a game, resign the bots (ends it). !rehost: end any game, leave this room "
@@ -2103,6 +2179,7 @@ class LobbyClient:
             }, indent=2), encoding="utf-8")
         except (OSError, TypeError) as e:
             log("could not write ended.json in %s: %s" % (run_dir, e))
+        learn_widget_names(self.s, Path(run_dir))
         self.archive(Path(run_dir))
 
     def finish_rehost(self):
@@ -2521,11 +2598,88 @@ def perf_lines(lag: dict, load: dict, perf: "dict | None", now: bool = False) ->
 
 
 WIDGET = Path(__file__).resolve().parent / "rjm_host_metrics.lua"
+WIDGET_NAME = "rjm host metrics"    # its GetInfo name
+# BAR's widget config in the write dir (luaui/barwidgets.lua CONFIG_FILENAME:
+# LuaUI/Config/<Game.gameShortName>.lua). Its `order` maps each widget's name
+# to its load order; 0 = off (barwidgets.lua LoadWidget "Enabling"); a name
+# missing loads if the widget is on by default. Hidden widgets and the widget
+# selector load whatever it says. BAR rewrites it at the end of each game with
+# every widget it found, which is where the names are learnt.
+BAR_WIDGET_CONFIG = Path("LuaUI") / "Config" / "BYAR.lua"
+ORDER_BLOCK = re.compile(r"\n\torder = \{\n(.*?)\n\t\},?\n", re.S)
+# table.save writes a name that is a Lua identifier bare (AdvPlayersList = 43),
+# any other quoted (["Widget Selector"] = 24).
+ORDER_ENTRY = re.compile(r'^\t\t(?:\[("(?:[^"\\\n]|\\.)*")\]|([A-Za-z_][A-Za-z0-9_]*)) = -?\d+,?$', re.M)
+
+
+def widget_names_in(text: str) -> "list[str]":
+    """The widget names of a BYAR.lua, each as a Lua string literal."""
+    m = ORDER_BLOCK.search(text)
+    return [quoted or '"%s"' % bare for quoted, bare in ORDER_ENTRY.findall(m.group(1))] if m else []
+
+
+def known_widget_names(s: Settings) -> "list[str]":
+    """BAR's widget names: learnt from the last games, else the newest
+    archived game's config."""
+    try:
+        names = json.loads(s.widget_names_file.read_text(encoding="utf-8"))
+        if isinstance(names, list) and names:
+            return [n for n in names if isinstance(n, str) and ORDER_ENTRY.fullmatch("\t\t[%s] = 0," % n)]
+    except (OSError, ValueError):
+        pass
+    if s.archive_dir is None:
+        return []
+    import gzip
+    try:
+        found = sorted(s.archive_dir.glob("*/*/*/*/files/LuaUI/Config/BYAR.lua.gz"))
+    except OSError:
+        return []
+    for f in reversed(found[-5:]):
+        try:
+            names = widget_names_in(gzip.decompress(f.read_bytes()).decode("utf-8", "replace"))
+        except (OSError, EOFError, ValueError):
+            continue
+        if names:
+            return names
+    return []
+
+
+def learn_widget_names(s: Settings, run_dir: Path) -> None:
+    """After a game: add the names BAR saved in its config to the known ones."""
+    try:
+        names = widget_names_in((run_dir / BAR_WIDGET_CONFIG).read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return
+    if not names:
+        return
+    known = known_widget_names(s)
+    merged = sorted(set(known) | set(names))
+    if merged == sorted(known):
+        return
+    try:
+        s.widget_names_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = s.widget_names_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(merged, indent=0), encoding="utf-8")
+        tmp.replace(s.widget_names_file)
+    except OSError as e:
+        log("could not save %s: %s" % (s.widget_names_file, e))
+
+
+def bar_widgets_off_config(names: "list[str]") -> str:
+    """A BYAR.lua that turns every named widget off but the metrics widget."""
+    me = '"%s"' % WIDGET_NAME
+    lines = ["-- written by the lobby client (BARHOST_BAR_WIDGETS=0 / !widgets off):",
+             "-- every BAR widget off (order 0) but the host's metrics widget",
+             "return {", "\tallowUserWidgets = true,", "\torder = {"]
+    lines += ["\t\t[%s] = 0," % n for n in sorted(set(names) - {me})]
+    lines += ["\t\t[%s] = 1," % me, "\t},", "}", ""]
+    return "\n".join(lines)
 
 
 def prepare_write_dir(s: Settings, d: Path) -> None:
-    """Before the engine starts in a fresh write dir: the metrics widget, and
-    the engine's cache shared between games (it rebuilds it otherwise)."""
+    """Before the engine starts in a fresh write dir: the metrics widget, BAR's
+    own widgets off if asked, and the engine's cache shared between games (it
+    rebuilds it otherwise)."""
     if s.metrics_every > 0 and WIDGET.is_file():
         widgets = d / "LuaUI" / "Widgets"
         widgets.mkdir(parents=True, exist_ok=True)
@@ -2534,6 +2688,14 @@ def prepare_write_dir(s: Settings, d: Path) -> None:
         text = re.sub(r"(?m)^local RJM_PROFILER = (true|false)",
                       "local RJM_PROFILER = %s" % ("true" if s.engine_profiler else "false"), text, count=1)
         (widgets / WIDGET.name).write_text(text, encoding="utf-8")
+    if not s.bar_widgets:
+        names = known_widget_names(s)
+        if names:
+            (d / BAR_WIDGET_CONFIG).parent.mkdir(parents=True, exist_ok=True)
+            (d / BAR_WIDGET_CONFIG).write_text(bar_widgets_off_config(names), encoding="utf-8")
+            log("engine: %d of BAR's widgets off" % len(names))
+        else:
+            log("engine: BAR's widget names are not known yet; they load this game")
     shared = s.work_dir / ".engine-cache"
     try:
         shared.mkdir(parents=True, exist_ok=True)
