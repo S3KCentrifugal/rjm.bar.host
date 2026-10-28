@@ -2676,5 +2676,78 @@ class RoomByName(FollowHarness):
         self.assertTrue([x for x in sent if "Friend is online, but" in x], sent)
 
 
+class Experiment(Harness):
+    """BARHOST_EXPERIMENT: the bots alternate between AI channels game by game,
+    balanced by games played, and each game records the variant it ran."""
+
+    EXPERIMENT = "release-ab:prod=smrt-prod,test=smrt-test"
+    CHANNELS, RELEASES = SwitchAI.CHANNELS, SwitchAI.RELEASES
+    # SwitchAI's helpers, without inheriting its tests.
+    make, activate, fetched, pm = SwitchAI.make, SwitchAI.activate, SwitchAI.fetched, SwitchAI.pm
+    replies, echo_bots, set_up = SwitchAI.replies, SwitchAI.echo_bots, SwitchAI.set_up
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.make(BARHOST_EXPERIMENT=self.EXPERIMENT)
+
+    def play(self):
+        """One game: started, the snapshot taken, ended; the post-game check done."""
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.run_for(2)
+        snap = self.c.lobby_snapshot()
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        self.run_for(2)
+        self.fetched()
+        self.run_for(30)
+        return snap
+
+    def test_starts_on_the_first_variant(self):
+        self.assertEqual(self.c.ai_channel, "smrt-prod")
+        self.assertEqual(self.c.bot_ai, "SMRTBARb")
+
+    def test_games_alternate_and_record_the_variant_they_ran(self):
+        self.set_up()
+        self.assertEqual(self.c.ai_active, ("smrt-prod", "v2-prod"))
+        seen = []
+        for _ in range(4):
+            snap = self.play()
+            seen.append(snap["experiments"]["release-ab"])
+        self.assertEqual(seen, ["prod", "test", "prod", "test"])
+        self.assertEqual(self.c.experiment_counts, {"prod": 2, "test": 2})
+
+    def test_counts_are_kept_across_a_restart(self):
+        self.set_up()
+        self.play()
+        self.c = self.make(BARHOST_EXPERIMENT=self.EXPERIMENT)
+        self.assertEqual(self.c.experiment_counts, {"prod": 1, "test": 0})
+        self.assertEqual(self.c.ai_channel, "smrt-test")
+
+    def test_a_manual_choice_is_recorded_as_what_ran(self):
+        self.set_up()
+        self.pm("!ai smrt-test")
+        self.run_for(5)
+        snap = self.play()
+        self.assertEqual(snap["experiments"], {"release-ab": "test"})
+
+    def test_a_channel_outside_the_experiment_records_nothing(self):
+        self.set_up()
+        self.pm("!ai barb")
+        self.run_for(30)
+        snap = self.play()
+        self.assertIsNone(snap["experiments"])
+
+    def test_bad_settings_stop_the_client(self):
+        for bad in ("release-ab", "Bad:prod=smrt-prod,test=smrt-test", "ab:prod=smrt-prod",
+                    "ab:prod=smrt-prod,prod=smrt-test", "ab:prod=smrt-prod,x=nope"):
+            with self.assertRaises(SystemExit, msg=bad):
+                lc.parse_experiment(bad, lc.install_ai.parse_channels(self.CHANNELS))
+
+    def test_off_without_the_setting(self):
+        c = self.make()
+        self.assertIsNone(c.s.experiment)
+        self.assertIsNone(c.running_variant())
+
+
 if __name__ == "__main__":
     unittest.main()

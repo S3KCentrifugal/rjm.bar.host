@@ -111,6 +111,16 @@ Settings (environment):
                           "barb=BARb;smrt-prod=SMRTBARb:github:o/r@latest"
                           (optional; without it, BARHOST_BOT_AI)
   BARHOST_AI_CHANNEL      the channel until one is picked (the first)
+  BARHOST_EXPERIMENT      an A/B experiment over AI channels (optional):
+                          "<key>:<variant>=<channel>,<variant>=<channel>", e.g.
+                          "release-ab:prod=smrt-prod,test=smrt-test". After each
+                          game the bots switch (between games, as with !ai) to
+                          the variant with the fewest games so far, so the
+                          variants stay balanced; each game's lobby.json records
+                          {"experiments": {key: variant}} for the variant whose
+                          channel the engine actually ran. An !ai by a user
+                          still sets the next game; the experiment resumes
+                          after it. Keys and variants are kebab-case.
   BARHOST_AI_RELEASES_DIR where channel releases are kept
                           ($BARHOST_DATA_DIR/ai-releases)
   BARHOST_AI_UPDATE_EVERY seconds between checks for a new release of a
@@ -346,6 +356,35 @@ def env(name: str, default: str = "") -> str:
     return os.environ.get(name, "").strip() or default
 
 
+EXPERIMENT_KEY = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+
+
+def parse_experiment(text: str, channels: dict) -> "tuple[str, list] | None":
+    """BARHOST_EXPERIMENT "<key>:<variant>=<channel>,..." -> (key, [(variant, channel)])."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    key, sep, rest = text.partition(":")
+    key = key.strip()
+    if not sep or not EXPERIMENT_KEY.match(key):
+        raise SystemExit("BARHOST_EXPERIMENT: %r: expected <key>:<variant>=<channel>,... "
+                         "with a kebab-case key" % text)
+    variants, seen = [], set()
+    for part in rest.split(","):
+        variant, eq, channel = part.partition("=")
+        variant, channel = variant.strip(), channel.strip().lower()
+        if not eq or not EXPERIMENT_KEY.match(variant) or variant in seen:
+            raise SystemExit("BARHOST_EXPERIMENT: bad or repeated variant %r" % part.strip())
+        if channel not in channels:
+            raise SystemExit("BARHOST_EXPERIMENT: channel %r of variant %s is not in BARHOST_AI_CHANNELS"
+                             % (channel, variant))
+        seen.add(variant)
+        variants.append((variant, channel))
+    if len(variants) < 2:
+        raise SystemExit("BARHOST_EXPERIMENT: at least two variants")
+    return key, variants
+
+
 class Settings:
     def __init__(self, e=None):
         g = (lambda k, d="": (e or {}).get(k, d)) if e is not None else env
@@ -407,6 +446,7 @@ class Settings:
         self.ai_channel = g("BARHOST_AI_CHANNEL").lower() or next(iter(self.ai_channels), "")
         if self.ai_channels and self.ai_channel not in self.ai_channels:
             raise SystemExit("BARHOST_AI_CHANNEL %r is not in BARHOST_AI_CHANNELS" % self.ai_channel)
+        self.experiment = parse_experiment(g("BARHOST_EXPERIMENT"), self.ai_channels)
         self.ai_releases_dir = Path(g("BARHOST_AI_RELEASES_DIR",
                                       os.path.join(g("BARHOST_DATA_DIR", "/bar/data"), "ai-releases")))
         # Room mode: a friend request to each player who joins the room, once
@@ -557,6 +597,15 @@ class LobbyClient:
         self.ai_pins = {k: v for k, v in state.get("ai_pins", {}).items()
                         if k in s.ai_channels and s.ai_channels[k][1]}
         self.pin_asked = {}         # channel -> who pinned it, until the download is done
+        # BARHOST_EXPERIMENT: games played per variant (kept), so the next game
+        # always goes to the variant with the fewest.
+        saved = state.get("experiment") or {}
+        self.experiment_counts = {}
+        if s.experiment:
+            known = saved.get("counts", {}) if saved.get("key") == s.experiment[0] else {}
+            self.experiment_counts = {v: int(known.get(v, 0)) for v, _ in s.experiment[1]}
+            self.ai_channel = dict(s.experiment[1])[self.next_variant()]
+            self.bot_ai = s.ai_channels[self.ai_channel][0]
         # The engine profiler: BARHOST_ENGINE_PROFILER until a user's
         # `!profiler on|off` (kept; `!profiler default` forgets it). Each game's
         # launch reads s.engine_profiler, so a change applies from the next game.
@@ -608,6 +657,10 @@ class LobbyClient:
         for key in ("engine_profiler", "bar_widgets"):
             if isinstance(st.get(key), bool):
                 out[key] = st[key]
+        exp = st.get("experiment")
+        if isinstance(exp, dict) and isinstance(exp.get("key"), str) and isinstance(exp.get("counts"), dict):
+            out["experiment"] = {"key": exp["key"],
+                                 "counts": {str(k): v for k, v in exp["counts"].items() if isinstance(v, int)}}
         return out
 
     def save_state(self):
@@ -619,6 +672,9 @@ class LobbyClient:
                                        "ai_pins": self.ai_pins,
                                        "engine_profiler": self.profiler_choice,
                                        "bar_widgets": self.widgets_choice,
+                                       "experiment": ({"key": self.s.experiment[0],
+                                                       "counts": self.experiment_counts}
+                                                      if self.s.experiment else None),
                                        "friended": sorted(self.friended)}))
             tmp.replace(self.s.state_file)
         except OSError as e:
@@ -1856,6 +1912,34 @@ class LobbyClient:
         return "AI now: %s. Choose with !ai <name> [version]: %s." % (
             self.ai_label(self.ai_channel), ", ".join(self.ai_label(c) for c in self.s.ai_channels))
 
+    def next_variant(self) -> str:
+        """BARHOST_EXPERIMENT: the variant with the fewest games (first on a tie)."""
+        variants = [v for v, _ in self.s.experiment[1]]
+        return min(variants, key=lambda v: (self.experiment_counts.get(v, 0), variants.index(v)))
+
+    def running_variant(self) -> "str | None":
+        """The variant whose channel the engine actually runs (None: none of them)."""
+        if not self.s.experiment:
+            return None
+        channel = self.ai_active[0] if self.ai_active else self.ai_channel
+        for variant, ch in self.s.experiment[1]:
+            if ch == channel:
+                return variant
+        return None
+
+    def experiment_after_game(self):
+        """Between games: point the bots at the next variant's channel."""
+        if not self.s.experiment:
+            return
+        variant = self.next_variant()
+        channel = dict(self.s.experiment[1])[variant]
+        log("experiment %s: next game %s (%s); games so far %s"
+            % (self.s.experiment[0], variant, channel, self.experiment_counts))
+        if channel != self.ai_channel:
+            self.ai_channel = channel
+            self.save_state()
+            self.ai_activate_due = True
+
     def choose_ai(self, user, channel, prefix="", version=""):
         """!ai <channel> [version]: kept across restarts; the engine and the
         bots follow between games. A version pins a release channel to that
@@ -2108,6 +2192,10 @@ class LobbyClient:
         self.state = "ingame"
         self.games += 1
         log("game %d starting on %s:%s" % (self.games, b.ip, b.port))
+        variant = self.running_variant()
+        if variant:
+            self.experiment_counts[variant] = self.experiment_counts.get(variant, 0) + 1
+            self.save_state()
         self.game_proc = self.launch(b, self.script_password)
         self.game_launched_at = self.now()
         self.engine_exit_logged = False
@@ -2152,6 +2240,8 @@ class LobbyClient:
                    "release": self.ai_active[1] if self.ai_active else None},
             "setup": {"room": self.s.setup, "bots": self.s.bot_setup, "votedBonus": self.voted_bonus,
                       "startBoxesMap": self.start_boxes_map, "wantBots": self.want_bots},
+            "experiments": ({self.s.experiment[0]: self.running_variant()}
+                            if self.running_variant() else None),
         }
 
     def record_game_start(self, run_dir: Path):
@@ -2185,6 +2275,7 @@ class LobbyClient:
         if self.current_game is not None:
             self.finished_games = (self.finished_games + [dict(self.current_game, perf=summary)])[-GAMES_KEPT:]
             self.current_game = None
+        self.experiment_after_game()
         if run_dir is None:
             return
         try:
