@@ -153,6 +153,10 @@ Settings (environment):
                           (game_archive.py: replay, metrics, logs, lobby data)
                           and leave the work dir; unset = they stay
   BARHOST_ARCHIVE_SOURCE  this client's name in the archive (the login)
+  BARHOST_CHAT_DIR        chat audit log: private/<day>.log (every private
+                          message, both ways), rooms/Y/M/D/<joined>_room<id>.log
+                          (each room session's chat), channels/<day>.log
+                          ($BARHOST_ARCHIVE_DIR/_chat/<source>; none without)
   BARHOST_METRICS_EVERY   seconds between metrics lines in a game: how far the
                           engine is behind the server (a widget,
                           rjm_host_metrics.lua) and its CPU, threads, memory,
@@ -202,6 +206,9 @@ ROOM_EVENTS = {"SAIDBATTLE", "SAIDBATTLEEX", "JOINEDBATTLE", "LEFTBATTLE", "CLIE
                "ADDSTARTRECT", "REMOVESTARTRECT", "CLIENTSTATUS", "BATTLECLOSED"}
 ROOM_EVENTS_BY_ID = {"JOINEDBATTLE", "LEFTBATTLE", "UPDATEBATTLEINFO", "ADDBOT", "REMOVEBOT", "UPDATEBOT",
                      "BATTLECLOSED", "CLIENTSTATUS"}
+# Lobby chat kept in the chat audit log (BARHOST_CHAT_DIR).
+CHAT_EVENTS = {"SAIDPRIVATE", "SAIDPRIVATEEX", "SAIDBATTLE", "SAIDBATTLEEX", "JOINEDBATTLE", "LEFTBATTLE",
+               "SAID", "SAIDEX"}
 FOUNDER_RE = re.compile(r"^Host\[([A-Za-z]+)(\d+)\]\[\d+\]$")
 # A region's autohost manager, which opens private rooms on `!privatehost`
 # (BYAR-Chobby battle_list_window.lua, HostBattle).
@@ -213,8 +220,18 @@ MAP_WAIT = 20               # seconds for the autohost to switch to a !map befor
 # (a !setallaibonus is one UPDATEBOT per AI).
 RENAME_SETTLE = 5
 # Room mode: with no human in the player team this long, the room goes back to
-# its default settings (anything voted in since is undone), once per idle spell.
+# its default settings (anything voted in since is undone), once per idle spell,
+# only if someone changed something (a command in the room's chat, a vote
+# passed) since it was set up or last reset, and at most once per
+# IDLE_RESET_EVERY (seconds since the last reset). Players joining and leaving
+# alone change nothing.
 IDLE_RESET_AFTER = 60
+IDLE_RESET_EVERY = 900
+# Commands that change none of what a reset restores.
+IDLE_RESET_IGNORE = {"ring", "status", "help", "list", "stats", "whois", "cv", "callvote", "vote", "y", "n",
+                     "ev", "endvote", "promote", "map", "nextmap", "boss", "joinas", "spec", "specafk",
+                     "balance", "rename", "say", "start", "stop", "resign", "notify", "aibonus"}
+VOTE_PASSED_RE = re.compile(r'Vote for command "([^"]*)" passed', re.IGNORECASE)
 IDLE_RESET_SAY = "Nobody is playing: back to this room's default settings."
 VOTE_RE = re.compile(r'called a vote for command "([^"]*)"')
 # A game about to start (a player's command, or the autohost's vote): if it
@@ -442,6 +459,12 @@ class Settings:
         # term storage shared by every app; game_archive.py), if one is set.
         self.archive_dir = Path(g("BARHOST_ARCHIVE_DIR")) if g("BARHOST_ARCHIVE_DIR") else None
         self.archive_source = g("BARHOST_ARCHIVE_SOURCE") or re.sub(r"[^A-Za-z0-9.-]+", "-", self.login).strip("-")
+        # Chat audit log: room chat per room session, private messages per
+        # day (both directions, every sender), lobby channels per day. With the
+        # archive by default (ROOT/_chat/<source>); none without either.
+        chat = g("BARHOST_CHAT_DIR")
+        self.chat_dir = Path(chat) if chat else (
+            self.archive_dir / "_chat" / self.archive_source if self.archive_dir is not None else None)
         # Seconds between lines of the game's metrics (engine-timeline.csv from
         # the engine, timeline.csv from this client); 0 = none.
         self.metrics_every = float(g("BARHOST_METRICS_EVERY", "5"))
@@ -530,6 +553,7 @@ class LobbyClient:
         # Called with a finished game's run dir (game_archive.py, off the loop).
         self.archive = archive or (lambda run_dir: None)
         self.game_events = None     # lobby-events.log of the game running
+        self.room_log = None        # (battle, path): this room session's chat log
         # !games / !perf: the game running (its run dir, start, map) and those
         # ended since the client started, until the archive's index has them.
         self.current_game = None
@@ -683,7 +707,8 @@ class LobbyClient:
         self.title_sent = None      # room mode: the title last set with !rename
         self.rename_after = 0.0     # room mode: no rename before this (RENAME_SETTLE)
         self.idle_since = None      # room mode: since when no human plays
-        self.defaults_due = False   # room mode: a human played since the room was set up or reset
+        self.defaults_due = None    # room mode: what a human changed since the room was set up or reset
+        self.defaults_at = None     # room mode: when restore_defaults last ran
         self.aibonus_vote = None    # room mode: the AI bonus vote running, if any
         self.aibonus_called = {}    # caller (lower case) -> when they last called one
         self.aibonus_remind = False  # remind how to vote the bonus once the next map is in
@@ -721,7 +746,63 @@ class LobbyClient:
     # -- sending -----------------------------------------------------------
 
     def send(self, *words):
-        self.outbox.append(" ".join(str(w) for w in words))
+        line = " ".join(str(w) for w in words)
+        self.outbox.append(line)
+        w = line.split(" ", 2)
+        if w[0] == "SAYPRIVATE" and len(w) == 3:
+            self.private_chat("->", w[1], "", w[2])
+        elif w[0] == "SAYBATTLE" and len(w) >= 2:
+            self.room_chat("%s: %s" % (self.s.login, line.split(" ", 1)[1]))
+        elif w[0] == "SAYBATTLEPRIVATEEX" and len(w) == 3:
+            self.room_chat("%s -> %s (only they see it): %s" % (self.s.login, w[1], w[2]))
+
+    # -- chat audit log ----------------------------------------------------
+
+    def chat_line(self, path, text):
+        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write("%s %s\n" % (stamp, re.sub(r"[\r\n]+", " ", text)))
+        except OSError as e:
+            _log("could not write the chat log %s: %s" % (path, e))
+
+    def chat_day(self, folder):
+        return self.s.chat_dir / folder / ("%s.log" % dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d"))
+
+    def pm_sender(self, user):
+        """Who a private message is from, as on_SAIDPRIVATE treats it: only
+        authorised users get answers; nobody else ever gets a reply."""
+        if user in self.s.follow:
+            return "authorised"
+        if self.battle and user == self.battle.founder:
+            return "autohost"
+        req = self.private_request
+        if req and user == req["manager"]:
+            return "autohost manager"
+        return "not authorised, ignored"
+
+    def private_chat(self, way, user, tag, text):
+        if self.s.chat_dir is not None:
+            self.chat_line(self.chat_day("private"), "%s %s%s: %s" % (way, user, " [%s]" % tag if tag else "", text))
+
+    def room_chat(self, text):
+        """A line in this room session's chat log (one file per room joined)."""
+        if self.s.chat_dir is None or self.battle is None:
+            return
+        if self.room_log is None or self.room_log[0] is not self.battle:
+            b = self.battle
+            now = dt.datetime.now(dt.timezone.utc)
+            path = self.s.chat_dir / "rooms" / now.strftime("%Y/%m/%d") / ("%s_room%s.log" % (
+                now.strftime("%Y%m%d-%H%M%SZ"), re.sub(r"[^A-Za-z0-9]+", "-", b.id)))
+            self.room_log = (b, path)
+            self.chat_line(path, "* room %s (%s) on %s, %s" % (b.id, b.title, b.founder, b.map))
+        self.chat_line(self.room_log[1], text)
+
+    def end_room_chat(self, why):
+        if self.room_log is not None and self.room_log[0] is self.battle:
+            self.room_chat("* left the room: %s" % why)
+        self.room_log = None
 
     def say(self, text):
         """Battle chat and commands go through the flood spacing."""
@@ -752,12 +833,30 @@ class LobbyClient:
                         dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), line))
                 except (OSError, ValueError):
                     self.game_events = None
+        if cmd in CHAT_EVENTS:
+            self.log_chat(cmd, line)
         if cmd == "s.user.add_friend":
             self.on_friend_reply(line)
             return
         handler = getattr(self, "on_" + cmd, None)
         if handler:
             handler(line)
+
+    def log_chat(self, cmd, line):
+        w = line.split(" ", 2)
+        if cmd in ("SAIDPRIVATE", "SAIDPRIVATEEX") and len(w) == 3:
+            self.private_chat("<-", w[1], self.pm_sender(w[1]), ("/me " if cmd.endswith("EX") else "") + w[2])
+        elif cmd in ("SAIDBATTLE", "SAIDBATTLEEX") and len(w) == 3 and w[1] != self.s.login:
+            self.room_chat("%s: %s%s" % (w[1], "/me " if cmd.endswith("EX") else "", w[2]))
+        elif cmd in ("JOINEDBATTLE", "LEFTBATTLE") and len(w) >= 3 and self.battle and w[1] == self.battle.id:
+            who = w[2].split(" ")[0]
+            if who != self.s.login:
+                self.room_chat("* %s %s" % (who, "joined" if cmd == "JOINEDBATTLE" else "left"))
+        elif cmd in ("SAID", "SAIDEX") and self.s.chat_dir is not None:
+            p = line.split(" ", 3)
+            if len(p) == 4:
+                self.chat_line(self.chat_day("channels"), "#%s %s: %s%s" % (
+                    p[1], p[2], "/me " if cmd == "SAIDEX" else "", p[3]))
 
     def on_SETSCRIPTTAGS(self, line):
         # SETSCRIPTTAGS key=value[\tkey=value...] for the room joined: mod options
@@ -952,6 +1051,8 @@ class LobbyClient:
         self.joined_at = self.now()
         b = self.battle
         log("joined room %s (%s) on %s, %s, engine %s" % (b.id, b.title, b.founder, b.map, b.engine_version))
+        self.room_log = None
+        self.room_chat("* joined")
         # The game and map download in the background; unsynced until then.
         self.need_fetch = b
         if self.s.mode == "follow":
@@ -1077,6 +1178,7 @@ class LobbyClient:
         if len(p) < 3 or not self.battle:
             return
         user, msg = p[1], p[2]
+        self.note_change(user, msg)
         if user == self.battle.founder and re.search(r"Boss mode enabled for %s\b" % re.escape(self.s.login), msg):
             if not self.boss:
                 self.boss = True
@@ -1158,14 +1260,29 @@ class LobbyClient:
             text = "%d" % now if now is not None else ""
         return " ".join(name.replace("{bonus}", text).split())
 
+    def note_change(self, user, msg):
+        """Room mode: remember a command or passed vote that may have changed
+        what restore_defaults puts back."""
+        if user == self.battle.founder:
+            v = VOTE_PASSED_RE.search(msg)
+            what = v.group(1) if v else None
+        elif user != self.s.login and msg.startswith("!"):
+            what = msg[1:]
+        else:
+            return
+        word = what.split(" ", 1)[0].lower() if what else ""
+        if word and word not in IDLE_RESET_IGNORE:
+            self.defaults_due = "%s by %s" % (what[:80], user)
+
     def restore_defaults(self):
         """Room mode, as boss, nobody playing: undo whatever was voted in
         (settings, the AI bonus, start boxes, the bot count) by applying the
         room's setup again. The map and the owners' choices (AI, privacy)
         stay."""
-        self.defaults_due = False
+        log("nobody plays: back to the room's default settings (changed: %s)" % self.defaults_due)
+        self.defaults_due = None
+        self.defaults_at = self.now()
         self.idle_since = None
-        log("nobody plays: back to the room's default settings")
         self.say(IDLE_RESET_SAY)
         self.voted_bonus = self.room_bonus = None
         self.aibonus_vote = None
@@ -1250,6 +1367,7 @@ class LobbyClient:
         if yes * 2 > n or (self.now() >= v["until"] and yes > no):
             self.aibonus_vote = None
             self.voted_bonus = self.room_bonus = v["value"]
+            self.defaults_due = "AI bonus vote %d" % v["value"]
             log("the AI bonus vote passed (%d yes, %d no): every AI to %d" % (yes, no, v["value"]))
             self.say("The AI bonus vote passed (%d yes, %d no): every AI to %d%%." % (yes, no, v["value"]))
             self.say("!setallaibonus %d" % v["value"])
@@ -1370,7 +1488,7 @@ class LobbyClient:
             self.say("!rename " + self.title_sent)
         for c in self.s.setup:
             self.say(c)
-        self.defaults_due = False   # set up just now: nothing to undo yet
+        self.defaults_due = None    # set up just now: nothing to undo yet
         self.idle_since = None
         self.boss_authorised(b.users)
         self.sync_bots()
@@ -1819,7 +1937,7 @@ class LobbyClient:
                 (" (ally %s)" % ",".join(str(a) for a in m["winningAllyTeams"])) if m.get("winningAllyTeams") else "",
                 len(m.get("humans") or []), m.get("bots") or 0,
                 (", %s %s" % (ai.get("name"), ai.get("release") or "")).rstrip() if ai.get("name") else "")
-            tail = ["Files: %s" % g["folder"]]
+            tail = profile_lines(m.get("profile") or {}) + ["Files: %s" % g["folder"]]
         else:
             run = g["run"]
             lag = game_archive.summarise_timeline(game_archive.engine_timeline(run), game_archive.LAG_COLUMNS) if run else {}
@@ -2012,6 +2130,7 @@ class LobbyClient:
     def lost_battle(self, why):
         if self.battle:
             log("lost room %s: %s" % (self.battle.id, why))
+        self.end_room_chat(why)
         self.battle = None
         self.boss = False
         self.statuses = {}
@@ -2026,7 +2145,8 @@ class LobbyClient:
         self.room_bonus = None      # so does the bonus its AIs were seen with
         self.title_sent = None
         self.idle_since = None
-        self.defaults_due = False
+        self.defaults_due = None
+        self.defaults_at = None
         self.aibonus_vote = None
         self.aibonus_remind = False
         self.bots_due = None
@@ -2108,6 +2228,7 @@ class LobbyClient:
         self.state = "ingame"
         self.games += 1
         log("game %d starting on %s:%s" % (self.games, b.ip, b.port))
+        self.room_chat("* game starting on %s" % b.map)
         self.game_proc = self.launch(b, self.script_password)
         self.game_launched_at = self.now()
         self.engine_exit_logged = False
@@ -2173,6 +2294,7 @@ class LobbyClient:
         """ended.json, close this game's files, and hand the run dir over to
         the archive (once per game)."""
         run_dir = getattr(self.game_proc, "write_dir", None)
+        self.room_chat("* game over (my engine exited)")
         if self.metrics is not None:
             self.metrics.stop()
         for f in (GAME_LOG["file"], self.game_events):
@@ -2423,11 +2545,11 @@ class LobbyClient:
             # An idle spell (no human in the player team): back to the defaults.
             if self.humans():
                 self.idle_since = None
-                self.defaults_due = True
             elif self.defaults_due:
                 if self.idle_since is None:
                     self.idle_since = now
-                elif now - self.idle_since >= IDLE_RESET_AFTER:
+                elif now - self.idle_since >= IDLE_RESET_AFTER and (
+                        self.defaults_at is None or now - self.defaults_at >= IDLE_RESET_EVERY):
                     self.restore_defaults()
         if self.aibonus_vote is not None:
             self.aibonus_count()        # the deadline, or a game started
@@ -2592,6 +2714,23 @@ def _stat(d: dict, fmt: str, now: bool, low: bool = False) -> str:
     parts = (["now " + fmt % d["now"]] if now else []) + (
         ["min " + fmt % d["min"]] if low else ["max " + fmt % d["max"], "p95 " + fmt % d["p95"]])
     return ", ".join(parts + ["avg " + fmt % d["avg"]])
+
+
+def profile_lines(p: dict) -> "list[str]":
+    """!perf: the engine's game-end profiler totals (game_archive.engine_profile)."""
+    if not p.get("simS"):
+        return []
+    line = "Engine time over the game: sim %.0f s" % p["simS"]
+    if p.get("aiS") is not None:
+        line += ", of it the AIs %.0f s (%.0f%%)" % (p["aiS"], p.get("aiPctOfSim") or 0)
+    for key, what in (("drawS", "draw"), ("luaCallinsS", "Lua call-ins"), ("profilerS", "the profiler itself")):
+        if p.get(key) is not None:
+            line += ", %s %.0f s" % (what, p[key])
+    out = [line + "."]
+    teams = p.get("aiByTeamS") or {}
+    if teams:
+        out.append("AI time by team: " + ", ".join("%s %.0f s" % kv for kv in teams.items()) + ".")
+    return out
 
 
 def perf_lines(lag: dict, load: dict, perf: "dict | None", now: bool = False) -> "list[str]":

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -875,6 +876,93 @@ class ProfilerAndSay(Harness):
         self.assertIn("PM me !say <text>", self.pm("!say")[0])
 
 
+
+class ChatAudit(Harness):
+    """The chat audit log (BARHOST_CHAT_DIR): every private message, both
+    ways, per day; room chat per room session; and no reply of any kind to a
+    private message from anyone but an authorised user."""
+
+    PROBES = ["!help", "!status", "!bots 3", "!bots 16 barb", "!say hi", "!stop", "!rehost", "!public",
+              "!private", "!ai barb", "!ai smrt-test v1.0", "!perf", "!perf 1", "!games", "!join", "!join pw",
+              "!room 12", "!leave", "!profiler off", "!widgets on", "!follow", "hello", "!", "!HELP",
+              "!status " + OWNER, "!say " + OWNER + " !boss Mallory"]
+
+    def setUp(self):
+        super().setUp()
+        self.chat = Path(self.tmp.name) / "chat"
+        self.c = self.client(BARHOST_FOLLOW=OWNER, BARHOST_CHAT_DIR=str(self.chat))
+
+    def text(self, folder):
+        return "".join(f.read_text(encoding="utf-8") for f in sorted((self.chat / folder).rglob("*.log")))
+
+    def assert_silent_to(self, user, sent):
+        self.assertFalse([x for x in sent if user in x], sent)
+
+    def test_no_reply_to_anyone_else_in_or_out_of_a_room(self):
+        self.log_in()
+        self.take()
+        for user in ("Mallory", "[smrt]centrifugal", "[SMRT]Centrifuga", OWNER + "_"):
+            for text in self.PROBES:
+                self.feed("SAIDPRIVATE %s %s" % (user, text), "SAIDPRIVATEEX %s %s" % (user, text))
+            self.assert_silent_to(user, self.run_for(10))
+        self.c = self.client(BARHOST_FOLLOW=OWNER, BARHOST_CHAT_DIR=str(self.chat),   # again, as boss of a room
+                             BARHOST_ENGINE_PROFILER="1")
+        self.boss_and_setup()
+        self.take()
+        for text in self.PROBES:
+            self.feed("SAIDPRIVATE Mallory %s" % text)
+        sent = self.run_for(20)
+        self.assert_silent_to("Mallory", sent)
+        self.assertNotIn("SAYBATTLE hi", sent)
+        self.assertIsNotNone(self.c.battle)
+        self.assertEqual(self.c.privacy, "public")
+        self.assertEqual((self.c.s.engine_profiler, self.c.s.bar_widgets), (True, False))
+
+    def test_private_messages_both_ways_by_day(self):
+        self.log_in()
+        self.feed("SAIDPRIVATE Mallory !say gg", "SAIDPRIVATEEX Mallory waves", "SAIDPRIVATE %s !status" % OWNER)
+        self.run_for(5)
+        files = list((self.chat / "private").iterdir())
+        self.assertEqual(len(files), 1)
+        self.assertRegex(files[0].name, r"^\d{4}-\d\d-\d\d\.log$")
+        log = self.text("private")
+        self.assertRegex(log, r"(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ <- Mallory \[not authorised, ignored\]: !say gg$")
+        self.assertIn("<- Mallory [not authorised, ignored]: /me waves\n", log)
+        self.assertIn("<- %s [authorised]: !status\n" % OWNER, log)
+        self.assertRegex(log, r"-> %s: \S" % re.escape(OWNER))
+        self.assertNotIn("-> Mallory", log)
+
+    def test_room_chat_per_room_session(self):
+        self.boss_and_setup()
+        self.feed("JOINEDBATTLE 12 Alice", "SAIDBATTLE Alice hi Clyde", "SAIDBATTLEEX Alice dances",
+                  "SAIDBATTLE Bob !cv start", "LEFTBATTLE 12 Alice")
+        self.feed("SAIDPRIVATE %s !say  hello room " % OWNER)
+        self.run_for(5)
+        self.feed("LEFTBATTLE 12 " + ME)
+        files = sorted((self.chat / "rooms").rglob("*.log"))
+        self.assertEqual(len(files), 1)
+        self.assertRegex(files[0].name, r"^\d{8}-\d{6}Z_room12\.log$")
+        log = files[0].read_text(encoding="utf-8")
+        for line in ("* room 12 (Empty room) on %s" % HOST, "* joined", "* Alice joined", "Alice: hi Clyde",
+                     "Alice: /me dances", "Bob: !cv start", "* Alice left", "%s: hello room" % ME,
+                     "%s: !bSet" % ME, "* left the room: left the room"):
+            self.assertIn(line, log)
+        self.assertEqual(log.count("%s: hello room" % ME), 1)
+        self.assertNotIn("Said in room", log)       # PM replies go to the private log only
+        self.assertIn("-> %s: Said in room 12." % OWNER, self.text("private"))
+
+    def test_nothing_without_a_chat_or_archive_dir(self):
+        self.c = self.client(BARHOST_FOLLOW=OWNER)
+        self.assertIsNone(self.c.s.chat_dir)
+        self.boss_and_setup()
+        self.feed("SAIDPRIVATE Mallory hi", "SAIDBATTLE Alice hi")
+        self.assertFalse(self.chat.exists())
+
+    def test_with_the_archive_by_default(self):
+        s = self.client(BARHOST_ARCHIVE_DIR="/a", BARHOST_ARCHIVE_SOURCE="bar-lobbies.clyde").s
+        self.assertEqual(s.chat_dir, Path("/a") / "_chat" / "bar-lobbies.clyde")
+
+
 ROTATION = "All That Simmers;Cells;Forge"
 
 
@@ -1674,7 +1762,39 @@ class AiBonusVote(Harness):
         self.feed("CLIENTBATTLESTATUS A %d 0" % lc.battle_status(mode=1, sync=1))   # A plays again
         self.run_for(10)
         self.feed("CLIENTBATTLESTATUS A %d 0" % lc.battle_status(mode=0, sync=1))
+        self.assertNotIn("SAYBATTLE " + lc.IDLE_RESET_SAY, self.run_for(lc.IDLE_RESET_EVERY))  # changed nothing
+        self.feed("CLIENTBATTLESTATUS A %d 0" % lc.battle_status(mode=1, sync=1))
+        self.say("A", "!bSet experimentallegionfaction 0")
+        self.feed("CLIENTBATTLESTATUS A %d 0" % lc.battle_status(mode=0, sync=1))
         self.assertIn("SAYBATTLE " + lc.IDLE_RESET_SAY, self.run_for(lc.IDLE_RESET_AFTER + 10))
+
+    def test_joining_and_leaving_alone_never_resets(self):
+        self.boss_and_setup()
+        for _ in range(5):
+            self.players("A")
+            self.say("A", "hi")
+            self.say("A", "!ring")
+            self.say(HOST, '* Vote for command "start" passed.')
+            self.run_for(20)
+            self.feed("LEFTBATTLE 12 A")
+            self.assertNotIn("SAYBATTLE " + lc.IDLE_RESET_SAY, self.run_for(lc.IDLE_RESET_AFTER + 60))
+
+    def test_resets_at_most_once_per_cooldown(self):
+        self.boss_and_setup()
+
+        def change_and_leave():
+            self.players("A")
+            self.say(HOST, '* Vote for command "bSet startmetal 2000" passed.')
+            self.feed("LEFTBATTLE 12 A")
+
+        change_and_leave()
+        self.assertIn("SAYBATTLE " + lc.IDLE_RESET_SAY, self.run_for(lc.IDLE_RESET_AFTER + 10))
+        sent = []
+        for _ in range(4):                  # a change, then everyone leaves, every 3 minutes
+            change_and_leave()
+            sent += self.run_for(180)
+        self.assertNotIn("SAYBATTLE " + lc.IDLE_RESET_SAY, sent)       # within 15 minutes of the last
+        self.assertEqual(self.run_for(200).count("SAYBATTLE " + lc.IDLE_RESET_SAY), 1)
 
     def test_reminded_after_each_game(self):
         self.boss_and_setup()
@@ -2337,6 +2457,14 @@ class GamesAndPerf(Harness):
         self.assertEqual(self.pm("!perf 9"), ["No game 9. PM me !games for the list."])
         self.assertEqual(self.pm("!perf last"),
                          ["PM me !perf for the game now (or the last one), or !perf <number> from !games."])
+
+    def test_profile_lines(self):
+        p = {"simS": 250.6, "aiS": 133.3, "aiPctOfSim": 53.2, "drawS": 282.2, "luaCallinsS": 114.0,
+             "profilerS": 175.1, "aiByTeamS": {"2": 27.4, "3": 30.8}}
+        self.assertEqual(lc.profile_lines(p), [
+            "Engine time over the game: sim 251 s, of it the AIs 133 s (53%), draw 282 s, Lua call-ins 114 s, "
+            "the profiler itself 175 s.", "AI time by team: 2 27 s, 3 31 s."])
+        self.assertEqual(lc.profile_lines({}), [])
 
     def test_no_lag_data_is_said(self):
         self.assertEqual(lc.perf_lines({}, {}, None), ["No lag data for this game (the engine's metrics widget "

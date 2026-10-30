@@ -159,6 +159,10 @@ The table leaves out two cases:
      winners, lag and load summaries, files with sha256), plus a line per
      game in `_index/<source>.jsonl`. The layout is the same for every
      source, so one archive can gather games from many clients and pods.
+     Lobby chat is kept for audit next to it (`BARHOST_CHAT_DIR`, default
+     `_chat/<source>/`): every private message both ways, by day, tagged
+     with how the client treated the sender (only authorised users ever get
+     a reply), and each room session's chat in its own file.
      When a player mentions "bonus", says how to vote the AIs' bonus (all
      with `!cv setallaibonus <n>`, one with `!cv force %<AI> bonus <n>`); a
      passed bonus vote is applied to every AI and kept for later bot adds.

@@ -20,7 +20,9 @@ games from every app and pod sit side by side:
 
   ROOT/
     YYYY/MM/DD/<YYYYMMDD-HHMMSS>Z_<source>_<map>_<id>/   one game (UTC start)
-      manifest.json      what, where, when, outcome, summaries, file list with
+      manifest.json      what, where, when, outcome, summaries, the engine's
+                         game-end profiler totals (profile: sim, AI and each
+                         AI's team, draw, Lua; engine_profile), file list with
                          sha256 (written last: a folder without one is partial)
       lobby.json         the room as the lobby client saw it at the start: the
                          battle, its script tags (mod options, skill), players,
@@ -42,6 +44,8 @@ games from every app and pod sit side by side:
       files/             anything else the engine or AIs wrote (AI logs, ...),
                          text gzipped, paths kept
     _index/<source>.jsonl  one line per archived game (one writer per source)
+    _chat/<source>/        the lobby client's chat audit log (not written
+                           here: lobby_client.py BARHOST_CHAT_DIR)
 
 A folder is published with one rename from ROOT/_incoming/, so readers never
 see half a game. <id> is the replay's game id (first 8 hex digits), or the
@@ -188,6 +192,62 @@ def engine_timeline(run: Path) -> Path:
     return new if new.is_file() or not (run / ENGINE_TIMELINE_OLD).is_file() else run / ENGINE_TIMELINE_OLD
 
 
+# The engine's profiler table, printed at game end by a headless engine
+# (RecoilEngine rts/Game/Game.cpp GameEnd -> CTimeProfiler::PrintProfilingInfo,
+# rts/System/TimeProfiler.cpp): a "Part|Total Time|..." header, then one
+# "<timer> <total>ms <pct>%" line per timer in its last sorted list (it can
+# miss timers). The % is of the last 0.5 s only, so it is not kept. "AI" needs
+# the profiler on (/debug; BARHOST_ENGINE_PROFILER); "Sim" and "Draw" are kept
+# without it.
+PROFILE_HEAD = re.compile(rb"\] +Part\|\s*Total Time\|")
+PROFILE_ROW = re.compile(r"^\[t=[^\]]*\]\[f=[^\]]*\] *(\S.*?) +(\d+(?:\.\d+)?)ms +[\d.]+%$")
+AI_TEAM = re.compile(r"^AI::\{.*\bteam=(\d+)\b")
+PROFILE_TAIL_BYTES = 4 << 20
+
+
+def engine_profile(infolog: Path) -> dict:
+    """The engine's game-end profiler table from an infolog: every timer's
+    total (s), and the main ones: sim, the AIs (all, and per team), draw,
+    Lua call-ins, the profiler's own cost. {} without a table."""
+    try:
+        with infolog.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - PROFILE_TAIL_BYTES))
+            tail = f.read()
+    except OSError:
+        return {}
+    heads = list(PROFILE_HEAD.finditer(tail))
+    if not heads:
+        return {}
+    timers = {}
+    for line in tail[heads[-1].end():].decode("utf-8", "replace").splitlines()[1:]:
+        m = PROFILE_ROW.match(line)
+        if not m:
+            break
+        timers[m.group(1)] = round(float(m.group(2)) / 1000, 3)
+    if not timers:
+        return {}
+    out = {"timers": timers}
+    for key, name in (("simS", "Sim"), ("aiS", "AI"), ("drawS", "Draw"), ("updateS", "Update"),
+                      ("profilerS", "Misc::Profiler::AddTime")):
+        if name in timers:
+            out[key] = timers[name]
+    lua = [v for k, v in timers.items() if k.startswith("Lua::Callins::")]
+    if lua:
+        out["luaCallinsS"] = round(sum(lua), 3)
+    teams = {}
+    for k, v in timers.items():
+        m = AI_TEAM.match(k)
+        if m:
+            teams[m.group(1)] = round(teams.get(m.group(1), 0) + v, 3)
+    if teams:
+        out["aiByTeamS"] = dict(sorted(teams.items(), key=lambda kv: int(kv[0])))
+    if out.get("simS") and out.get("aiS") is not None:
+        out["aiPctOfSim"] = round(out["aiS"] * 100 / out["simS"], 1)
+    return out
+
+
 def index_path(root: Path, source: str) -> Path:
     return root / "_index" / ("%s.jsonl" % slug(source, 64))
 
@@ -288,6 +348,7 @@ def archive_run(run: Path, root: Path, source: str, keep: bool = False) -> "Path
         "lag": summarise_timeline(engine_timeline(run), LAG_COLUMNS),
         "load": summarise_timeline(run / "timeline.csv", LOAD_COLUMNS),
         "perf": ended.get("perf"),
+        "profile": engine_profile(run / "infolog.txt"),
         "teams": demo.get("teams", []),
         "replay": ("replay/" + replays[-1].name) if replays else None,
         "replayError": demo.get("error"),
@@ -306,6 +367,7 @@ def archive_run(run: Path, root: Path, source: str, keep: bool = False) -> "Path
                  "lagMaxS": (manifest["lag"].get("behind_s") or {}).get("max"),
                  "lagP95S": (manifest["lag"].get("behind_s") or {}).get("p95"),
                  "coresP95": perf.get("cores_p95"), "memPeakGiB": perf.get("mem_peak_gib"),
+                 "simS": manifest["profile"].get("simS"), "aiPctOfSim": manifest["profile"].get("aiPctOfSim"),
                  "bytes": sum(f["bytes"] for f in files)})
     with index.open("a", encoding="utf-8") as f:
         f.write(json.dumps(line) + "\n")

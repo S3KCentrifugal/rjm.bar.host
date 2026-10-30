@@ -143,6 +143,41 @@ class Archive(unittest.TestCase):
         line = json.loads(lines[0])
         self.assertEqual((line["outcome"], line["players"], line["lagMaxS"]), ("winner", 2, 11.4))
 
+    # The engine's game-end table (TimeProfiler.cpp PrintProfilingInfo), as in a
+    # Clyde infolog of 2026-10-27, with lines after it.
+    PROFILE = (
+        "[t=00:33:06.914966][f=0056718] <Player> Allies: gg\n"
+        "[t=00:33:08.348307][f=0056759]                                Part|        Total Time|Time of the last 0.5s\n"
+        "[t=00:33:08.348331][f=0056759]                                 ???             0.00ms  0.00%\n"
+        "[t=00:33:08.348343][f=0056759]                                  AI        133270.55ms  0.00%\n"
+        "[t=00:33:08.348353][f=0056759] AI::{id=10 team=2 name=SMRTBARb version=stable}         27425.76ms  0.00%\n"
+        "[t=00:33:08.348361][f=0056759] AI::{id=11 team=3 name=SMRTBARb version=stable}         30754.98ms  0.00%\n"
+        "[t=00:33:08.348520][f=0056759]                                Draw        282197.62ms 19.10%\n"
+        "[t=00:33:08.348600][f=0056759]                Lua::Callins::Synced         37687.96ms  1.60%\n"
+        "[t=00:33:08.348610][f=0056759]              Lua::Callins::Unsynced         76342.91ms  3.40%\n"
+        "[t=00:33:08.348700][f=0056759]             Misc::Profiler::AddTime        175103.75ms  8.40%\n"
+        "[t=00:33:08.348800][f=0056759]                                 Sim        250632.62ms 12.40%\n"
+        "[t=00:33:08.348850][f=0056759]                       Sim::Features          1353.77ms  0.00%\n"
+        "[t=00:33:08.349000][f=0056759] [EOH::DestroySkirmishAI(id=0)]\n"
+        "[t=00:33:08.349100][f=0056759] Skirmish AI <SMRTBARb-stable>: x 1.00ms 2.00%\n")
+
+    def test_the_engines_game_end_profile_is_in_the_manifest_and_index(self):
+        with (self.run / "infolog.txt").open("a") as f:
+            f.write(self.PROFILE)
+        m = json.loads((self.archive() / "manifest.json").read_text())
+        p = m["profile"]
+        self.assertEqual(len(p["timers"]), 10)                      # stops at the first other line
+        self.assertEqual((p["simS"], p["aiS"], p["drawS"], p["profilerS"]), (250.633, 133.271, 282.198, 175.104))
+        self.assertEqual(p["luaCallinsS"], 114.031)
+        self.assertEqual(p["aiByTeamS"], {"2": 27.426, "3": 30.755})
+        self.assertEqual(p["aiPctOfSim"], 53.2)
+        line = json.loads((self.root / "_index" / "bar-lobbies.clyde.jsonl").read_text().splitlines()[0])
+        self.assertEqual((line["simS"], line["aiPctOfSim"]), (250.633, 53.2))
+
+    def test_no_profile_table_no_profile(self):
+        m = json.loads((self.archive() / "manifest.json").read_text())
+        self.assertEqual(m["profile"], {})
+
     def test_no_partial_folders_left(self):
         self.archive()
         self.assertEqual(list((self.root / "_incoming").iterdir()), [])
