@@ -131,6 +131,13 @@ Settings (environment):
                           client adds bots, e.g. "!setallaibonus 50"
   BARHOST_FRIEND_JOINERS  room mode: send a friend request to each player who
                           joins the room, once per account (0; 1 = on)
+  BARHOST_FRIEND_PENDING_DAYS  withdraw a friend request not accepted after
+                          this many days (0 = never, default)
+  BARHOST_FRIEND_OFFLINE_DAYS  remove a friend not seen online for this many
+                          days, except BARHOST_FOLLOW and BARHOST_AUTO_BOSS
+                          (0 = never, default). The server does not say when
+                          someone was last online: the client counts from
+                          when it last saw them online.
   BARHOST_MIN_HUMANS      room mode: ready humans needed before the client says
                           how to vote the game started (1; 0 = never). It
                           never starts a game itself: the players vote it.
@@ -161,6 +168,12 @@ Settings (environment):
                           engine is behind the server (a widget,
                           rjm_host_metrics.lua) and its CPU, threads, memory,
                           disk and pressure (engine_metrics.py) (5; 0 = off)
+  BARHOST_FROZEN_GAME_MINUTES  minutes a game may stand still (its frame
+                          unchanged while the engine runs: paused, say) once
+                          every human player has resigned or left it, before
+                          the bots are resigned and the client moves to a new
+                          room; with players still in it, 6 times that (0 =
+                          never)
   BARHOST_ENGINE_PROFILER 1 = engine profiler on in games, for the AIs' time
                           share (0); a BARHOST_FOLLOW user's `!profiler on|off`
                           overrides it from the next game, kept in
@@ -177,6 +190,7 @@ Settings (environment):
                           (/tmp/lobby-client-status.json)
 """
 import asyncio
+import base64
 import datetime as dt
 import hashlib
 import json
@@ -324,9 +338,28 @@ ENGINE_QUIT_AFTER = 60
 # !rehost: end the game (as !stop), leave the room, take a new one.
 REHOST_GAME_SAY = "%s ended this game: resigning the AI bots and moving to a new room."
 REHOST_SAY = "%s asked me to rehost: moving to a new room."
+# A game standing still (paused with nobody left to unpause, say): checked
+# this often, from the metrics widget's timeline.
+FROZEN_CHECK_EVERY = 60
+FROZEN = "a frozen game"    # rehost_due for it: nobody to tell
+# ... given up after BARHOST_FROZEN_GAME_MINUTES only once every human who
+# started has resigned or left (the engine's console), after this many times
+# that regardless (an abandoned pause).
+FROZEN_ANYWAY = 6
+PLAYER_GONE_RE = re.compile(rb"\] Player (\S+) (?:resigned from|left) the game")
+FROZEN_SAY = "This game has stood still for %d minutes: resigning the AI bots and moving to a new room."
 
 # SPADS kicks clients that talk too fast: at most one command per this many s.
 COMMAND_SPACING = 1.5
+# Friend list upkeep (Teiserver spring_user_in.ex: c.user.list_relationships,
+# rescind_friend_request, remove_friend, whois; relationship_lib.ex
+# check_relationship_limit counts friends + outgoing + incoming requests).
+FRIEND_SWEEP_FIRST = 60         # seconds after logging in (the user list is in)
+FRIEND_SWEEP_EVERY = 6 * 3600
+FRIEND_FULL = "You have reached the maximum number of friends"
+FRIEND_FULL_PAUSE = 6 * 3600    # no requests for this long after FRIEND_FULL
+FRIEND_BATCH = 50               # account ids per command line
+DAY = 86400
 # Seconds after joining before "everyone I follow left" applies: the room's
 # member list arrives just after JOINBATTLE.
 JOIN_SETTLE = 10
@@ -429,6 +462,12 @@ class Settings:
         # Room mode: a friend request to each player who joins the room, once
         # per account (Teiserver c.user.add_friend <account id>).
         self.friend_joiners = g("BARHOST_FRIEND_JOINERS", "0") == "1"
+        # The friend list's upkeep (Teiserver counts friends and pending
+        # requests both ways against one limit, 300 by default): unanswered
+        # requests withdrawn after this many days, friends unseen this long
+        # removed. 0 = never.
+        self.friend_pending_days = float(g("BARHOST_FRIEND_PENDING_DAYS", "0"))
+        self.friend_offline_days = float(g("BARHOST_FRIEND_OFFLINE_DAYS", "0"))
         self.min_humans = int(g("BARHOST_MIN_HUMANS", "1"))
         # Room mode: no start hint until at least as many humans play as bots.
         self.matched_teams = g("BARHOST_MATCHED_TEAMS", "0") == "1"
@@ -468,6 +507,9 @@ class Settings:
         # Seconds between lines of the game's metrics (engine-timeline.csv from
         # the engine, timeline.csv from this client); 0 = none.
         self.metrics_every = float(g("BARHOST_METRICS_EVERY", "5"))
+        # A game whose frame has not moved for this long (the metrics widget's
+        # timeline, so it needs BARHOST_METRICS_EVERY) is given up; 0 = never.
+        self.frozen_game_after = float(g("BARHOST_FROZEN_GAME_MINUTES", "0")) * 60
         # 1 = turn the engine's profiler on in games, for the "AI" time share
         # (/debug 1 0; costs a timer around every AI call).
         self.engine_profiler = g("BARHOST_ENGINE_PROFILER", "0") == "1"
@@ -544,9 +586,10 @@ class LobbyClient:
     world; everything to send is appended to `self.outbox`. No I/O here."""
 
     def __init__(self, s: Settings, now=time.monotonic, launch=None, perf=None, activate=None,
-                 metrics=None, archive=None):
+                 metrics=None, archive=None, wall=time.time):
         self.s = s
         self.now = now
+        self.wall = wall            # seconds since the epoch: friend ages kept across restarts
         self.launch = launch or (lambda b, pw: None)
         # engine_metrics.HostSampler: the engine's CPU, threads, disk, pressure.
         self.metrics = metrics
@@ -599,6 +642,17 @@ class LobbyClient:
         self.ai_activate_due = False
         # Accounts already sent a friend request; kept so each gets one.
         self.friended = set(str(i) for i in state.get("friended", []))
+        # Friend list upkeep, kept: when each pending request was sent (wall
+        # time; 0 = before this was recorded), when each friend was last seen
+        # online, and their names.
+        self.friend_sent = dict(state.get("friend_sent", {}))
+        self.friend_seen = dict(state.get("friend_seen", {}))
+        self.friend_names = dict(state.get("friend_names", {}))
+        self.friends_reconciled = bool(state.get("friends_reconciled"))
+        self.friends = set()        # account ids, from the last list
+        self.friend_pause_until = 0.0
+        self.next_friend_sweep = None
+        self.whois_due = set()      # friends to remove once whois says who they are
         self.account_ids = {}       # user name -> account id, from ADDUSER
         self.ai_switch_due = False  # a switch asked during a game, done after it
         # New AI releases: checked between games by the I/O layer
@@ -629,6 +683,15 @@ class LobbyClient:
                               if isinstance(k, str) and isinstance(v, str) and install_ai.TAG_RE.match(v)}
         if isinstance(st.get("friended"), list):
             out["friended"] = [str(i) for i in st["friended"] if str(i).isdigit()]
+        for key in ("friend_sent", "friend_seen"):
+            if isinstance(st.get(key), dict):
+                out[key] = {str(k): float(v) for k, v in st[key].items()
+                            if str(k).isdigit() and isinstance(v, (int, float))}
+        if isinstance(st.get("friend_names"), dict):
+            out["friend_names"] = {str(k): v for k, v in st["friend_names"].items()
+                                   if str(k).isdigit() and isinstance(v, str)}
+        if isinstance(st.get("friends_reconciled"), bool):
+            out["friends_reconciled"] = st["friends_reconciled"]
         for key in ("engine_profiler", "bar_widgets"):
             if isinstance(st.get(key), bool):
                 out[key] = st[key]
@@ -643,7 +706,10 @@ class LobbyClient:
                                        "ai_pins": self.ai_pins,
                                        "engine_profiler": self.profiler_choice,
                                        "bar_widgets": self.widgets_choice,
-                                       "friended": sorted(self.friended)}))
+                                       "friended": sorted(self.friended),
+                                       "friend_sent": self.friend_sent, "friend_seen": self.friend_seen,
+                                       "friend_names": self.friend_names,
+                                       "friends_reconciled": self.friends_reconciled}))
             tmp.replace(self.s.state_file)
         except OSError as e:
             log("could not save %s: %s" % (self.s.state_file, e))
@@ -835,8 +901,10 @@ class LobbyClient:
                     self.game_events = None
         if cmd in CHAT_EVENTS:
             self.log_chat(cmd, line)
-        if cmd == "s.user.add_friend":
-            self.on_friend_reply(line)
+        if cmd.startswith("s.user."):
+            handler = getattr(self, "on_s_user_" + cmd[7:], None)
+            if handler:
+                handler(line)
             return
         handler = getattr(self, "on_" + cmd, None)
         if handler:
@@ -882,6 +950,8 @@ class LobbyClient:
     def on_ACCEPTED(self, line):
         log("logged in as %s" % self.s.login)
         self.state = "lobby"
+        if self.s.friend_pending_days > 0 or self.s.friend_offline_days > 0:
+            self.next_friend_sweep = self.now() + FRIEND_SWEEP_FIRST
         if self.game_running():
             # Reconnected while its engine still plays a game: no new room
             # until that game ends (tick() moves on from "ingame" then).
@@ -911,23 +981,154 @@ class LobbyClient:
             self.users.setdefault(w[1], 0)
             if len(w) > 3 and w[3].isdigit():
                 self.account_ids[w[1]] = w[3]
+                if w[3] in self.friends:            # a friend logged in: seen now
+                    self.friend_seen[w[3]] = self.wall()
+                    self.friend_names[w[3]] = w[1]
 
     def friend(self, user):
         """Room mode: one friend request per account, ever (kept in the state
         file). Teiserver takes it by account id (spring_user_in.ex add_friend)
         and answers s.user.add_friend <id> success / failure <reason>."""
         aid = self.account_ids.get(user)
-        if not self.s.friend_joiners or self.s.mode != "room" or not aid or aid in self.friended:
+        if not self.s.friend_joiners or self.s.mode != "room" or not aid or aid in self.friended \
+                or self.now() < self.friend_pause_until:
             return
         self.friended.add(aid)
         self.save_state()
         log("friend request to %s (%s)" % (user, aid))
-        self.pending.append(("c.user.add_friend", aid))
+        self.send("c.user.add_friend", aid)
 
-    def on_friend_reply(self, line):
-        w = line.replace("	", " ").split(" ", 2)
-        if len(w) >= 3 and not w[2].startswith("success"):
-            log("friend request %s: %s" % (w[1], w[2]))
+    def on_s_user_add_friend(self, line):
+        w = line.split(" ", 1)[1].split("\t") if " " in line else []
+        if len(w) < 2:
+            return
+        aid, result = w[0], w[1]
+        if result == "success":
+            log("friend request %s: sent" % aid)
+            self.friend_sent[aid] = self.wall()
+        elif len(w) > 2 and w[2] == FRIEND_FULL:
+            # Not sent: ask this player again later, and nobody for a while.
+            self.friended.discard(aid)
+            if self.now() >= self.friend_pause_until:
+                log("friend request %s: %s; no requests for %d h" % (aid, w[2], FRIEND_FULL_PAUSE // 3600))
+            self.friend_pause_until = self.now() + FRIEND_FULL_PAUSE
+        else:
+            log("friend request %s: %s" % (aid, " ".join(w[1:])))
+        self.save_state()
+
+    # -- friend list upkeep -------------------------------------------------
+
+    def friend_sweep(self):
+        self.next_friend_sweep = self.now() + FRIEND_SWEEP_EVERY
+        self.send("c.user.list_relationships")
+
+    def send_ids(self, cmd, ids):
+        ids = sorted(ids, key=int)
+        for i in range(0, len(ids), FRIEND_BATCH):
+            self.send(cmd, "\t".join(ids[i:i + FRIEND_BATCH]))
+
+    def friend_exempt(self, name):
+        return name.lower() in {u.lower() for u in self.s.follow | self.s.auto_boss}
+
+    def on_s_user_list_relationships(self, line):
+        try:
+            raw = line.split(" ", 1)[1].strip()
+            data = json.loads(base64.b64decode(raw + "=" * (-len(raw) % 4)))
+            ids = {k: {str(i) for i in (data.get(k) or [])} for k in
+                   ("friends", "outgoing_friend_requests", "incoming_friend_requests")}
+        except (IndexError, ValueError, TypeError, AttributeError) as e:
+            log("friend list: could not read the server's answer: %s" % e)
+            return
+        friends = ids["friends"]
+        outgoing = ids["outgoing_friend_requests"]
+        incoming = ids["incoming_friend_requests"]
+        wall = self.wall()
+        self.friends = friends
+        if not self.friends_reconciled:
+            # Once: accounts marked asked whose request is gone (refused while
+            # the list was full, or declined) may be asked again.
+            gone = self.friended - friends - outgoing - incoming
+            self.friended -= gone
+            self.friends_reconciled = True
+            if gone:
+                log("friend list: %d earlier requests are not pending; they may be asked again" % len(gone))
+        online = {aid: n for n, aid in self.account_ids.items() if n in self.users}
+        for f in friends:
+            if f in online:
+                self.friend_names[f] = online[f]
+            if f in online or f not in self.friend_seen:
+                self.friend_seen[f] = wall       # online now, or tracked from now
+        for d, keep in ((self.friend_seen, friends), (self.friend_names, friends), (self.friend_sent, outgoing)):
+            for k in [k for k in d if k not in keep]:
+                del d[k]
+        withdraw, remove, ask = [], [], []
+        if self.s.friend_pending_days > 0:
+            for o in outgoing:
+                self.friend_sent.setdefault(o, 0.0)   # sent before this was recorded: old
+                if wall - self.friend_sent[o] >= self.s.friend_pending_days * DAY:
+                    withdraw.append(o)
+        if self.s.friend_offline_days > 0:
+            for f in friends:
+                if wall - self.friend_seen[f] < self.s.friend_offline_days * DAY:
+                    continue
+                name = self.friend_names.get(f)
+                if name is None:
+                    ask.append(f)               # whois first: never drop an exempt user unseen
+                elif not self.friend_exempt(name):
+                    remove.append(f)
+        log("friend list: %d friends, %d requests sent and %d received pending; withdrawing %d "
+            "(over %g days), removing %d (not seen online for %g days), checking %d" % (
+                len(friends), len(outgoing), len(incoming), len(withdraw), self.s.friend_pending_days,
+                len(remove), self.s.friend_offline_days, len(ask)))
+        if withdraw:
+            self.send_ids("c.user.rescind_friend_request", withdraw)
+            for o in withdraw:
+                self.friend_sent.pop(o, None)
+        if remove:
+            self.send_ids("c.user.remove_friend", remove)
+        for f in ask:
+            self.whois_due.add(f)
+            self.send("c.user.whois", f)
+        if withdraw or remove:
+            self.friend_pause_until = 0.0       # room on the list again
+        self.save_state()
+
+    def on_s_user_whois(self, line):
+        w = line.split(" ")
+        if len(w) < 3 or w[1] not in self.whois_due:
+            return
+        aid = w[1]
+        self.whois_due.discard(aid)
+        try:
+            raw = w[2].strip()
+            name = json.loads(base64.b64decode(raw + "=" * (-len(raw) % 4))).get("name")
+        except (ValueError, TypeError, AttributeError):
+            name = None
+        if not isinstance(name, str):
+            log("friend list: no name for %s; kept" % aid)
+            return
+        self.friend_names[aid] = name
+        if not self.friend_exempt(name):
+            self.send("c.user.remove_friend", aid)
+        self.save_state()
+
+    def on_s_user_rescind_friend_request(self, line):
+        w = line.split(" ", 1)[1].split("\t") if " " in line else []
+        if len(w) >= 2 and w[1] != "success":
+            log("withdrawing friend request %s: %s" % (w[0], " ".join(w[1:])))
+
+    def on_s_user_remove_friend(self, line):
+        w = line.split(" ", 1)[1].split("\t") if " " in line else []
+        if len(w) < 2:
+            return
+        if w[1] == "success":
+            log("removed friend %s (%s)" % (w[0], self.friend_names.get(w[0], "?")))
+            for d in (self.friend_seen, self.friend_names):
+                d.pop(w[0], None)
+            self.friends.discard(w[0])
+            self.save_state()
+        else:
+            log("removing friend %s: %s" % (w[0], " ".join(w[1:])))
 
     def on_REMOVEUSER(self, line):
         self.users.pop(line.split(" ")[1], None)
@@ -2234,6 +2435,9 @@ class LobbyClient:
         self.engine_exit_logged = False
         self.resign_kill_at = None
         self.engine_quit_at = None
+        self.frozen = None          # (frame, timeline row, first seen) of the newest frame seen
+        self.game_humans = set(self.humans())   # who must resign or leave before a frozen game is given up
+        self.next_frozen_check = self.now() + FROZEN_CHECK_EVERY
         run_dir = getattr(self.game_proc, "write_dir", None)
         if self.perf is not None:
             self.perf.start("game %d %s" % (self.games, b.map), run_dir, now=self.now())
@@ -2339,7 +2543,7 @@ class LobbyClient:
         if played and self.s.map_rotation:
             self.map_skips = 0
             self.advance_map()
-        if played:
+        if played and user != FROZEN:
             self.tell(user, "Game over for my bots; left the room, taking a new one.")
 
     def resign(self, user):
@@ -2375,6 +2579,62 @@ class LobbyClient:
                 except Exception:
                     pass
 
+    def game_frame_now(self):
+        """(game frame, row stamp) of the metrics widget's newest timeline
+        row in the running game, or None."""
+        run = getattr(self.game_proc, "write_dir", None)
+        if run is None:
+            return None
+        try:
+            with game_archive.engine_timeline(Path(run)).open("rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - 4096))
+                rows = f.read().decode(errors="replace").splitlines()
+        except (OSError, TypeError):
+            return None
+        for row in reversed(rows):
+            x = row.split(",")
+            if len(x) >= 3 and x[2].isdigit():
+                return int(x[2]), x[1]
+        return None
+
+    def game_frozen(self, now):
+        """True once the game's frame has stood still for frozen_game_after
+        while the widget kept writing rows (the engine runs, the game does
+        not: paused with every player resigned never reaches game over) and
+        no human who started is still in it, or for FROZEN_ANYWAY times that.
+        A paused game with players in it is theirs to unpause; a lagging
+        engine's frame still moves; a silent widget or a game not started yet
+        (frame 0) is no evidence."""
+        if self.s.frozen_game_after <= 0 or now < getattr(self, "next_frozen_check", 0):
+            return False
+        self.next_frozen_check = now + FROZEN_CHECK_EVERY
+        got = self.game_frame_now()
+        if got is None or got[0] == 0:
+            return False
+        frame, row = got
+        seen = getattr(self, "frozen", None)
+        if seen is None or seen[0] != frame:
+            self.frozen = (frame, row, now)
+            return False
+        if row == seen[1]:
+            return False
+        still = now - seen[2]
+        return still >= FROZEN_ANYWAY * self.s.frozen_game_after or             (still >= self.s.frozen_game_after and not self.humans_in_game())
+
+    def humans_in_game(self) -> set:
+        """The humans who started this game and, by the engine's console, have
+        neither resigned nor left it."""
+        left = set(getattr(self, "game_humans", ()))
+        run = getattr(self.game_proc, "write_dir", None)
+        if not left or run is None:
+            return left
+        try:
+            console = (Path(run) / "engine-console.log").read_bytes()
+        except (OSError, TypeError):
+            return left
+        return left - {m.group(1).decode(errors="replace") for m in PLAYER_GONE_RE.finditer(console)}
+
     def log_engine_exit(self):
         """Once per game: the engine's exit, in the pod log (its console is
         only on the volume). An odd exit (non-zero, or while the game goes
@@ -2405,6 +2665,9 @@ class LobbyClient:
 
     def tick(self):
         now = self.now()
+        if self.next_friend_sweep is not None and now >= self.next_friend_sweep \
+                and self.state not in ("connecting", "login"):
+            self.friend_sweep()
         if self.state == "ingame":
             # Replies to private messages still go out during a game.
             if self.game_proc is not None and self.game_proc.poll() is None:
@@ -2417,6 +2680,15 @@ class LobbyClient:
                     self.engine_quit_at = None
                     self.stop_engine()
                     self.resign_kill_at = now + RESIGN_KILL_AFTER   # killed then if still running
+                elif self.resign_kill_at is None and self.rehost_due is None and self.game_frozen(now):
+                    mins = (now - self.frozen[2]) / 60
+                    log("the game has stood still at frame %d for %d+ min (players still in it: %s); "
+                        "resigning the bots and rehosting"
+                        % (self.frozen[0], mins, ", ".join(sorted(self.humans_in_game())) or "none"))
+                    self.rehost_due = FROZEN
+                    self.say(FROZEN_SAY % mins)
+                    self.stop_engine()
+                    self.resign_kill_at = now + RESIGN_KILL_AFTER
                 self.flush_pending()
                 return
             self.log_engine_exit()

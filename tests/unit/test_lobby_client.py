@@ -1945,6 +1945,113 @@ class Rehost(Harness):
         self.assertTrue([x for x in self.pm("!rehost") if "Unknown command !rehost" in x])
 
 
+
+class FrozenGame(Harness):
+    """BARHOST_FROZEN_GAME_MINUTES: a game whose frame stands still while the
+    engine's widget keeps writing (paused with every player resigned never
+    reaches game over) is given up: the bots resign and the client rehosts."""
+
+    OTHER = Rehost.OTHER
+    set_up = Rehost.set_up
+    joins = Rehost.joins
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_FOLLOW=OWNER, BARHOST_MAP_ROTATION="Map A;Map B;Map C",
+                             BARHOST_FROZEN_GAME_MINUTES="10")
+        self.run = Path(self.tmp.name) / "run"
+        (self.run / "LuaUI/Config").mkdir(parents=True)
+        self.proc.write_dir = self.run
+        self.rows = ["unix_s,mono_s,game_frame,server_frame"]
+        self.stamp = 0
+
+    def row(self, frame):
+        self.stamp += 5
+        self.rows.append("%d,%d.0,%d,%d" % (1800000000 + self.stamp, self.stamp, frame, frame))
+        (self.run / "LuaUI/Config/rjm-engine-timeline.csv").write_text("\n".join(self.rows) + "\n")
+
+    def play(self, minutes, frame=None):
+        """Run for `minutes`, the widget writing a row each minute (the
+        frame moving on unless `frame` is given)."""
+        out = []
+        for _ in range(int(minutes)):
+            self.row(frame if frame is not None else self.stamp * 30)
+            out += self.run_for(60)
+        return out
+
+    def start(self):
+        self.set_up()
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+
+    def test_a_game_standing_still_is_given_up(self):
+        self.start()
+        self.play(30)
+        self.assertEqual(getattr(self.proc, "terminated", 0), 0)
+        sent = self.play(9, frame=44974)
+        self.assertEqual(getattr(self.proc, "terminated", 0), 0)
+        sent = self.play(3, frame=44974)
+        self.assertEqual(self.proc.terminated, 1)
+        self.assertTrue([x for x in sent if x.startswith("SAYBATTLE This game has stood still for 1")])
+        self.assertNotIn("LEAVEBATTLE", sent)
+        self.proc.code = 0                                    # the engine left; the frozen game goes on
+        sent = self.run_for(20)
+        self.assertIn("LEAVEBATTLE", sent)
+        self.assertEqual(self.joins(sent), ["14"])
+        self.assertFalse([x for x in sent if x.startswith("SAYPRIVATE")])   # nobody asked: nobody told
+
+    def seat(self, *names):
+        for n in names:
+            self.feed("JOINEDBATTLE 12 " + n,
+                      "CLIENTBATTLESTATUS %s %d 0" % (n, lc.battle_status(ready=1, mode=1, sync=1)))
+
+    def console(self, *lines):
+        with (self.run / "engine-console.log").open("a") as f:
+            for line in lines:
+                f.write("[t=00:26:47.668125][f=0044974] %s\n" % line)
+
+    def test_a_pause_with_players_in_the_game_is_theirs(self):
+        self.set_up()
+        self.seat("Alice", "Bob")
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.play(5)
+        self.console("Player Alice resigned from the game: forced spec")
+        self.play(30, frame=44974)                             # Bob is still in it
+        self.assertEqual(getattr(self.proc, "terminated", 0), 0)
+        self.console("Player Bob left the game:  normal quit")
+        self.play(2, frame=44974)
+        self.assertEqual(self.proc.terminated, 1)
+
+    def test_an_abandoned_pause_is_given_up_after_an_hour(self):
+        self.set_up()
+        self.seat("Alice")
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.play(5)
+        self.play(59, frame=44974)
+        self.assertEqual(getattr(self.proc, "terminated", 0), 0)
+        self.play(3, frame=44974)
+        self.assertEqual(self.proc.terminated, 1)
+
+    def test_a_short_pause_is_not(self):
+        self.start()
+        self.play(5)
+        self.play(8, frame=999)
+        self.play(20)
+        self.assertEqual(getattr(self.proc, "terminated", 0), 0)
+
+    def test_a_silent_widget_or_an_unstarted_game_is_no_evidence(self):
+        self.start()
+        self.row(500)
+        self.run_for(30 * 60)                                  # no new rows
+        self.play(30, frame=0)                                 # loading
+        self.assertEqual(getattr(self.proc, "terminated", 0), 0)
+
+    def test_off_by_default(self):
+        self.c = self.client(BARHOST_FOLLOW=OWNER)
+        self.start()
+        self.play(30, frame=44974)
+        self.assertEqual(getattr(self.proc, "terminated", 0), 0)
+
+
 class StopRequest(Harness):
     """An authorised user's !stop: while this engine is in the game it leaves,
     which resigns the bots; if it is not (the game goes on without it), the
@@ -2081,6 +2188,145 @@ class FriendRequests(Harness):
         self.boss_and_setup()
         self.feed("s.user.add_friend 4242	failure	existing friend request")
         self.assertEqual(self.c.state, "waiting")
+
+
+class FriendUpkeep(Harness):
+    """BARHOST_FRIEND_PENDING_DAYS / BARHOST_FRIEND_OFFLINE_DAYS: the friend
+    list is read 60 s after login and every 6 h; requests pending too long are
+    withdrawn, friends not seen online too long removed (never an authorised
+    or auto-boss user), and requests pause while the server says it is full."""
+
+    DAY = 86400
+
+    def setUp(self):
+        self.wall_t = 1_800_000_000.0
+        super().setUp()
+        self.c = self.client()
+
+    def client(self, **extra):
+        e = {"BARHOST_LOBBY_LOGIN": ME, "BARHOST_LOBBY_PASSWORD": "secret",
+             "BAR_ENGINE_VERSION": ENGINE, "BARHOST_LOBBY_CLUSTER": "EU",
+             "BARHOST_STATUS_FILE": os.path.join(self.tmp.name, "status.json"),
+             "BARHOST_STATE_FILE": os.path.join(self.tmp.name, "state.json"),
+             "BARHOST_FRIEND_JOINERS": "1", "BARHOST_FOLLOW": OWNER, "BARHOST_AUTO_BOSS": "Pal",
+             "BARHOST_FRIEND_PENDING_DAYS": "7", "BARHOST_FRIEND_OFFLINE_DAYS": "30"}
+        e.update(extra)
+        return lc.LobbyClient(lc.Settings(e), now=self.clock, launch=self.launch, wall=lambda: self.wall_t)
+
+    @staticmethod
+    def lists(friends=(), outgoing=(), incoming=()):
+        raw = json.dumps({"friends": list(friends), "outgoing_friend_requests": list(outgoing),
+                          "incoming_friend_requests": list(incoming), "follows": [], "ignores": []})
+        import base64
+        return "s.user.list_relationships " + base64.b64encode(raw.encode()).decode().rstrip("=")
+
+    @staticmethod
+    def whois(aid, name):
+        import base64
+        return "s.user.whois %s %s" % (aid, base64.b64encode(json.dumps({"name": name}).encode()).decode())
+
+    def sweep(self, **lists):
+        self.take()
+        self.feed(self.lists(**lists))
+        return self.take()
+
+    def test_listed_after_login_then_every_six_hours(self):
+        self.log_in()
+        sent = self.run_for(70)
+        self.assertEqual(sent.count("c.user.list_relationships"), 1)
+        self.assertEqual(self.run_for(lc.FRIEND_SWEEP_EVERY - 30).count("c.user.list_relationships"), 0)
+        self.assertEqual(self.run_for(60).count("c.user.list_relationships"), 1)
+
+    def test_off_by_default(self):
+        self.c = self.client(BARHOST_FRIEND_PENDING_DAYS="0", BARHOST_FRIEND_OFFLINE_DAYS="0")
+        self.log_in()
+        self.assertNotIn("c.user.list_relationships", self.run_for(lc.FRIEND_SWEEP_EVERY + 100))
+
+    def test_pending_requests_are_withdrawn_after_seven_days(self):
+        self.log_in()
+        self.feed("s.user.add_friend 11\tsuccess")         # sent now
+        sent = self.sweep(outgoing=[10, 11])                 # 10: sent before ages were kept
+        self.assertEqual(sent, ["c.user.rescind_friend_request 10"])
+        self.wall_t += 6 * self.DAY
+        self.assertEqual(self.sweep(outgoing=[11]), [])
+        self.wall_t += self.DAY
+        self.assertEqual(self.sweep(outgoing=[11]), ["c.user.rescind_friend_request 11"])
+        self.assertNotIn("11", self.c.friend_sent)
+
+    def test_many_are_withdrawn_in_batches(self):
+        self.log_in()
+        sent = self.sweep(outgoing=range(1, 121))
+        self.assertEqual(len(sent), 3)
+        self.assertEqual(sent[0], "c.user.rescind_friend_request " + "\t".join(str(i) for i in range(1, 51)))
+
+    def test_friends_unseen_for_thirty_days_are_removed_but_never_owners_or_bosses(self):
+        self.log_in()
+        for name, aid in (("Alice", "1"), (OWNER, "3"), ("Pal", "4")):
+            self.feed("ADDUSER %s US %s 0" % (name, aid))
+        self.assertEqual(self.sweep(friends=[1, 2, 3, 4]), [])     # tracked from now
+        for name in ("Alice", OWNER, "Pal"):
+            self.feed("REMOVEUSER " + name)
+        self.wall_t += 29 * self.DAY
+        self.assertEqual(self.sweep(friends=[1, 2, 3, 4]), [])
+        self.wall_t += self.DAY
+        sent = self.sweep(friends=[1, 2, 3, 4])
+        self.assertIn("c.user.remove_friend 1", sent)                # Alice
+        self.assertIn("c.user.whois 2", sent)                        # never seen: ask who first
+        self.assertFalse([x for x in sent if x.startswith("c.user.remove_friend") and x != "c.user.remove_friend 1"])
+        self.feed(self.whois("2", "pal"))                             # an auto-boss user, any case
+        self.assertEqual(self.take(), [])
+        self.feed("s.user.remove_friend 1\tsuccess")
+        self.assertNotIn("1", self.c.friend_seen)
+        # a friend seen online again restarts the count
+        self.feed("ADDUSER Bob US 5 0")
+        self.sweep(friends=[2, 3, 4, 5])
+        self.feed("REMOVEUSER Bob")
+        self.wall_t += 20 * self.DAY
+        self.feed("ADDUSER Bob US 5 0", "REMOVEUSER Bob")
+        self.wall_t += 15 * self.DAY
+        sent = self.sweep(friends=[2, 3, 4, 5])
+        self.assertNotIn("c.user.remove_friend 5", sent)
+        self.assertNotIn("c.user.remove_friend 3", sent)
+
+    def test_a_stranger_named_by_whois_is_removed(self):
+        self.log_in()
+        self.sweep(friends=[2])
+        self.wall_t += 31 * self.DAY
+        self.assertEqual(self.sweep(friends=[2]), ["c.user.whois 2"])
+        self.feed(self.whois("2", "Mallory"))
+        self.assertEqual(self.take(), ["c.user.remove_friend 2"])
+
+    def test_kept_across_a_restart(self):
+        self.log_in()
+        self.feed("s.user.add_friend 11\tsuccess")
+        self.sweep(friends=[1], outgoing=[11])
+        again = self.client()
+        self.assertEqual(again.friend_sent, {"11": self.wall_t})
+        self.assertEqual(again.friend_seen, {"1": self.wall_t})
+
+    def test_a_full_list_pauses_requests_until_room_is_made(self):
+        self.boss_and_setup()
+        self.feed("ADDUSER Alice US 4242 0", "JOINEDBATTLE 12 Alice")
+        self.assertIn("c.user.add_friend 4242", self.run_for(5))
+        self.feed("s.user.add_friend 4242\tfailure\t" + lc.FRIEND_FULL)
+        self.assertNotIn("4242", self.c.friended)                     # asked again later
+        self.feed("ADDUSER Bob US 77 0", "JOINEDBATTLE 12 Bob")
+        self.assertFalse([x for x in self.run_for(5) if x.startswith("c.user.add_friend")])
+        self.sweep(outgoing=[9])                                      # an old request withdrawn
+        self.feed("LEFTBATTLE 12 Alice", "JOINEDBATTLE 12 Alice")
+        self.assertIn("c.user.add_friend 4242", self.run_for(5))
+
+    def test_earlier_requests_not_pending_are_forgotten_once(self):
+        state = Path(self.tmp.name) / "state.json"
+        state.write_text(json.dumps({"friended": ["1", "2", "3"]}))
+        self.c = self.client()
+        self.log_in()
+        self.sweep(friends=[1], outgoing=[2])
+        self.assertEqual(self.c.friended, {"1", "2"})
+        self.c.friended.add("8")
+        self.sweep(friends=[1])
+        self.assertIn("8", self.c.friended)
+        self.assertTrue(self.client().friends_reconciled)
 
 
 class FakePerf:
