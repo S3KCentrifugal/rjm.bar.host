@@ -346,6 +346,17 @@ FROZEN = "a frozen game"    # rehost_due for it: nobody to tell
 # started has resigned or left (the engine's console), after this many times
 # that regardless (an abandoned pause).
 FROZEN_ANYWAY = 6
+# A broken autohost: its game server crashing at every start (seen when it
+# could not load the room's game after cleaning up for a new version), or a
+# new game version it applies only once its room is empty, which never
+# happens while this client sits in it. Room mode then moves to a new room.
+HOST_CRASH_RE = re.compile(r"\bSpring crashed !.*running time: (\d+) seconds?\)")
+HOST_CRASH_QUICK = 60       # s: a crash this soon after launch is a failed start
+HOST_CRASHES = 2            # failed starts in a row before moving
+HOST_STOPPED_RE = re.compile(r"\bServer stopped \(running time")
+HOST_UPDATE_RE = re.compile(r"\bNew version of current mod detected\b.*\bwhen battle is empty\b")
+AUTOHOST = "the autohost"   # rehost_due for it: nobody to tell
+HOST_TROUBLE_SAY = "The autohost %s: moving to a new room."
 PLAYER_GONE_RE = re.compile(rb"\] Player (\S+) (?:resigned from|left) the game")
 FROZEN_SAY = "This game has stood still for %d minutes: resigning the AI bots and moving to a new room."
 
@@ -1250,6 +1261,8 @@ class LobbyClient:
         self.boss = False
         self.synced = False
         self.joined_at = self.now()
+        self.host_crashes = 0       # failed starts in a row in this room
+        self.host_update = False    # the autohost waits for an empty room to update its game
         b = self.battle
         log("joined room %s (%s) on %s, %s, engine %s" % (b.id, b.title, b.founder, b.map, b.engine_version))
         self.room_log = None
@@ -1386,6 +1399,8 @@ class LobbyClient:
                 # Room mode sets up only a room it has found free.
                 if self.s.mode != "room" or self.vacant:
                     self.configure_room()
+            return
+        if user == self.battle.founder and self.s.mode == "room" and self.autohost_trouble(msg):
             return
         vote_cmd = VOTE_RE.search(msg) if user == self.battle.founder else None
         starting = (user not in (self.battle.founder, self.s.login) and START_RE.match(msg.strip())) or \
@@ -2543,8 +2558,45 @@ class LobbyClient:
         if played and self.s.map_rotation:
             self.map_skips = 0
             self.advance_map()
-        if played and user != FROZEN:
+        if played and user not in (FROZEN, AUTOHOST):
             self.tell(user, "Game over for my bots; left the room, taking a new one.")
+
+    def autohost_trouble(self, msg) -> bool:
+        """The autohost's own reports of trouble (room mode): failed starts in
+        a row, or a game update it holds until its room is empty. True if
+        `msg` was one of them."""
+        crash = HOST_CRASH_RE.search(msg)
+        if crash:
+            if int(crash.group(1)) >= HOST_CRASH_QUICK:
+                self.host_crashes = 0
+                return True
+            self.host_crashes = getattr(self, "host_crashes", 0) + 1
+            log("the autohost's game server crashed at start (%d in a row)" % self.host_crashes)
+            if self.host_crashes >= HOST_CRASHES:
+                self.leave_broken_room("crashed at %d starts in a row" % self.host_crashes)
+            return True
+        if HOST_STOPPED_RE.search(msg):
+            self.host_crashes = 0
+            return True
+        if HOST_UPDATE_RE.search(msg):
+            if not getattr(self, "host_update", False):
+                log("the autohost has a game update waiting for an empty room")
+            self.host_update = True
+            return True
+        return False
+
+    def leave_broken_room(self, why):
+        """Move to a new room: at once, or once this engine has left its game."""
+        if self.rehost_due is not None:
+            return
+        log("rehosting: the autohost %s" % why)
+        self.rehost_due = AUTOHOST
+        self.say(HOST_TROUBLE_SAY % why)
+        if self.game_running():
+            self.stop_engine()
+            self.resign_kill_at = self.now() + RESIGN_KILL_AFTER
+        else:
+            self.finish_rehost()
 
     def resign(self, user):
         """Resign the bots: this engine hosts them, so it leaves the game. BAR
@@ -2714,6 +2766,9 @@ class LobbyClient:
                 self.map_skips = 0      # one map per game
                 self.advance_map()
                 self.rotate_map()
+        if self.s.mode == "room" and getattr(self, "host_update", False) and self.battle \
+                and self.state in ("setup", "waiting") and self.rehost_due is None and not self.humans():
+            self.leave_broken_room("has a game update waiting for an empty room")
         if self.map_wanted and self.map_deadline is not None and now >= self.map_deadline \
                 and self.battle and self.state == "waiting":
             log("the autohost did not switch to %s; skipping it" % self.map_wanted)

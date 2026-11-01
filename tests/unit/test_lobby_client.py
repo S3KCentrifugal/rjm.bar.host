@@ -2052,6 +2052,74 @@ class FrozenGame(Harness):
         self.assertEqual(getattr(self.proc, "terminated", 0), 0)
 
 
+
+class BrokenAutohost(Harness):
+    """Room mode leaves an autohost whose game server crashes at every start,
+    or that holds a game update until its room is empty (it never is while
+    the client sits in it), and takes a new room."""
+
+    OTHER = Rehost.OTHER
+    set_up = Rehost.set_up
+    joins = Rehost.joins
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_FOLLOW=OWNER, BARHOST_MAP_ROTATION="Map A;Map B;Map C")
+
+    def host(self, text):
+        self.feed("SAIDBATTLEEX %s * %s" % (HOST, text))
+
+    def failed_start(self):
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.run_for(2)
+        self.host("Spring crashed ! (running time: 7 seconds)")
+        out = self.run_for(2)
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        return out
+
+    def test_two_failed_starts_in_a_row_move_it(self):
+        self.set_up()
+        self.assertNotIn("LEAVEBATTLE", self.failed_start())
+        self.proc.code = 233                                  # the engine timed out connecting
+        self.run_for(40)
+        self.proc = type(self.proc)()
+        sent = self.failed_start()
+        self.assertTrue([x for x in sent if x.startswith("SAYBATTLE The autohost crashed at 2 starts in a row")])
+        self.assertNotIn("LEAVEBATTLE", sent)                 # not while the engine is in the game
+        self.proc.code = 233
+        sent = self.run_for(20)
+        self.assertIn("LEAVEBATTLE", sent)
+        self.assertEqual(self.joins(sent), ["14"])
+        self.assertFalse([x for x in sent if x.startswith("SAYPRIVATE")])
+
+    def test_a_crash_late_in_a_game_or_a_normal_game_between_does_not(self):
+        self.set_up()
+        self.host("Spring crashed ! (running time: 7 seconds)")
+        self.host("Server stopped (running time: 36 minutes and 56 seconds)")
+        self.host("Spring crashed ! (running time: 6 seconds)")
+        self.host("Spring crashed ! (running time: 25 minutes and 3 seconds)")
+        self.assertNotIn("LEAVEBATTLE", self.run_for(20))
+
+    def test_a_waiting_game_update_moves_it_once_nobody_plays(self):
+        self.set_up()
+        self.feed("JOINEDBATTLE 12 Alice",
+                  "CLIENTBATTLESTATUS Alice %d 0" % lc.battle_status(ready=1, mode=1, sync=1))
+        self.host("New version of current mod detected (Beyond All Reason test-31783-a096d9f), "
+                  "switching when battle is empty (use !rehost to force)")
+        self.assertNotIn("LEAVEBATTLE", self.run_for(20))     # Alice plays
+        self.feed("LEFTBATTLE 12 Alice")
+        sent = self.run_for(20)
+        self.assertTrue([x for x in sent if x.startswith("SAYBATTLE The autohost has a game update waiting")])
+        self.assertIn("LEAVEBATTLE", sent)
+        self.assertEqual(self.joins(sent), ["14"])
+
+    def test_only_the_autohost_counts(self):
+        self.set_up()
+        for _ in range(3):
+            self.feed("SAIDBATTLE Troll Spring crashed ! (running time: 7 seconds)")
+        self.assertNotIn("LEAVEBATTLE", self.run_for(10))
+
+
 class StopRequest(Harness):
     """An authorised user's !stop: while this engine is in the game it leaves,
     which resigns the bots; if it is not (the game goes on without it), the
