@@ -159,6 +159,11 @@ with lobby lines and a fake clock. It covers:
   the votes; alone it passes at once; a caller waits the cooldown; not
   from spectators, not above 100; `y` with no vote is plain chat; the
   word "bonus" and the end of each game get the how-to with the bonus now;
+- the map vote (`MapVote`, `BARHOST_MAP_VOTE`): a passed `votemap` moves
+  the room to the rotation's next map and the next game takes the one after;
+  a failed one keeps the map; only between games, one vote at a time, a
+  caller waits the cooldown; a player's `!cv map` and the end of each game
+  get the how-to;
 - bots named as Chobby with simple AI names off (`BARbstable(1)`), side 2
   (Random) by default, cycling when `BARHOST_BOT_SIDES` is set;
   `BARHOST_BOT_SETUP` sent after every add (setup, more bots), not after

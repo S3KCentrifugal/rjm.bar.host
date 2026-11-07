@@ -184,6 +184,9 @@ The table leaves out two cases:
      itself (`aibonus <0-100>`, then `y` / `n`; SPADS lets no non-boss
      vote it while the client is boss), once per caller every
      `BARHOST_BONUS_VOTE_COOLDOWN` seconds, and says how after every game.
+     With `BARHOST_MAP_VOTE=1`, the players vote the rotation's next map the
+     same way (`votemap`, then `y` / `n`): a passed vote moves the room to the
+     next map of `BARHOST_MAP_ROTATION`.
      It never leaves a room or takes a new one while its engine
      is in a game, including after reconnecting mid-game; a `!public` /
      `!private` switch waits for a room with no game in progress, and for two

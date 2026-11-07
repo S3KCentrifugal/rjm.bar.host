@@ -60,6 +60,8 @@ room (the client hosts by itself)
      A player's "bonus" gets one line on voting the AIs' bonus (all, or one),
      once a minute; a passed bonus vote is applied to every AI
      (`!setallaibonus`) and kept for the room's later bot adds.
+     With BARHOST_MAP_VOTE, a player's `votemap` calls a vote to move to the
+     rotation's next map (y / n, as the bonus vote).
      When a player rings another (`!ring <name>`), say
      how to vote an away player to spectator, at most once a minute; the room
      decides.
@@ -96,6 +98,8 @@ Settings (environment):
                           (/bar/data/lobby-client-state.json)
   BARHOST_MAP_ROTATION    room mode: ';'-separated maps, one per game, in order
                           (its place is kept in BARHOST_STATE_FILE)
+  BARHOST_MAP_VOTE        room mode: 1 = the players vote the rotation's next
+                          map through the client (`votemap`, then y / n)
   BARHOST_ROOM_NAME       room title, set with !rename (optional); {bonus} in it
                           is the AIs' bonus (e.g. "30", "30-50" if they differ),
                           renamed whenever it changes
@@ -244,7 +248,7 @@ IDLE_RESET_EVERY = 900
 # Commands that change none of what a reset restores.
 IDLE_RESET_IGNORE = {"ring", "status", "help", "list", "stats", "whois", "cv", "callvote", "vote", "y", "n",
                      "ev", "endvote", "promote", "map", "nextmap", "boss", "joinas", "spec", "specafk",
-                     "balance", "rename", "say", "start", "stop", "resign", "notify", "aibonus"}
+                     "balance", "rename", "say", "start", "stop", "resign", "notify", "aibonus", "votemap"}
 VOTE_PASSED_RE = re.compile(r'Vote for command "([^"]*)" passed', re.IGNORECASE)
 IDLE_RESET_SAY = "Nobody is playing: back to this room's default settings."
 VOTE_RE = re.compile(r'called a vote for command "([^"]*)"')
@@ -277,6 +281,13 @@ AIBONUS_RE = re.compile(r"^!?aibonus\s+(\d{1,3})\s*$", re.IGNORECASE)
 AIBONUS_VOTE_RE = re.compile(r"^!?(y|yes|n|no)\s*$", re.IGNORECASE)
 AIBONUS_HINT = "AI bonus (now %s): call a vote with aibonus <0-100>, then the players say y or n."
 AIBONUS_VOTE_TIME = 60
+# BARHOST_MAP_VOTE: the players vote the rotation's next map the same way
+# (`votemap`, then `y` / `n`; one vote at a time, bonus or map). A passed vote
+# moves the room to the next map of BARHOST_MAP_ROTATION, and the game after
+# it takes the one after that. A player's own `!map` / `!cv map` gets the how-to.
+VOTEMAP_RE = re.compile(r"^!?votemap\s*$", re.IGNORECASE)
+MAP_CMD_RE = re.compile(r"^!(?:cv\s+|callvote\s+)?map\b", re.IGNORECASE)
+VOTEMAP_HINT = "Next map (%s): call a vote with votemap, then the players say y or n."
 # BARHOST_BALANCE: at most one !balance per this many seconds (a seat that
 # changes hands would otherwise balance the room on every change).
 BALANCE_GAP = 30
@@ -490,6 +501,10 @@ class Settings:
         # (`aibonus <n>`), at most once per this many seconds per caller.
         self.bonus_vote = g("BARHOST_BONUS_VOTE", "0") == "1"
         self.bonus_vote_cooldown = int(g("BARHOST_BONUS_VOTE_COOLDOWN", "300"))
+        # Room mode: the players vote the rotation's next map through this
+        # client (`votemap`), at most once per this many seconds per caller.
+        self.map_vote = g("BARHOST_MAP_VOTE", "0") == "1"
+        self.map_vote_cooldown = int(g("BARHOST_MAP_VOTE_COOLDOWN", "300"))
         # Room mode: `!balance` once the room is set up (the bots' team ids)
         # and each time the player team fills (as many humans as bots).
         self.balance = g("BARHOST_BALANCE", "0") == "1"
@@ -786,8 +801,10 @@ class LobbyClient:
         self.idle_since = None      # room mode: since when no human plays
         self.defaults_due = None    # room mode: what a human changed since the room was set up or reset
         self.defaults_at = None     # room mode: when restore_defaults last ran
-        self.aibonus_vote = None    # room mode: the AI bonus vote running, if any
+        self.aibonus_vote = None    # room mode: the client's vote running (AI bonus or map), if any
         self.aibonus_called = {}    # caller (lower case) -> when they last called one
+        self.votemap_called = {}    # the same for map votes
+        self.map_hint_after = 0.0   # no map vote hint before this
         self.aibonus_remind = False  # remind how to vote the bonus once the next map is in
         self.vacant = None          # room mode: the joined room was found free
         self.vacancy_check_at = None
@@ -1417,9 +1434,14 @@ class LobbyClient:
             log("a bonus vote passed: every AI to %d" % self.voted_bonus)
             self.say("!setallaibonus %d" % self.voted_bonus)
             return
-        if self.s.mode == "room" and self.s.bonus_vote and user not in (self.battle.founder, self.s.login) \
-                and self.aibonus_chat(user, msg.strip()):
+        if self.s.mode == "room" and (self.s.bonus_vote or self.s.map_vote) \
+                and user not in (self.battle.founder, self.s.login) and self.aibonus_chat(user, msg.strip()):
             return
+        if self.s.mode == "room" and self.s.map_vote and self.s.map_rotation \
+                and user not in (self.battle.founder, self.s.login) \
+                and MAP_CMD_RE.match(msg.strip()) and self.now() >= self.map_hint_after:
+            self.map_hint_after = self.now() + BONUS_HINT_EVERY
+            self.say(self.map_hint())
         if self.s.mode == "room" and user not in (self.battle.founder, self.s.login) \
                 and BONUS_RE.search(msg) and self.now() >= self.bonus_hint_after:
             self.bonus_hint_after = self.now() + BONUS_HINT_EVERY
@@ -1454,6 +1476,13 @@ class LobbyClient:
             now = self.current_bonus()
             now = "%d%%" % now if now is not None else "as set"
         return AIBONUS_HINT % now
+
+    def next_rotation_map(self) -> str:
+        """The map a passed map vote moves the room to."""
+        return self.s.map_rotation[(self.map_index + 1) % len(self.s.map_rotation)]
+
+    def map_hint(self) -> str:
+        return VOTEMAP_HINT % self.next_rotation_map()
 
     def bots_bonus(self):
         """The lowest and highest bonus of the AIs in the room, as the server
@@ -1528,15 +1557,16 @@ class LobbyClient:
         return None
 
     def aibonus_chat(self, user: str, msg: str) -> bool:
-        """`aibonus <n>` (a call) or `y` / `n` (a vote) from a player; True if
-        it was one of those."""
-        call = AIBONUS_RE.match(msg)
+        """`aibonus <n>` or `votemap` (a call) or `y` / `n` (a vote) from a
+        player; True if it was one of those."""
+        call = AIBONUS_RE.match(msg) if self.s.bonus_vote else None
+        mapcall = VOTEMAP_RE.match(msg) if self.s.map_vote and self.s.map_rotation else None
         vote = AIBONUS_VOTE_RE.match(msg) if self.aibonus_vote else None
-        if not call and not vote:
+        if not call and not mapcall and not vote:
             return False
         if user not in self.humans():
-            if call:
-                self.say("%s, only players can call an AI bonus vote." % user)
+            if call or mapcall:
+                self.say("%s, only players can call %s vote." % (user, "an AI bonus" if call else "a map"))
             return True
         now = self.now()
         if vote:
@@ -1546,29 +1576,52 @@ class LobbyClient:
             (v["no"] if yes else v["yes"]).discard(user)
             self.aibonus_count()
             return True
+        if mapcall:
+            self.votemap_call(user)
+            return True
         value = int(call.group(1))
         if not self.boss or self.state != "waiting" or self.game_running():
             self.say("%s, the AI bonus can be changed between games." % user)
         elif value > 100:
             self.say("%s, the AI bonus is 0 to 100." % user)
         elif self.aibonus_vote:
-            self.say("%s, an AI bonus vote is already running (%d%%): say y or n."
-                     % (user, self.aibonus_vote["value"]))
+            self.say("%s, a vote is already running (%s): say y or n." % (user, self.aibonus_vote["what"]))
         elif now < self.aibonus_called.get(user.lower(), -1e9) + self.s.bonus_vote_cooldown:
             left = int(self.aibonus_called[user.lower()] + self.s.bonus_vote_cooldown - now) + 1
             self.say("%s, you can call another AI bonus vote in %d:%02d." % (user, left // 60, left % 60))
         else:
             self.aibonus_called[user.lower()] = now
-            self.aibonus_vote = {"value": value, "caller": user, "yes": {user}, "no": set(),
-                                 "until": now + AIBONUS_VOTE_TIME}
+            self.aibonus_vote = {"kind": "bonus", "value": value, "what": "every AI to %d%% bonus" % value,
+                                 "caller": user, "yes": {user}, "no": set(), "until": now + AIBONUS_VOTE_TIME}
             log("%s called an AI bonus vote: %d" % (user, value))
             self.say("%s called a vote: every AI to %d%% bonus. Players, say y or n (%d s)."
                      % (user, value, AIBONUS_VOTE_TIME))
             self.aibonus_count()
         return True
 
+    def votemap_call(self, user: str):
+        """A player's `votemap`: a vote to move to the rotation's next map."""
+        now = self.now()
+        if not self.boss or self.state != "waiting" or self.game_running():
+            self.say("%s, the map can be changed between games." % user)
+        elif self.map_wanted:
+            self.say("%s, the map is already changing to %s." % (user, self.map_wanted))
+        elif self.aibonus_vote:
+            self.say("%s, a vote is already running (%s): say y or n." % (user, self.aibonus_vote["what"]))
+        elif now < self.votemap_called.get(user.lower(), -1e9) + self.s.map_vote_cooldown:
+            left = int(self.votemap_called[user.lower()] + self.s.map_vote_cooldown - now) + 1
+            self.say("%s, you can call another map vote in %d:%02d." % (user, left // 60, left % 60))
+        else:
+            name = self.next_rotation_map()
+            self.votemap_called[user.lower()] = now
+            self.aibonus_vote = {"kind": "map", "value": name, "what": "next map %s" % name,
+                                 "caller": user, "yes": {user}, "no": set(), "until": now + AIBONUS_VOTE_TIME}
+            log("%s called a map vote: %s" % (user, name))
+            self.say("%s called a vote: next map %s. Players, say y or n (%d s)." % (user, name, AIBONUS_VOTE_TIME))
+            self.aibonus_count()
+
     def aibonus_count(self):
-        """Decide the AI bonus vote: a majority of the players yes passes it,
+        """Decide the client's vote (AI bonus or map): a majority of the players yes passes it,
         enough no that yes cannot reach one fails it; at the deadline, more
         yes than no passes it. A game starting drops it."""
         v = self.aibonus_vote
@@ -1580,7 +1633,14 @@ class LobbyClient:
         players = set(self.humans())
         yes, no = len(v["yes"] & players), len(v["no"] & players)
         n = len(players)
-        if yes * 2 > n or (self.now() >= v["until"] and yes > no):
+        if v["kind"] == "map" and (yes * 2 > n or (self.now() >= v["until"] and yes > no)):
+            self.aibonus_vote = None
+            log("the map vote passed (%d yes, %d no): %s" % (yes, no, v["value"]))
+            self.say("The map vote passed (%d yes, %d no): next map %s." % (yes, no, v["value"]))
+            self.map_skips = 0
+            self.advance_map()
+            self.rotate_map()
+        elif yes * 2 > n or (self.now() >= v["until"] and yes > no):
             self.aibonus_vote = None
             self.voted_bonus = self.room_bonus = v["value"]
             self.defaults_due = "AI bonus vote %d" % v["value"]
@@ -1589,8 +1649,9 @@ class LobbyClient:
             self.say("!setallaibonus %d" % v["value"])
         elif no * 2 >= n or self.now() >= v["until"]:
             self.aibonus_vote = None
-            log("the AI bonus vote failed (%d yes, %d no)" % (yes, no))
-            self.say("The AI bonus vote failed (%d yes, %d no)." % (yes, no))
+            what = "map" if v["kind"] == "map" else "AI bonus"
+            log("the %s vote failed (%d yes, %d no)" % (what, yes, no))
+            self.say("The %s vote failed (%d yes, %d no)." % (what, yes, no))
 
     def trusted(self, name: str) -> bool:
         """An authorised or auto-boss user (any case)."""
@@ -2758,7 +2819,7 @@ class LobbyClient:
             self.quiet_until = now + self.s.postgame_delay
             if self.battle:
                 self.promote_soon("the game is over")
-                self.aibonus_remind = self.s.mode == "room" and self.s.bonus_vote
+                self.aibonus_remind = self.s.mode == "room" and (self.s.bonus_vote or self.s.map_vote)
             if self.s.mode == "follow" and self.battle:
                 self.sync_bots()        # a !bots sent during the game
             self.next_ai_check = now    # look for a new AI release before the next game
@@ -2883,8 +2944,12 @@ class LobbyClient:
         if self.aibonus_remind and self.state == "waiting" and self.boss and self.synced \
                 and not self.map_wanted and not self.game_running():
             self.aibonus_remind = False     # after a game, once the next map is in
-            self.bonus_hint_after = now + BONUS_HINT_EVERY
-            self.say(self.bonus_hint())
+            if self.s.bonus_vote:
+                self.bonus_hint_after = now + BONUS_HINT_EVERY
+                self.say(self.bonus_hint())
+            if self.s.map_vote and self.s.map_rotation:
+                self.map_hint_after = now + BONUS_HINT_EVERY
+                self.say(self.map_hint())
         if self.promote_due():
             self.promote_after = now + PROMOTE_RETRY    # until the autohost answers
             log("promoting the room (%d playing)" % len(self.humans()))

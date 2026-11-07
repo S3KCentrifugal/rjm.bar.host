@@ -1808,6 +1808,102 @@ class AiBonusVote(Harness):
         self.assertNotIn("SAYBATTLE " + lc.AIBONUS_HINT % "50%", self.run_for(120))
 
 
+
+class MapVote(Harness):
+    """BARHOST_MAP_VOTE: the players vote the rotation's next map through the
+    client (`votemap`, then `y` / `n`), as the AI bonus vote."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_MAP_ROTATION=ROTATION, BARHOST_MAP_VOTE="1", BARHOST_BONUS_VOTE="1")
+
+    players = AiBonusVote.players
+    say = AiBonusVote.say
+
+    def boss_on_first_map(self):
+        MapRotation.boss(self)
+        self.feed("UPDATEBATTLEINFO 12 1 0 123 All That Simmers v1.2")
+        self.c.fetched(self.c.battle, True)
+        self.run_for(3)
+
+    def maps(self, sent):
+        return [x for x in sent if x.startswith("SAYBATTLE !map ")]
+
+    def play_a_game(self):
+        self.feed("CLIENTSTATUS %s 65" % HOST)
+        self.run_for(30)
+        self.proc.code = 0
+        self.feed("CLIENTSTATUS %s 64" % HOST)
+        return self.run_for(10)
+
+    def test_a_passed_vote_moves_to_the_next_map_and_the_rotation_goes_on(self):
+        self.boss_on_first_map()
+        self.players("A", "B", "C")
+        sent = self.say("A", "votemap")
+        self.assertTrue([x for x in sent if "called a vote: next map Cells" in x], sent)
+        self.assertEqual(self.maps(sent), [])
+        sent = self.say("B", "y")                                      # 2 of 3
+        self.assertTrue([x for x in sent if "map vote passed (2 yes, 0 no)" in x], sent)
+        self.assertEqual(self.maps(sent), ["SAYBATTLE !map Cells"])
+        self.feed("UPDATEBATTLEINFO 12 1 0 123 Cells 1.2")
+        self.c.fetched(self.c.battle, True)
+        self.run_for(3)
+        self.assertEqual(self.maps(self.play_a_game()), ["SAYBATTLE !map Forge"])
+
+    def test_a_failed_vote_keeps_the_map_and_one_vote_runs_at_a_time(self):
+        self.boss_on_first_map()
+        self.players("A", "B", "C")
+        self.say("A", "votemap")
+        sent = self.say("B", "aibonus 30") + self.say("C", "!votemap")
+        self.assertEqual(len([x for x in sent if "a vote is already running (next map Cells)" in x]), 2, sent)
+        self.say("B", "n")
+        sent = self.say("C", "no")
+        self.assertTrue([x for x in sent if "map vote failed (1 yes, 2 no)" in x], sent)
+        self.assertEqual(self.maps(sent + self.run_for(10)), [])
+        self.assertEqual(self.c.map_index, 0)
+
+    def test_between_games_only_and_each_caller_waits_the_cooldown(self):
+        self.boss_on_first_map()
+        self.players("A")
+        self.assertEqual(self.maps(self.say("A", "votemap")), ["SAYBATTLE !map Cells"])   # alone: at once
+        self.feed("UPDATEBATTLEINFO 12 1 0 123 Cells 1.2")
+        self.c.fetched(self.c.battle, True)
+        sent = self.say("A", "votemap")
+        self.assertTrue([x for x in sent if "you can call another map vote in 4:5" in x], sent)
+        self.run_for(300)
+        self.feed("CLIENTSTATUS %s 65" % HOST)                # a game starts
+        self.run_for(5)
+        sent = self.say("A", "votemap")
+        self.assertTrue([x for x in sent if "the map can be changed between games" in x], sent)
+        self.assertEqual(self.maps(sent), [])
+
+    def test_not_from_spectators(self):
+        self.boss_on_first_map()
+        self.players("A")
+        self.feed("JOINEDBATTLE 12 Spec")
+        sent = self.say("Spec", "votemap")
+        self.assertTrue([x for x in sent if "only players can call a map vote" in x], sent)
+        self.assertEqual(self.maps(sent), [])
+
+    def test_a_map_command_and_the_end_of_a_game_get_the_how_to(self):
+        self.boss_on_first_map()
+        self.players("A")
+        self.assertIn("SAYBATTLE " + lc.VOTEMAP_HINT % "Cells", self.say("A", "!cv map Tundra"))
+        self.assertNotIn("SAYBATTLE " + lc.VOTEMAP_HINT % "Cells", self.say("A", "!map Tundra"))  # once a minute
+        self.feed("UPDATEBATTLEINFO 12 1 0 123 All That Simmers v1.2")
+        sent = self.play_a_game()                                      # the rotation moves on to Cells
+        self.feed("UPDATEBATTLEINFO 12 1 0 123 Cells 1.2")
+        self.c.fetched(self.c.battle, True)
+        sent += self.run_for(10)
+        self.assertEqual(sent.count("SAYBATTLE " + lc.VOTEMAP_HINT % "Forge"), 1, sent)
+
+    def test_off_by_default(self):
+        self.c = self.client(BARHOST_MAP_ROTATION=ROTATION)
+        self.boss_on_first_map()
+        self.players("A")
+        self.assertEqual(self.maps(self.say("A", "votemap")), [])
+
+
 class StartBoxes(Harness):
     """BARHOST_START_BOXES_FILE: after every map change, as boss, the map's start
     boxes are set (first of BARHOST_START_BOX_KEYS), or "0" for a map with none."""
