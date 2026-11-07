@@ -850,6 +850,13 @@ class ProfilerAndSay(Harness):
         self.assertTrue(self.client(BARHOST_FOLLOW=OWNER, BARHOST_ENGINE_PROFILER="1").s.engine_profiler)
         self.assertIn("!profiler on, !profiler off", self.pm("!profiler maybe")[0])
 
+    def test_the_widget_passes_the_frame_data_flag(self):
+        # Engines before 2026.09.01 raise without it, and every timer read came
+        # back empty (rjm_host_metrics.lua, since()).
+        w = self.widget(self.c)
+        self.assertIn("pcall(GetTimeRecord, name, false)", w)
+        self.assertNotRegex(w, r"GetTimeRecord, name\)")
+
     def test_only_authorised_users(self):
         self.log_in()
         self.assertEqual(self.pm("!profiler off", user="Mallory"), [])

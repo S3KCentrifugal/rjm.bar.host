@@ -96,9 +96,12 @@ end
 -- Time in a timer since the last line (ms), from its running total; also its
 -- longest call and peak share. GetProfilerTimeRecord gives total ms, current
 -- ms, max-dt, time share, peak share (LuaUnsyncedRead.cpp); no frame data,
--- which builds a table every call.
+-- which builds a table every call. The `false` must be passed: engines before
+-- 2026.09.01 read the second argument after pushing the results, so without it
+-- they raise "bad argument #2 (boolean expected, got number)" (RecoilEngine
+-- f63bbd4f7f, "Fix a crash in Spring.GetProfilerTimeRecord").
 local function since(name)
-	local ok, total, _, maxdt, _, peak = pcall(GetTimeRecord, name)
+	local ok, total, _, maxdt, _, peak = pcall(GetTimeRecord, name, false)
 	if not ok or type(total) ~= "number" then return nil end
 	local d = total - (lastTotal[name] or total)
 	lastTotal[name] = total
