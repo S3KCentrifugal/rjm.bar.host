@@ -1029,6 +1029,49 @@ class MapRotation(Harness):
         self.assertNotIn("LEAVEBATTLE", sent)
         self.assertIn("SAYBATTLE !map Cells", sent)
 
+    def test_a_download_for_an_earlier_map_is_not_taken_as_the_current_ones(self):
+        # 2026-11-07: a boss's `!map Forge v2.3` during the previous map's
+        # download; that download failed, and the room was moved off Forge.
+        self.boss()
+        self.map_is("All That Simmers v1.2")
+        self.map_is("Forge v2.3")
+        self.c.fetched(self.c.battle, False, "All That Simmers v1.2")
+        sent = self.run_for(5)
+        self.assertNotIn("SAYBATTLE !map Cells", sent)
+        self.assertNotIn("LEAVEBATTLE", sent)
+        self.c.fetched(self.c.battle, True, "All That Simmers v1.2")
+        self.assertFalse(self.c.synced)                       # not Forge's content
+        self.c.fetched(self.c.battle, True, "Forge v2.3")
+        self.assertTrue(self.c.synced)
+
+    def test_downloads_run_one_at_a_time_for_the_rooms_map_then(self):
+        # Two pr-downloaders in one data dir race on the rapid index.
+        import asyncio
+        log = Path(self.tmp.name) / "prd.log"
+        prd = Path(self.tmp.name) / "prd.sh"
+        prd.write_text("#!/bin/sh\necho \"start $4\" >> %s\nsleep 0.2\necho \"end $4\" >> %s\n" % (log, log))
+        prd.chmod(0o755)
+        os.environ["PRD"] = str(prd)
+        self.addCleanup(os.environ.pop, "PRD", None)
+
+        class C:
+            pass
+        c, b = C(), lc.Battle.__new__(lc.Battle)
+        b.game, b.map = "", "Old Map"
+        c.battle, results = b, []
+        c.fetched = lambda bb, ok, m: results.append((ok, m))
+
+        async def both():
+            first = asyncio.ensure_future(lc.fetch_content(c, b))
+            await asyncio.sleep(0.05)
+            b.map = "New Map"
+            await asyncio.gather(first, lc.fetch_content(c, b))
+        lc._fetch_lock = None
+        asyncio.run(both())
+        self.assertEqual(log.read_text().splitlines(),
+                         ["start Old Map", "end Old Map", "start New Map", "end New Map"])
+        self.assertEqual(results, [(True, "Old Map"), (True, "New Map")])
+
     def test_rotation_wraps_around(self):
         self.c.map_index = 2
         self.c.advance_map()
@@ -1843,6 +1886,32 @@ class MapVote(Harness):
         self.feed("CLIENTSTATUS %s 64" % HOST)
         return self.run_for(10)
 
+    def nextmap_passed(self, user=HOST):
+        self.feed('SAIDBATTLEEX %s * Vote for command "nextMap" passed.' % user)
+        return self.run_for(3)
+
+    def test_a_passed_nextmap_vote_is_followed_by_the_rotations_next_map(self):
+        self.boss_on_first_map()
+        sent = self.nextmap_passed()
+        self.assertEqual(self.maps(sent), ["SAYBATTLE !map Cells"])
+        self.assertIn("SAYBATTLE " + lc.NEXTMAP_SAY % "Cells", sent)
+        self.feed("UPDATEBATTLEINFO 12 1 0 123 Some Autohost Map 1.0")     # the autohost's own next map
+        self.assertEqual(self.maps(self.run_for(3)), [])
+        self.feed("UPDATEBATTLEINFO 12 1 0 123 Cells 2")
+        self.c.fetched(self.c.battle, True)
+        self.assertEqual(self.maps(self.run_for(30)), [])                  # Cells sticks
+        self.assertEqual(self.c.map_index, 1)
+
+    def test_a_bosss_nextmap_sticks(self):
+        self.boss_on_first_map()
+        self.feed("SAIDBATTLE %s !nextmap" % OWNER, "SAIDBATTLEEX %s * Next map: Tundra" % HOST,
+                  "UPDATEBATTLEINFO 12 1 0 123 Tundra 1.0")
+        self.assertEqual(self.maps(self.run_for(30)), [])
+
+    def test_only_the_autohosts_nextmap_pass_counts(self):
+        self.boss_on_first_map()
+        self.assertEqual(self.maps(self.nextmap_passed(user="Troll")), [])
+
     def test_a_passed_vote_moves_to_the_next_map_and_the_rotation_goes_on(self):
         self.boss_on_first_map()
         self.players("A", "B", "C")
@@ -1903,6 +1972,14 @@ class MapVote(Harness):
         self.c.fetched(self.c.battle, True)
         sent += self.run_for(10)
         self.assertEqual(sent.count("SAYBATTLE " + lc.VOTEMAP_HINT % "Forge"), 1, sent)
+
+    def test_a_trusted_boss_changing_the_map_gets_no_how_to(self):
+        # A boss's `!map` changes the map at once; it is no vote.
+        self.c = self.client(BARHOST_MAP_ROTATION=ROTATION, BARHOST_MAP_VOTE="1", BARHOST_AUTO_BOSS="Trusty")
+        self.boss_on_first_map()
+        self.players("Trusty")
+        self.assertNotIn("SAYBATTLE " + lc.VOTEMAP_HINT % "Cells", self.say("Trusty", "!map Tundra"))
+        self.assertIn("SAYBATTLE " + lc.VOTEMAP_HINT % "Cells", self.say("Trusty", "!cv map Tundra"))
 
     def test_off_by_default(self):
         self.c = self.client(BARHOST_MAP_ROTATION=ROTATION)
@@ -1973,6 +2050,49 @@ class StartBoxes(Harness):
 
     def test_unreadable_file_is_none(self):
         self.assertEqual(self.client(BARHOST_START_BOXES_FILE=self.file + ".missing").s.start_boxes, {})
+
+    def pm(self, text, user=OWNER):
+        self.feed("SAIDPRIVATE %s %s" % (user, text))
+        return self.run_for(5)
+
+    def told(self, sent, user=OWNER):
+        return [x for x in sent if x.startswith("SAYPRIVATE %s " % user)]
+
+    def test_off_every_map_gets_its_own_boxes(self):
+        self.c = self.client(BARHOST_START_BOXES_FILE=self.file, BARHOST_CUSTOM_START_BOXES="0")
+        self.assertEqual(self.boxes(self.boss()), ["0"])
+        self.assertEqual(self.boxes(self.map_is("All That Simmers v1.2")), ["0"])
+        self.assertEqual(self.boxes(self.map_is("Coastlines Dry 1.1")), ["0"])
+
+    def test_boxes_by_pm_at_once_and_kept_across_a_restart(self):
+        env = dict(BARHOST_START_BOXES_FILE=self.file, BARHOST_CUSTOM_START_BOXES="0", BARHOST_FOLLOW=OWNER)
+        self.c = self.client(**env)
+        self.boss()
+        self.map_is("All That Simmers v1.2")
+        self.assertIn("Start boxes: off (each map's own) (the default)", self.told(self.pm("!boxes"))[0])
+        sent = self.pm("!boxes on")
+        self.assertEqual(self.boxes(sent), ["T2A"])
+        self.assertIn("Start boxes: on (mine for each map) (chosen by PM", self.told(sent)[0])
+        self.assertTrue(self.client(**env).s.custom_start_boxes)
+        sent = self.pm("!boxes default")
+        self.assertEqual(self.boxes(sent), ["0"])
+        self.assertIn("off (each map's own) (the default)", self.told(sent)[0])
+        self.assertFalse(self.client(**env).s.custom_start_boxes)
+        self.assertIn("!boxes on, !boxes off", self.told(self.pm("!boxes maybe"))[0])
+
+    def test_boxes_only_for_authorised_users(self):
+        self.c = self.client(BARHOST_START_BOXES_FILE=self.file, BARHOST_FOLLOW=OWNER)
+        self.boss()
+        sent = self.pm("!boxes off", user="Mallory")
+        self.assertEqual((self.told(sent, "Mallory"), self.boxes(sent)), ([], []))
+        self.assertTrue(self.c.s.custom_start_boxes)
+
+    def test_boxes_without_a_file(self):
+        self.c = self.client(BARHOST_FOLLOW=OWNER)
+        self.boss()
+        sent = self.pm("!boxes on")
+        self.assertIn("no start box file", self.told(sent)[0])
+        self.assertEqual(self.boxes(sent), [])
 
 
 class Rehost(Harness):

@@ -126,7 +126,10 @@ The table leaves out two cases:
      After every map change (its rotation's or a boss's), sets the map's start
      boxes from `BARHOST_START_BOXES_FILE` with `!bSet
      mapmetadata_startbox_override`, or the map's defaults (`0`) for a map
-     without them.
+     without them or with `BARHOST_CUSTOM_START_BOXES=0` (an authorised
+     user's PM `!boxes on|off|default` switches it at once, kept across
+     restarts). With a map rotation, a passed `nextmap` vote is followed by
+     the rotation's next map; a boss's direct `!nextmap` sticks.
      Each game is measured from the container's own cgroup (CPU cores,
      throttling, memory; `scripts/cgroup_perf.py`, a few file reads a
      second): one `perf` line in the log, a row in

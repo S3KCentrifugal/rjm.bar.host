@@ -56,7 +56,8 @@ room (the client hosts by itself)
      name changes. `!stop` resigns the bots during a game (its
      engine leaves the game). `!say <text>` says it in the room (a
      `!command` is then the boss's). `!profiler` and `!widgets` switch the
-     engine profiler and BAR's own widgets for the next games. Each joiner gets BARHOST_WELCOME privately.
+     engine profiler and BAR's own widgets for the next games; `!boxes` the
+    start boxes from BARHOST_START_BOXES_FILE or each map's own, at once. Each joiner gets BARHOST_WELCOME privately.
      A player's "bonus" gets one line on voting the AIs' bonus (all, or one),
      once a minute; a passed bonus vote is applied to every AI
      (`!setallaibonus`) and kept for the room's later bot adds.
@@ -107,6 +108,10 @@ Settings (environment):
                           after every map change (optional; see start_box_for)
   BARHOST_START_BOX_KEYS  ','-separated variants to use, first found wins
                           (team2_ai,override)
+  BARHOST_CUSTOM_START_BOXES  1 = the file's boxes after every map change (1);
+                          0 = "0" instead, each map's own boxes; a
+                          BARHOST_FOLLOW user's `!boxes on|off` overrides it at
+                          once, kept in BARHOST_STATE_FILE until `!boxes default`
   BARHOST_WELCOME         room mode: said privately in the room to each joiner
   BARHOST_AI_CHANNELS     the AIs a BARHOST_FOLLOW user picks with `!ai <name>`,
                           ';'-separated `name=AI` (the engine's own AI) or
@@ -250,6 +255,10 @@ IDLE_RESET_IGNORE = {"ring", "status", "help", "list", "stats", "whois", "cv", "
                      "ev", "endvote", "promote", "map", "nextmap", "boss", "joinas", "spec", "specafk",
                      "balance", "rename", "say", "start", "stop", "resign", "notify", "aibonus", "votemap"}
 VOTE_PASSED_RE = re.compile(r'Vote for command "([^"]*)" passed', re.IGNORECASE)
+# Room mode with a rotation: a passed vote for the autohost's own `nextmap`
+# (its map list, not ours) is followed by the rotation's next map instead. A
+# boss's direct `!nextmap` is no vote and sticks.
+NEXTMAP_SAY = "The nextmap vote passed: next map %s, from this room's rotation."
 IDLE_RESET_SAY = "Nobody is playing: back to this room's default settings."
 VOTE_RE = re.compile(r'called a vote for command "([^"]*)"')
 # A game about to start (a player's command, or the autohost's vote): if it
@@ -286,7 +295,7 @@ AIBONUS_VOTE_TIME = 60
 # moves the room to the next map of BARHOST_MAP_ROTATION, and the game after
 # it takes the one after that. A player's own `!map` / `!cv map` gets the how-to.
 VOTEMAP_RE = re.compile(r"^!?votemap\s*$", re.IGNORECASE)
-MAP_CMD_RE = re.compile(r"^!(?:cv\s+|callvote\s+)?map\b", re.IGNORECASE)
+MAP_CMD_RE = re.compile(r"^!(cv\s+|callvote\s+)?map\b", re.IGNORECASE)   # group 1: a vote call
 VOTEMAP_HINT = "Next map (%s): call a vote with votemap, then the players say y or n."
 # BARHOST_BALANCE: at most one !balance per this many seconds (a seat that
 # changes hands would otherwise balance the room on every change).
@@ -466,6 +475,8 @@ class Settings:
         self.start_box_keys = [k.strip() for k in g("BARHOST_START_BOX_KEYS", "team2_ai,override").split(",")
                                if k.strip()]
         self.start_boxes = load_start_boxes(g("BARHOST_START_BOXES_FILE"), self.start_box_keys)
+        # 0 = send "0" (each map's own boxes) instead of the file's.
+        self.custom_start_boxes = g("BARHOST_CUSTOM_START_BOXES", "1") == "1"
         # Seconds between checks for a new release of a BARHOST_AI_ARCHIVES
         # source on a moving tag (@latest / @newest), only between games; also
         # checked after every game. 0 = never.
@@ -662,6 +673,11 @@ class LobbyClient:
         self.widgets_choice = state.get("bar_widgets")
         if self.widgets_choice is not None:
             s.bar_widgets = self.widgets_choice
+        # Start boxes: BARHOST_CUSTOM_START_BOXES until `!boxes on|off` (kept).
+        self.boxes_default = s.custom_start_boxes
+        self.boxes_choice = state.get("custom_start_boxes")
+        if self.boxes_choice is not None:
+            s.custom_start_boxes = self.boxes_choice
         self.ai_active = None       # (channel, tag) the engine was last pointed at
         # Point the engine at the channel between games; at start, once the
         # releases are fetched.
@@ -718,7 +734,7 @@ class LobbyClient:
                                    if str(k).isdigit() and isinstance(v, str)}
         if isinstance(st.get("friends_reconciled"), bool):
             out["friends_reconciled"] = st["friends_reconciled"]
-        for key in ("engine_profiler", "bar_widgets"):
+        for key in ("engine_profiler", "bar_widgets", "custom_start_boxes"):
             if isinstance(st.get(key), bool):
                 out[key] = st[key]
         return out
@@ -732,6 +748,7 @@ class LobbyClient:
                                        "ai_pins": self.ai_pins,
                                        "engine_profiler": self.profiler_choice,
                                        "bar_widgets": self.widgets_choice,
+                                       "custom_start_boxes": self.boxes_choice,
                                        "friended": sorted(self.friended),
                                        "friend_sent": self.friend_sent, "friend_seen": self.friend_seen,
                                        "friend_names": self.friend_names,
@@ -1220,14 +1237,16 @@ class LobbyClient:
         """Room mode, as boss: set the start boxes for the room's map, once per
         map, after any map change (the rotation's or a boss's). A map with no
         entry gets "0", Chobby's Default Boxes (gui_battle_room_window.lua), so
-        the previous map's boxes never carry over."""
+        the previous map's boxes never carry over; so does every map with
+        custom start boxes off (BARHOST_CUSTOM_START_BOXES, `!boxes`)."""
         b = self.battle
         if (self.s.mode != "room" or not self.s.start_boxes or not b or not self.boss
                 or self.game_running() or self.start_boxes_map == b.map):
             return
         self.start_boxes_map = b.map
-        value = start_box_for(self.s.start_boxes, b.map)
-        log("start boxes for %s: %s" % (b.map, "set" if value else "none known, map defaults"))
+        value = start_box_for(self.s.start_boxes, b.map) if self.s.custom_start_boxes else None
+        log("start boxes for %s: %s" % (b.map, "set" if value else "map defaults" if not self.s.custom_start_boxes
+                                         else "none known, map defaults"))
         self.say("!bSet mapmetadata_startbox_override " + (value or "0"))
 
     def on_JOINEDBATTLE(self, line):
@@ -1303,8 +1322,13 @@ class LobbyClient:
         self.vacant = None
         self.vacancy_check_at = self.now() + VACANCY_WAIT
 
-    def fetched(self, b: Battle, ok: bool):
+    def fetched(self, b: Battle, ok: bool, map_name: str = None):
         if b is not self.battle:
+            return
+        if map_name is not None and map_name != b.map:
+            # The map changed during this download; the download queued
+            # behind it is for the room's map now and reports for it.
+            log("download for %s done, but the room's map is now %s; ignoring it" % (map_name, b.map))
             return
         if not ok:
             self.last_error = "could not download %s / %s" % (b.game, b.map)
@@ -1434,12 +1458,27 @@ class LobbyClient:
             log("a bonus vote passed: every AI to %d" % self.voted_bonus)
             self.say("!setallaibonus %d" % self.voted_bonus)
             return
+        voted = VOTE_PASSED_RE.search(msg) if user == self.battle.founder else None
+        if voted and voted.group(1).strip().lower() == "nextmap" and self.s.mode == "room"                 and self.boss and self.s.map_rotation and not self.game_running():
+            name = self.next_rotation_map()
+            log("a nextmap vote passed: the rotation's next map, %s, instead" % name)
+            self.say(NEXTMAP_SAY % name)
+            self.map_skips = 0
+            self.advance_map()
+            self.rotate_map()
+            return
         if self.s.mode == "room" and (self.s.bonus_vote or self.s.map_vote) \
                 and user not in (self.battle.founder, self.s.login) and self.aibonus_chat(user, msg.strip()):
             return
+        # The hint is for players whose `!map` the autohost turns into a vote. A
+        # trusted user is boss here, so their plain `!map` changes the map at
+        # once and needs no hint (their `!cv map` is still a vote).
+        mapcmd = MAP_CMD_RE.match(msg.strip())
+        if mapcmd and self.trusted(user) and not mapcmd.group(1):
+            mapcmd = None
         if self.s.mode == "room" and self.s.map_vote and self.s.map_rotation \
                 and user not in (self.battle.founder, self.s.login) \
-                and MAP_CMD_RE.match(msg.strip()) and self.now() >= self.map_hint_after:
+                and mapcmd and self.now() >= self.map_hint_after:
             self.map_hint_after = self.now() + BONUS_HINT_EVERY
             self.say(self.map_hint())
         if self.s.mode == "room" and user not in (self.battle.founder, self.s.login) \
@@ -2024,6 +2063,25 @@ class LobbyClient:
             when = (" from the next game" if arg and self.game_running() else "")
             what = "on" if self.s.bar_widgets else "off (only my metrics widget)"
             self.tell(user, "BAR's widgets: %s%s (%s)." % (what, when, why))
+        elif cmd == "!boxes" and self.s.mode == "room":
+            arg = w[1].lower() if len(w) >= 2 else ""
+            if arg not in ("", "on", "off", "default"):
+                self.tell(user, "PM me !boxes on, !boxes off or !boxes default.")
+                return
+            if not self.s.start_boxes:
+                self.tell(user, "I have no start box file: every map gets its own boxes.")
+                return
+            if arg:
+                self.boxes_choice = None if arg == "default" else arg == "on"
+                self.s.custom_start_boxes = self.boxes_default if arg == "default" else self.boxes_choice
+                self.save_state()
+                log("custom start boxes %s at %s's request" % ("on" if self.s.custom_start_boxes else "off", user))
+                self.start_boxes_map = None
+                self.apply_start_boxes()        # now, unless a game runs or not boss yet
+            why = "the default" if self.boxes_choice is None else "chosen by PM, kept across restarts"
+            when = " after this game" if arg and self.game_running() else ""
+            what = "on (mine for each map)" if self.s.custom_start_boxes else "off (each map's own)"
+            self.tell(user, "Start boxes: %s%s (%s)." % (what, when, why))
         elif cmd == "!say":
             text = msg[len(w[0]):].strip() if w else ""
             if not text:
@@ -2131,7 +2189,8 @@ class LobbyClient:
         if self.s.mode == "room":
             lines.append("!public / !private: the kind of room I host (I PM you a private room's password). "
                          "!stop: in a game, resign the bots (ends it). !rehost: end any game, leave this room "
-                         "and host a new one. !help: this list.")
+                         "and host a new one. !boxes [on|off|default]: my start boxes or each map's own. "
+                         "!help: this list.")
         else:
             lines.append("!room <room number, host, player or title> [password], !join [password], !leave: "
                          "which room I follow you into. !stop: in a game, resign the bots. !help: this list.")
@@ -2552,7 +2611,8 @@ class LobbyClient:
             "ai": {"channel": self.ai_channel or None, "name": self.bot_ai,
                    "release": self.ai_active[1] if self.ai_active else None},
             "setup": {"room": self.s.setup, "bots": self.s.bot_setup, "votedBonus": self.voted_bonus,
-                      "startBoxesMap": self.start_boxes_map, "wantBots": self.want_bots},
+                      "startBoxesMap": self.start_boxes_map, "customStartBoxes": self.s.custom_start_boxes,
+                      "wantBots": self.want_bots},
         }
 
     def record_game_start(self, run_dir: Path):
@@ -3061,26 +3121,42 @@ def activate_channel(s: Settings):
     return activate
 
 
+_fetch_lock = None
+
+
 async def fetch_content(c: LobbyClient, b: Battle):
     """Download the room's game and map (pr-downloader skips what is there),
-    without blocking the connection."""
+    without blocking the connection.
+
+    One download at a time: two pr-downloaders in one data dir race on the
+    rapid index (`Failed to rename .../versions.gz.tmp`), and the loser fails.
+    A map change while one runs queues the next behind it. The result names
+    the map it was for, so a download for an earlier map is not taken as the
+    current map's."""
+    global _fetch_lock
+    if _fetch_lock is None:
+        _fetch_lock = asyncio.Lock()
     prd = os.environ.get("PRD", "pr-downloader")
     data = os.environ.get("BARHOST_DATA_DIR", "/bar/data")
-    ok = True
-    for kind, name in (("--download-game", b.game), ("--download-map", b.map)):
-        if not name:
-            continue
-        log("fetching %s" % name)
-        try:
-            proc = await asyncio.create_subprocess_exec(prd, "--filesystem-writepath", data, kind, name)
-            code = await proc.wait()
-        except OSError as e:
-            code = str(e)
-        if code != 0:
-            log("pr-downloader failed for %s: %s" % (name, code))
-            ok = False
-            break
-    c.fetched(b, ok)
+    async with _fetch_lock:
+        if c.battle is not b:
+            return                      # left that room while waiting
+        game, map_name = b.game, b.map  # the room's map now, not when queued
+        ok = True
+        for kind, name in (("--download-game", game), ("--download-map", map_name)):
+            if not name:
+                continue
+            log("fetching %s" % name)
+            try:
+                proc = await asyncio.create_subprocess_exec(prd, "--filesystem-writepath", data, kind, name)
+                code = await proc.wait()
+            except OSError as e:
+                code = str(e)
+            if code != 0:
+                log("pr-downloader failed for %s: %s" % (name, code))
+                ok = False
+                break
+    c.fetched(b, ok, map_name)
 
 
 def usable_cpus() -> str:
