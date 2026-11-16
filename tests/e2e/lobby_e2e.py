@@ -19,7 +19,7 @@ position. Only the subset of the protocol SPADS exercises is implemented.
 
 Scenario, each step an assertion with a deadline:
    1  SPADS logs in with the configured account and password
-   2  it opens the room: title, engine 2026.07.04, BAR game, map, 16 slots
+   2  it opens the room: title, engine 2026.09.03, BAR game, map, 16 slots
    3  humans-vs-bots mode fills the bot team: N bots of the configured AI
    4  Autopilot raises every bot's bonus to the configured value
    5  the owner's !status is answered privately
@@ -62,7 +62,7 @@ BOTS = int(os.environ.get("E2E_BOTS", "8"))
 BONUS = int(os.environ.get("E2E_BONUS", "50"))
 TITLE = os.environ.get("E2E_TITLE", "rjm-bar-host e2e room")
 MAP = os.environ.get("E2E_MAP", "All That Glitters v2.2.3")
-ENGINE_VERSION = os.environ.get("BAR_ENGINE_VERSION", "2026.07.04")
+ENGINE_VERSION = os.environ.get("BAR_ENGINE_VERSION", "2026.09.03")
 SURVIVE_SECONDS = int(os.environ.get("E2E_SURVIVE_SECONDS", "120"))
 # Loading plus the pre-game force-start (AUTOPILOT_PREGAME_FORCE in run.sh) before play.
 PREGAME_ALLOWANCE = int(os.environ.get("E2E_PREGAME_ALLOWANCE", "75"))

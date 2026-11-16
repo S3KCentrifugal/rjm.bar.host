@@ -229,7 +229,7 @@ uses). Every line is recorded in `transcript.log`.
 The scenario, each step an assertion with a deadline:
 
 1. SPADS logs in with the configured account and password.
-2. It opens the room: title, engine 2026.07.04, BAR game, map, 16 slots.
+2. It opens the room: title, engine 2026.09.03, BAR game, map, 16 slots.
 3. Humans-vs-bots mode adds 8 SMRTBARb bots, owned by the autohost.
 4. Autopilot sets every bot's bonus to 50%.
 5. The owner's `!status`, sent by private message, is answered privately.

@@ -246,7 +246,7 @@ Variants are tags of the same image:
 
 | Path | Windows install equivalent | Content |
 | --- | --- | --- |
-| `/bar/engine/recoil_2026.07.04/` (`$BAR_ENGINE_DIR`) | `data\engine\recoil_2026.07.04\` | the engine, from the image (`config/engine.pin`) |
+| `/bar/engine/recoil_2026.09.03/` (`$BAR_ENGINE_DIR`) | `data\engine\recoil_2026.09.03\` | the engine, from the image (`config/engine.pin`) |
 | `$BAR_ENGINE_DIR/AI/Skirmish/` | the same | stock AIs (`BARb`, `CircuitAI`, `NullAI`) plus custom ones installed at start |
 | `/bar/data` (volume) | `data\` | game and maps, fetched by pr-downloader; persist it (~3.5 GB) |
 | `/bar/custom-ai` (volume, optional) | — | custom AI folders, `<Name>/<version>/`, installed at start |

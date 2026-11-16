@@ -29,10 +29,10 @@ ARG RUNTIME_BASE=debian:stable-slim
 # ---------------------------------------------------------------------------
 FROM ${RUNTIME_BASE} AS engine
 
-ARG ENGINE_VERSION=2026.07.04
+ARG ENGINE_VERSION=2026.09.03
 # sha256 of recoil_<version>_amd64-linux.7z. An unverified engine is the one
 # thing this image must never ship.
-ARG ENGINE_SHA256=9824c2c38124e4b90a9b5f7c4e7200c3ea6503c0bd4bff0e0ff46212ec29dcab
+ARG ENGINE_SHA256=f4323cce98b522047f38019974ac4d6ee57df4c8ed1ef3a406f7b8a99813a205
 
 RUN apt-get update \
  && apt-get install --no-install-recommends --yes ca-certificates curl 7zip \
@@ -114,7 +114,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 FROM ${RUNTIME_BASE} AS runtime
 
-ARG ENGINE_VERSION=2026.07.04
+ARG ENGINE_VERSION=2026.09.03
 
 ENV DEBIAN_FRONTEND=noninteractive
 

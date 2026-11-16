@@ -82,7 +82,7 @@ compiling engine and AI from one source tree.
 Why the official release:
 
 1. **A lobby host must match its players.** People joining a room run the
-   engine the BAR launcher installed (`data/engine/recoil_2026.07.04` today). A
+   engine the BAR launcher installed (`data/engine/recoil_2026.09.03` today). A
    self-compiled binary from the same tag is not guaranteed to be sync-identical,
    and a desync ends the game for everyone.
 2. **Simulations should measure what people play.** Same argument, weaker form.
