@@ -1988,6 +1988,50 @@ class MapVote(Harness):
         self.assertEqual(self.maps(self.say("A", "votemap")), [])
 
 
+ADVERT = "Scores and leaderboards: https://scoreboard.example"
+
+
+class Advert(Harness):
+    """BARHOST_ADVERT: said once a game is over and the next map is in, then
+    every BARHOST_ADVERT_EVERY seconds while no game runs; never in a game."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = self.client(BARHOST_MAP_ROTATION=ROTATION, BARHOST_ADVERT=ADVERT)
+
+    def ads(self, sent):
+        return [x for x in sent if x == "SAYBATTLE " + ADVERT]
+
+    def test_after_a_game_once_the_next_map_is_in_then_every_10_minutes(self):
+        MapVote.boss_on_first_map(self)
+        AiBonusVote.players(self, "A")
+        sent = MapVote.play_a_game(self)
+        self.assertEqual(MapVote.maps(self, sent), ["SAYBATTLE !map Cells"])
+        self.assertEqual(self.ads(sent), [])                     # not before the map change
+        self.feed("UPDATEBATTLEINFO 12 1 0 123 Cells 1.2")
+        self.c.fetched(self.c.battle, True)
+        self.assertEqual(len(self.ads(self.run_for(10))), 1)
+        self.assertEqual(self.ads(self.run_for(580)), [])
+        self.assertEqual(len(self.ads(self.run_for(30))), 1)     # 10 minutes on
+
+    def test_every_10_minutes_between_games_but_never_during_one(self):
+        MapVote.boss_on_first_map(self)
+        AiBonusVote.players(self, "A")
+        self.assertEqual(len(self.ads(self.run_for(610))), 1)
+        self.feed("CLIENTSTATUS %s 65" % HOST)                 # a game starts
+        self.assertEqual(self.ads(self.run_for(1300)), [])
+
+    def test_not_to_an_empty_room(self):
+        MapVote.boss_on_first_map(self)
+        self.assertEqual(self.ads(self.run_for(1300)), [])
+
+    def test_off_without_the_setting(self):
+        self.c = self.client(BARHOST_MAP_ROTATION=ROTATION)
+        MapVote.boss_on_first_map(self)
+        AiBonusVote.players(self, "A")
+        self.assertEqual(self.ads(MapVote.play_a_game(self) + self.run_for(1300)), [])
+
+
 class StartBoxes(Harness):
     """BARHOST_START_BOXES_FILE: after every map change, as boss, the map's start
     boxes are set (first of BARHOST_START_BOX_KEYS), or "0" for a map with none."""

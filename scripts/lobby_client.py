@@ -63,6 +63,9 @@ room (the client hosts by itself)
      (`!setallaibonus`) and kept for the room's later bot adds.
      With BARHOST_MAP_VOTE, a player's `votemap` calls a vote to move to the
      rotation's next map (y / n, as the bonus vote).
+     With BARHOST_ADVERT, say it once a game is over and the next map is in,
+     then every BARHOST_ADVERT_EVERY seconds while no game runs (only with
+     someone else in the room; never during a game).
      When a player rings another (`!ring <name>`), say
      how to vote an away player to spectator, at most once a minute; the room
      decides.
@@ -101,6 +104,10 @@ Settings (environment):
                           (its place is kept in BARHOST_STATE_FILE)
   BARHOST_MAP_VOTE        room mode: 1 = the players vote the rotation's next
                           map through the client (`votemap`, then y / n)
+  BARHOST_ADVERT          room mode: a line said in the room after each game,
+                          once the next map is in, and every
+                          BARHOST_ADVERT_EVERY seconds (600) while no game
+                          runs and someone else is in the room (optional)
   BARHOST_ROOM_NAME       room title, set with !rename (optional); {bonus} in it
                           is the AIs' bonus (e.g. "30", "30-50" if they differ),
                           renamed whenever it changes
@@ -526,6 +533,10 @@ class Settings:
         self.boost_until = int(g("BARHOST_BOOST_UNTIL", "7"))
         # Room mode: !promote while the player team is not full (0 = never).
         self.promote_every = int(g("BARHOST_PROMOTE_EVERY", "0"))
+        # Room mode: a line said after each game (once the next map is in) and
+        # every advert_every seconds between games, never during one.
+        self.advert = g("BARHOST_ADVERT").strip()
+        self.advert_every = int(g("BARHOST_ADVERT_EVERY", "600"))
         self.engine_version = g("BAR_ENGINE_VERSION")
         self.out_dir = Path(g("BARHOST_OUT_DIR", "/bar/out")) / "client"
         # Each game runs in its own directory here (fast storage: everything
@@ -823,6 +834,8 @@ class LobbyClient:
         self.votemap_called = {}    # the same for map votes
         self.map_hint_after = 0.0   # no map vote hint before this
         self.aibonus_remind = False  # remind how to vote the bonus once the next map is in
+        self.advert_remind = False  # room mode: BARHOST_ADVERT once the next map is in
+        self.advert_after = None    # room mode: BARHOST_ADVERT again from this time
         self.vacant = None          # room mode: the joined room was found free
         self.vacancy_check_at = None
         self.room_password_now = ""  # the private room's password, once in it
@@ -1818,6 +1831,7 @@ class LobbyClient:
         self.state = "waiting"
         self.promote_known = 0.0    # a new room: its autohost's cooldown is unknown
         self.promote_soon("the room is set up")
+        self.advert_after = self.now() + max(self.s.advert_every, 60)
         self.rotate_map()
 
     def switch_bots(self):
@@ -2880,6 +2894,7 @@ class LobbyClient:
             if self.battle:
                 self.promote_soon("the game is over")
                 self.aibonus_remind = self.s.mode == "room" and (self.s.bonus_vote or self.s.map_vote)
+                self.advert_remind = self.s.mode == "room" and bool(self.s.advert)
             if self.s.mode == "follow" and self.battle:
                 self.sync_bots()        # a !bots sent during the game
             self.next_ai_check = now    # look for a new AI release before the next game
@@ -3010,11 +3025,28 @@ class LobbyClient:
             if self.s.map_vote and self.s.map_rotation:
                 self.map_hint_after = now + BONUS_HINT_EVERY
                 self.say(self.map_hint())
+        if self.advert_due(now):
+            self.advert_remind = False
+            self.advert_after = now + max(self.s.advert_every, 60)
+            self.say(self.s.advert)
         if self.promote_due():
             self.promote_after = now + PROMOTE_RETRY    # until the autohost answers
             log("promoting the room (%d playing)" % len(self.humans()))
             self.pending.append(("SAYPRIVATE", self.battle.founder, "!promote"))
         self.flush_pending()
+
+    def advert_due(self, now) -> bool:
+        """Room mode: time to say BARHOST_ADVERT: after a game once the next
+        map is in, then every BARHOST_ADVERT_EVERY seconds. Never while a game
+        runs, a map change is pending, or nobody else is in the room."""
+        b = self.battle
+        if (self.s.mode != "room" or not self.s.advert or not b or self.state != "waiting"
+                or not self.boss or not self.synced or self.map_wanted or self.game_running()
+                or self.users.get(b.founder, 0) & 1):
+            return False
+        if not any(n not in (b.founder, self.s.login) for n in b.users):
+            return False
+        return self.advert_remind or (self.advert_after is not None and now >= self.advert_after)
 
     def promote_due(self) -> bool:
         """Room mode: time to !promote a public room whose player team is not

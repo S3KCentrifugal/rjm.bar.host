@@ -190,6 +190,9 @@ The table leaves out two cases:
      With `BARHOST_MAP_VOTE=1`, the players vote the rotation's next map the
      same way (`votemap`, then `y` / `n`): a passed vote moves the room to the
      next map of `BARHOST_MAP_ROTATION`.
+     With `BARHOST_ADVERT` set, it says that line once a game is over and the
+     next map is in, then every `BARHOST_ADVERT_EVERY` seconds (600) while no
+     game runs and someone else is in the room; never during a game.
      It never leaves a room or takes a new one while its engine
      is in a game, including after reconnecting mid-game; a `!public` /
      `!private` switch waits for a room with no game in progress, and for two
