@@ -169,8 +169,37 @@ function widget:GameProgress(frame)
 	serverFrame, serverFrameAt = frame, GetTimer()
 end
 
+-- Players in the game at start, so a later switch to spectator reads as a
+-- resignation (BAR's /resign makes the player a spectator).
+local playing = {}
+
 function widget:GameStart()
 	event("game_start", "")
+	local ok, ids = pcall(Spring.GetPlayerList)
+	if ok and type(ids) == "table" then
+		for _, id in ipairs(ids) do
+			local name, _, spec, team = Spring.GetPlayerInfo(id, false)
+			if name and not spec then playing[id] = {name = name, team = team} end
+		end
+	end
+end
+
+-- A team is out (its commander died with deathmode=com, or it resigned).
+-- Detail: the team id. Used by the scoreboard for died_at_seconds.
+function widget:TeamDied(teamID)
+	event("team_died", tostring(teamID))
+end
+
+-- A player who was playing at start became a spectator: resigned.
+-- Detail: "<team> <name>" (names have no spaces in BAR).
+function widget:PlayerChanged(playerID)
+	local p = playing[playerID]
+	if not p then return end
+	local name, _, spec = Spring.GetPlayerInfo(playerID, false)
+	if spec then
+		event("player_resigned", tostring(p.team) .. " " .. tostring(name or p.name))
+		playing[playerID] = nil
+	end
 end
 
 function widget:GameOver(winners)
